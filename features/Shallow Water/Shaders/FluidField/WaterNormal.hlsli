@@ -80,7 +80,8 @@ namespace FluidField
 
 	/**
 	 * D176: BilinearFlow with foam (z) carried from wet corners into dry ones; blending toward a dry corner's zero left a
-	 * bare strip a cell wide against every wall.
+	 * bare strip a cell wide against every wall. Faded by the blended wetness: cut where every corner is dry, the foam's edge
+	 * stepped along the cells.
 	 */
 	float4 BilinearFlowFoamToWalls(Texture2D<float4> a_flow, Texture2D<float4> a_surface, Level a_level, float2 a_cellPosition)
 	{
@@ -97,7 +98,9 @@ namespace FluidField
 		[unroll] for (int k = 0; k < 4; k++)
 			f[k]
 				.z = lerp(wetFoam, f[k].z, saturate(wet[k] * 4.0));
-		return lerp(lerp(f[0], f[1], t.x), lerp(f[2], f[3], t.x), t.y);
+		float4 result = lerp(lerp(f[0], f[1], t.x), lerp(f[2], f[3], t.x), t.y);
+		result.z *= smoothstep(0.0, 0.35, saturate(lerp(lerp(wet[0], wet[1], t.x), lerp(wet[2], wet[3], t.x), t.y)));
+		return result;
 	}
 
 	/** How much the near level (rather than the far one) decides the water here: 1 inside, 0 past its edge band. */
@@ -196,6 +199,61 @@ namespace FluidField
 		// Keeps ripple strength mid-fade; a plain lerp flattens them twice a period
 		const float2 slope = (n0.xy * (1.0 - w) + n1.xy * w) / sqrt(w * w + (1.0 - w) * (1.0 - w));
 		return normalize(float3(slope, max(lerp(n0.z, n1.z, w), 0.2)));
+	}
+
+	/** Seconds per phase of vanilla's normal layers dragged by the flow: slow, so the two-phase cross-fade never pulses. */
+	static const float LAYER_FLOW_PERIOD = 1.2;
+	/** Simulated speeds (world units/s) over which vanilla's layers go from their own scroll to the flow's. */
+	static const float2 LAYER_FLOW_SPEEDS = float2(2.0, 12.0);
+
+	/** How vanilla's normal layers follow the simulated flow at a pixel (GetLayerFlow, SampleLayer). */
+	struct LayerFlow
+	{
+		float2 world;  // Its world position, warped like vanilla's lookups
+		float2 drift;  // World units the layers drift per phase
+		float phase0;
+		float phase1;
+		float blend;   // Phase 1's weight
+		float weight;  // 0: vanilla's own scroll; 1: the flow's
+	};
+
+	/**
+	 * Vanilla scrolls its normal layers one fixed way, the water type's, so on water the simulation moves (a pond fed and
+	 * drained by falls, a river turning) they run into the shore. Where the simulated water flows they follow its flow
+	 * instead, which bends around the rocks; truly still water keeps vanilla's wind scroll.
+	 */
+	LayerFlow GetLayerFlow(float3 a_worldPosition, float2 a_warp)
+	{
+		LayerFlow f = (LayerFlow)0;
+		f.world = a_worldPosition.xy + a_warp;
+		float4 surface;
+		if (!SampleSurface(a_worldPosition, surface))
+			return f;
+		const float2 flow = SampleFlow(a_worldPosition);
+		const float speed = length(flow);
+		f.weight = saturate(surface.w) * smoothstep(LAYER_FLOW_SPEEDS.x, LAYER_FLOW_SPEEDS.y, speed);
+		const float time = SharedData::Timer / LAYER_FLOW_PERIOD;
+		f.phase0 = frac(time);
+		f.phase1 = frac(time + 0.5);
+		f.blend = abs(f.phase0 * 2.0 - 1.0);  // 1 when phase 0 restarts, hiding it
+		f.drift = flow * min(1.0, FLOW_DETAIL_MAX_DRIFT / max(speed, 1e-3)) * LAYER_FLOW_PERIOD;
+		return f;
+	}
+
+	/** One of vanilla's normal layers (raw texels), its lookup at a_uv + a_parallaxUv, dragged by the flow where it moves. */
+	float4 SampleLayer(Texture2D<float4> a_texture, SamplerState a_sampler, float2 a_uv, float2 a_parallaxUv, float a_uvPerWorld, LayerFlow a_flow)
+	{
+		const float4 vanilla = a_texture.SampleBias(a_sampler, a_uv + a_parallaxUv, SharedData::MipBias);
+		if (a_flow.weight <= 0.0)
+			return vanilla;
+		const float2 uv = a_flow.world * a_uvPerWorld + a_parallaxUv;
+		const float4 n0 = a_texture.SampleBias(a_sampler, uv - a_flow.drift * a_flow.phase0 * a_uvPerWorld, SharedData::MipBias);
+		const float4 n1 = a_texture.SampleBias(a_sampler, uv - a_flow.drift * a_flow.phase1 * a_uvPerWorld + 0.5, SharedData::MipBias);
+		const float w = a_flow.blend;
+		// Keeps ripple strength mid-fade; a plain lerp flattens them twice a period
+		const float2 slope = ((n0.xy * 2.0 - 1.0) * (1.0 - w) + (n1.xy * 2.0 - 1.0) * w) / sqrt(w * w + (1.0 - w) * (1.0 - w));
+		const float4 flowed = float4(saturate(slope * 0.5 + 0.5), lerp(n0.zw, n1.zw, w));
+		return lerp(vanilla, flowed, a_flow.weight);
 	}
 
 	/** Simulated coverage: 0 outside both levels, on dry cells and at the outer edge. */

@@ -781,6 +781,8 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	}
 
 #			if defined(FLUID_FIELD) && !defined(FLUID_FIELD_FALLS)
+	FluidField::LayerFlow fluidLayerFlow;
+#				define FLUID_LAYER(tex, smp, uv, parallaxUv, k) FluidField::SampleLayer(tex, smp, uv, parallaxUv, normalScalesRcp.k, fluidLayerFlow)
 	{
 		// Fluid Field's surface deformation reshapes vanilla's own normals (D17): every normal
 		// texture lookup below, base and flowmap, shifts with the simulated slope, and the ripples
@@ -792,6 +794,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 		input.TexCoord1.xy += fluidWarp * normalScalesRcp.x;
 		input.TexCoord1.zw += fluidWarp * normalScalesRcp.y;
 		input.TexCoord2.xy += fluidWarp * normalScalesRcp.z;
+		fluidLayerFlow = FluidField::GetLayerFlow(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, fluidWarp);
 #				if defined(FLOWMAP)
 		// Flowmap normals use their own coordinates; convert world units with the screen derivatives
 		float worldPerPixel = length(ddx(input.WPosition.xy)) + 1e-4;
@@ -799,6 +802,8 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				endif
 		normalsAmplitude.xyz *= FluidField::RippleBoost(fluidRoughness, viewDirection);
 	}
+#			else
+#				define FLUID_LAYER(tex, smp, uv, parallaxUv, k) tex.SampleBias(smp, (uv) + (parallaxUv), SharedData::MipBias)
 #			endif
 
 #			if defined(WATER_PARALLAX)
@@ -851,19 +856,19 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 			0);
 	flowmapNormal.z =
 		sqrt(1 - flowmapNormal.x * flowmapNormal.x - flowmapNormal.y * flowmapNormal.y);
-	float2 baseNormalUv = input.TexCoord1.xy;
+	float2 baseNormalParallax = 0.0;
 #				if defined(WATER_PARALLAX)
 	// Use flowmap-derived parallax offset for base normals
-	baseNormalUv += flowmapParallaxOffset.xy * normalScalesRcp.x;
+	baseNormalParallax = flowmapParallaxOffset.xy * normalScalesRcp.x;
 #				endif
-	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, baseNormalUv, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
+	float3 normals1 = FLUID_LAYER(Normals01Tex, Normals01Sampler, input.TexCoord1.xy, baseNormalParallax, x).xyz * 2.0 + float3(-1, -1, -2);
 #			endif  // End of FLOWMAP block
 
 #			if !defined(FLOWMAP)
 #				if defined(WATER_PARALLAX)
-	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy + parallaxOffset.xy * normalScalesRcp.x, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
+	float3 normals1 = FLUID_LAYER(Normals01Tex, Normals01Sampler, input.TexCoord1.xy, parallaxOffset.xy * normalScalesRcp.x, x).xyz * 2.0 + float3(-1, -1, -2);
 #				else
-	float3 normals1 = Normals01Tex.SampleBias(Normals01Sampler, input.TexCoord1.xy, SharedData::MipBias).xyz * 2.0 + float3(-1, -1, -2);
+	float3 normals1 = FLUID_LAYER(Normals01Tex, Normals01Sampler, input.TexCoord1.xy, 0.0, x).xyz * 2.0 + float3(-1, -1, -2);
 #				endif
 #			endif  // End of !FLOWMAP block
 #			if defined(FLOWMAP) && !defined(BLEND_NORMALS)
@@ -886,11 +891,11 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			elif !defined(LOD)
 
 #				if defined(WATER_PARALLAX)
-	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw + parallaxOffset.xy * normalScalesRcp.y, SharedData::MipBias).xyz * 2.0 - 1.0;
-	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy + parallaxOffset.xy * normalScalesRcp.z, SharedData::MipBias).xyz * 2.0 - 1.0;
+	float3 normals2 = FLUID_LAYER(Normals02Tex, Normals02Sampler, input.TexCoord1.zw, parallaxOffset.xy * normalScalesRcp.y, y).xyz * 2.0 - 1.0;
+	float3 normals3 = FLUID_LAYER(Normals03Tex, Normals03Sampler, input.TexCoord2.xy, parallaxOffset.xy * normalScalesRcp.z, z).xyz * 2.0 - 1.0;
 #				else
-	float3 normals2 = Normals02Tex.SampleBias(Normals02Sampler, input.TexCoord1.zw, SharedData::MipBias).xyz * 2.0 - 1.0;
-	float3 normals3 = Normals03Tex.SampleBias(Normals03Sampler, input.TexCoord2.xy, SharedData::MipBias).xyz * 2.0 - 1.0;
+	float3 normals2 = FLUID_LAYER(Normals02Tex, Normals02Sampler, input.TexCoord1.zw, 0.0, y).xyz * 2.0 - 1.0;
+	float3 normals3 = FLUID_LAYER(Normals03Tex, Normals03Sampler, input.TexCoord2.xy, 0.0, z).xyz * 2.0 - 1.0;
 #				endif
 
 	float3 blendedNormal = normalize(float3(0, 0, 1) + normalsAmplitude.x * normals1 +
