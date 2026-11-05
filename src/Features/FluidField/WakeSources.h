@@ -15,7 +15,8 @@ namespace FluidFieldSim
 	 *
 	 * High-process actors moving through water with their bound's top above it make a wake sized from the bound (fully
 	 * submerged ones make none). Feet crossing the surface push the water down by vertical speed (less when leaving).
-	 * Nearest actors first, up to the solver's limit. Main thread.
+	 * Every actor in the water is solid in the flow where its bones cross the surface (legs, torso, arms; a round body for
+	 * creatures without a humanoid skeleton). Nearest actors first, up to the solver's limit. Main thread.
 	 */
 	class WakeSources
 	{
@@ -46,7 +47,11 @@ namespace FluidFieldSim
 		/** @brief Updates between sightings after which an actor's history is dropped. */
 		static constexpr uint32_t FORGET_AFTER = 120;
 
-		std::unordered_map<uint32_t, History> history;  ///< Keyed by actor form ID
+		/** @brief Solid circles where an actor's bones cross the surface; false without a humanoid skeleton. */
+		bool AppendBody(RE::Actor& a_actor, float a_surface, const RE::NiPoint3& a_velocity, const int32_t a_gridMin[2], float a_cellSize, float a_deltaTime);
+
+		std::unordered_map<uint32_t, History> history;      ///< Keyed by actor form ID
+		std::unordered_map<uint64_t, History> boneHistory;  ///< Where each bone crossed the surface, keyed by actor and bone
 		std::vector<WaterEmitter> emitters;
 		uint32_t updateCounter = 0;
 	};
