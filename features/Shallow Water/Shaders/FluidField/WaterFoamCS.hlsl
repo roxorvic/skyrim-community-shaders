@@ -60,6 +60,8 @@ RWTexture2D<float> FoamOut : register(u0);
 
 /** Seconds for foam to fade to 1/e; a steady source settles at its rate times this. */
 static const float FOAM_LIFETIME = 3.0;
+static const float STILL_FOAM_LIFETIME = 1.0;  // Seconds on still water: no current carries it off, so it fades in place sooner
+static const float STILL_FOAM_SPEED = 60.0;    // World units/s of flow under which foam lives STILL_FOAM_LIFETIME
 /** Foam per second at full strength, per source. */
 static const float SHEAR_RATE = 0.4;
 static const float IMPACT_RATE = 1.5;
@@ -67,6 +69,19 @@ static const float WALL_RATE = 0.3;
 static const float BREAKING_RATE = 0.15;
 static const float WAKE_RATE = 1.5;
 static const float SPLASH_RATE = 6.0;
+/** An actor moving through foam pushes it aside: per second, cleared at its core (CORE of its wake radius) at full speed. */
+static const float ACTOR_FOAM_CLEAR = 8.0;
+static const float ACTOR_FOAM_CORE = 0.6;
+static const float ACTOR_FOAM_FULL_SPEED = 120.0;
+/** An actor's body (a circle per bone crossing the surface): the foam cleared out to BODY_CLEAR_REACH of it, per second. */
+static const float BODY_CLEAR_REACH = 1.4;
+static const float BODY_CLEAR = 20.0;
+/** Foam per second piled against a body's upstream side by the flow meeting it (full at BOW_FULL_SPEED units/s), where
+ *  there is foam to pile; on clear water only past BOW_FRESH_SPEED, over BOW_FRESH_RAMP units/s. */
+static const float BOW_RATE = 4.0;
+static const float BOW_FULL_SPEED = 60.0;
+static const float BOW_FRESH_SPEED = 250.0;
+static const float BOW_FRESH_RAMP = 150.0;
 /** D44: foam per second where a waterfall plunges in at full strength; enough for the pools under falls to read white. */
 static const float PLUNGE_RATE = 2.2;
 /** D49: extra foam where the falls meet the water (plunge near 1), solid to hide the falls' cut. */
@@ -117,7 +132,8 @@ float SampleFoam(float2 position)
 	// Carried along the flow, and fading
 	float2 v = CentredVelocity(logical);
 	float2 position = float2(logical) + 0.5;
-	float foam = SampleFoam(position - v * DeltaTime / CellSize) * exp(-DeltaTime / FOAM_LIFETIME);
+	const float lifetime = lerp(STILL_FOAM_LIFETIME, FOAM_LIFETIME, saturate(length(v) / STILL_FOAM_SPEED));
+	float foam = SampleFoam(position - v * DeltaTime / CellSize) * exp(-DeltaTime / lifetime);
 
 	// Shear: how sharply the flow changes across this cell (1/s), between wet neighbours only
 	float2 vE = IsWet(logical + int2(1, 0)) ? CentredVelocity(logical + int2(1, 0)) : v;
@@ -157,7 +173,8 @@ float SampleFoam(float2 position)
 	const float plunge = Plunge((float2(GridMin + logical) + 0.5) * CellSize);
 	made += PLUNGE_RATE * plunge + PLUNGE_RIM_RATE * smoothstep(0.7, 0.95, plunge);  // D49: lace around, solid at the line itself
 
-	// Actors: wakes, and splashes much more
+	// Actors: wakes, and splashes much more; the foam parts around them, the wake foaming at its edges
+	float cleared = 0.0, bodyCleared = 0.0;
 	for (uint i = 0; i < EmitterCount; i++) {
 		Emitter e = Emitters[i];
 		float2 d = position - e.Position;
@@ -165,9 +182,25 @@ float SampleFoam(float2 position)
 		// Waterfalls (radial speed) make only their own foam: their pulsing and outflow are not splashes or wakes
 		if (e.RadialSpeed > 0.0)
 			made += w * e.FoamRate;
-		else
-			made += w * (WAKE_RATE * saturate(length(e.Velocity) / 300.0) + SPLASH_RATE * saturate(-e.DepthRate / 400.0) + e.FoamRate);
+		else if (e.RadialSpeed < 0.0) {
+			// An actor's body: no foam where it stands; the flow's foam piles against its upstream side and wraps around it,
+			// leaving a clear trail behind
+			const float reach = e.Radius;
+			const float body = exp(-dot(d, d) / (reach * reach * BODY_CLEAR_REACH * BODY_CLEAR_REACH));
+			bodyCleared = max(bodyCleared, smoothstep(0.35, 0.75, body));
+			const float2 relative = v - e.Velocity;
+			const float facing = dot(d / max(length(d), 1e-3), -relative / max(length(relative), 1e-3));
+			const float rim = saturate(exp(-dot(d, d) / (reach * reach * 4.0)) - smoothstep(0.35, 0.75, body));
+			// Only foam already there piles up; clear water foams against a body only where it rushes past
+			const float piled = max(saturate(foam * 2.0), saturate((length(relative) - BOW_FRESH_SPEED) / BOW_FRESH_RAMP));
+			made += BOW_RATE * rim * saturate(facing) * saturate(length(relative) / BOW_FULL_SPEED) * piled;
+		} else {
+			const float core = exp(-dot(d, d) / (e.Radius * e.Radius * ACTOR_FOAM_CORE * ACTOR_FOAM_CORE));
+			cleared = max(cleared, core * saturate(length(e.Velocity) / ACTOR_FOAM_FULL_SPEED));
+			made += saturate(w - core) * WAKE_RATE * saturate(length(e.Velocity) / 300.0) + w * (SPLASH_RATE * saturate(-e.DepthRate / 400.0) + e.FoamRate);
+		}
 	}
+	foam *= exp(-(ACTOR_FOAM_CLEAR * cleared + BODY_CLEAR * bodyCleared) * DeltaTime);
 
 	foam = min(foam + made * FoamStrength * DeltaTime, FoamMax);
 	// Without a far level, fade foam at the border so none piles up where water eases back to vanilla; with one, the water

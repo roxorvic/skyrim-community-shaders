@@ -14,9 +14,10 @@ namespace FluidFieldSim
 		constexpr std::uint32_t GROUP_SIZE = 8;  // FLUIDFIELD_GROUP_SIZE in Common.hlsli
 		constexpr std::uint32_t MAX_SRVS = 4;    // t0..t3; the map sits at t4, fine detail at t5, the flowmap at t6
 		constexpr std::uint32_t MAP_SLOT = 4;
-		constexpr std::uint32_t BOUND_SRVS = 11;  // Slots t0..t10, up to the lips' map (D170)
-		constexpr std::uint32_t LIP_SLOT = 10;    // D170: the falls' lips, read by the forces and output passes
-		constexpr std::uint32_t FOAM_SLOT = 7;    // The foam pass reads last step's foam here
+		constexpr std::uint32_t BOUND_SRVS = 12;         // Slots t0..t11, up to the falls' currents
+		constexpr std::uint32_t LIP_SLOT = 10;           // D170: the falls' lips, read by the forces and output passes
+		constexpr std::uint32_t FALL_CURRENT_SLOT = 11;  // The falls' currents, read by the forces pass
+		constexpr std::uint32_t FOAM_SLOT = 7;           // The foam pass reads last step's foam here
 		constexpr std::uint32_t MAX_UAVS = 3;
 
 		ID3D11ShaderResourceView* const NULL_SRVS[BOUND_SRVS] = {};
@@ -100,6 +101,13 @@ namespace FluidFieldSim
 		};
 		winrt::check_hresult(device->CreateShaderResourceView(emitterBuffer.get(), &emitterSRVDesc, emitterSRV.put()));
 		name(emitterSRV.get(), "FluidField::WaterEmitters SRV");
+		emitterDesc.ByteWidth = sizeof(WaterFallCurrent) * MAX_FALL_CURRENTS;
+		emitterDesc.StructureByteStride = sizeof(WaterFallCurrent);
+		winrt::check_hresult(device->CreateBuffer(&emitterDesc, nullptr, fallCurrentBuffer.put()));
+		name(fallCurrentBuffer.get(), "FluidField::WaterFallCurrents");
+		emitterSRVDesc.Buffer.NumElements = MAX_FALL_CURRENTS;
+		winrt::check_hresult(device->CreateShaderResourceView(fallCurrentBuffer.get(), &emitterSRVDesc, fallCurrentSRV.put()));
+		name(fallCurrentSRV.get(), "FluidField::WaterFallCurrents SRV");
 
 		resolution = a_resolution;
 		mapResolution = a_mapResolution;
@@ -154,6 +162,8 @@ namespace FluidFieldSim
 		waterConstants = nullptr;
 		emitterBuffer = nullptr;
 		emitterSRV = nullptr;
+		fallCurrentBuffer = nullptr;
+		fallCurrentSRV = nullptr;
 		resolution = 0;
 		mapResolution = 0;
 		obstacleResolution = 0;
@@ -211,6 +221,7 @@ namespace FluidFieldSim
 	void ShallowWaterSolver::BeginStep(ID3D11DeviceContext* context, const StepParams& grid, const WaterParams& params, std::span<const WaterEmitter> emitters)
 	{
 		const auto emitterCount = static_cast<std::uint32_t>(std::min<std::size_t>(emitters.size(), MAX_EMITTERS));
+		const auto fallCurrentCount = static_cast<std::uint32_t>(std::min<std::size_t>(params.fallCurrents.size(), MAX_FALL_CURRENTS));
 		const float dt = grid.deltaTime;
 
 		const GridConstants gridData{
@@ -256,7 +267,9 @@ namespace FluidFieldSim
 			.plungeInverseCell = params.plungeInverseCell,
 			.plungeSize = params.plungeMap ? params.plungeSize : 0u,
 			.lipMapOn = params.plungeMap && params.lipMap ? 1u : 0u,
-			.lipPad = {}
+			.fallCurrentCount = fallCurrentCount,
+			.fallReach = params.fallReach,
+			.fallMix = params.fallMix
 		};
 		lipSRV = params.plungeMap ? params.lipMap : nullptr;
 		seedFoamSRV = params.seedFoam;
@@ -265,6 +278,8 @@ namespace FluidFieldSim
 
 		if (emitterCount > 0)
 			UpdateBuffer(context, emitterBuffer.get(), emitters.data(), sizeof(WaterEmitter) * emitterCount);
+		if (fallCurrentCount > 0)
+			UpdateBuffer(context, fallCurrentBuffer.get(), params.fallCurrents.data(), sizeof(WaterFallCurrent) * fallCurrentCount);
 
 		prevGridMin[0] = grid.gridMin[0];
 		prevGridMin[1] = grid.gridMin[1];
@@ -280,6 +295,8 @@ namespace FluidFieldSim
 		context->CSSetShaderResources(MAP_SLOT, 3, mapSRVs);
 		ID3D11ShaderResourceView* lip = lipSRV;
 		context->CSSetShaderResources(LIP_SLOT, 1, &lip);
+		ID3D11ShaderResourceView* fallCurrents = fallCurrentSRV.get();
+		context->CSSetShaderResources(FALL_CURRENT_SLOT, 1, &fallCurrents);
 	}
 
 	void ShallowWaterSolver::EndStep(ID3D11DeviceContext* context)

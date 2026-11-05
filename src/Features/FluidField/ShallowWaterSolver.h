@@ -24,6 +24,18 @@ namespace FluidFieldSim
 	};
 	static_assert(sizeof(WaterEmitter) == 32);
 
+	/** @brief A falls' landing (water flows out of it) or brink (into it), matching `FallCurrent` in WaterForcesCS.hlsl. */
+	struct WaterFallCurrent
+	{
+		float position[2];   ///< World units
+		float direction[2];  ///< The falls' horizontal direction (unit length), or zero
+		float halfWidth;     ///< World units
+		float speed;         ///< World units per second at its edge
+		float level;         ///< Its water's surface height: other water is left alone
+		float kind;          ///< 1 a landing, -1 a brink
+	};
+	static_assert(sizeof(WaterFallCurrent) == 32);
+
 	/** @brief Physical and blending parameters, matching `WaterCB` in WaterCommon.hlsli. */
 	struct WaterParams
 	{
@@ -56,6 +68,10 @@ namespace FluidFieldSim
 		std::uint32_t plungeSize = 0;
 		/// D170: the falls' lips on the plunge map's lattice (FallSites::BuildLipMap): pull velocity toward a lip (xy), strength (z)
 		ID3D11ShaderResourceView* lipMap = nullptr;
+		/// The falls' landings and brinks: with the river, they set the current the water rests at, within fallReach of them
+		std::span<const WaterFallCurrent> fallCurrents;
+		float fallReach = 4096.0f;  ///< World units from a falls at which its current has faded out
+		float fallMix = 0.7f;       ///< Share of the rest current the falls take at a falls (the flowmap keeps the rest)
 	};
 
 	/**
@@ -68,7 +84,8 @@ namespace FluidFieldSim
 	{
 	public:
 		static constexpr std::uint32_t MAX_EMITTERS = 96;  // Wakes, splashes and the falls' plunges (D35)
-		static constexpr float NO_WATER = -1.0e8f;         ///< Map surface value meaning "no vanilla water here"
+		static constexpr std::uint32_t MAX_FALL_CURRENTS = 32;
+		static constexpr float NO_WATER = -1.0e8f;  ///< Map surface value meaning "no vanilla water here"
 
 		using NameFn = WindSolver::NameFn;
 		using CompileFn = WindSolver::CompileFn;
@@ -180,7 +197,9 @@ namespace FluidFieldSim
 			float plungeInverseCell;
 			std::uint32_t plungeSize;
 			std::uint32_t lipMapOn;
-			float lipPad[3];
+			std::uint32_t fallCurrentCount;
+			float fallReach;
+			float fallMix;
 		};
 		static_assert(sizeof(WaterConstants) == 144);
 
@@ -226,6 +245,8 @@ namespace FluidFieldSim
 		winrt::com_ptr<ID3D11Buffer> waterConstants;
 		winrt::com_ptr<ID3D11Buffer> emitterBuffer;
 		winrt::com_ptr<ID3D11ShaderResourceView> emitterSRV;
+		winrt::com_ptr<ID3D11Buffer> fallCurrentBuffer;
+		winrt::com_ptr<ID3D11ShaderResourceView> fallCurrentSRV;
 
 		winrt::com_ptr<ID3D11ComputeShader> forcesCS;
 		winrt::com_ptr<ID3D11ComputeShader> advectCS;

@@ -11,7 +11,7 @@ struct Emitter
 	float Radius;       // Texels, Gaussian falloff
 	float DepthRate;    // World units per second added to depth at the centre
 	float2 Velocity;    // Velocity the water near the emitter is pulled toward
-	float RadialSpeed;  // Speed the water spreads out from the centre, on top of Velocity (waterfalls, D22)
+	float RadialSpeed;  // Speed the water spreads out from the centre, on top of Velocity (waterfalls, D22); negative marks an actor's body
 	float FoamRate;     // Foam made per second at the centre (read by the foam pass)
 };
 
@@ -20,11 +20,107 @@ Texture2D<float2> VelocityIn : register(t1);
 Texture2D<float2> CellMapIn : register(t2);
 StructuredBuffer<Emitter> Emitters : register(t3);
 
+// A falls' landing (water flows out of it) or brink (water flows into it)
+struct FallCurrent
+{
+	float2 Position;   // World units
+	float2 Direction;  // The falls' horizontal direction (unit length), or zero
+	float HalfWidth;   // World units
+	float Speed;       // World units per second at its edge
+	float Level;       // Its water's surface height
+	float Kind;        // 1 a landing, -1 a brink
+};
+StructuredBuffer<FallCurrent> FallCurrents : register(t11);
+// Water whose surface is further than this from a falls' water level is another pool or river: left alone
+static const float FALL_LEVEL_MATCH = 64.0;
+// Under this river speed (world units/s) the water has no flowmap current: the falls drive all of it, unfaded
+static const float NO_RIVER_SPEED = 1.0;
+// Slowest the falls drive such water anywhere (world units/s): far from them it still visibly flows
+static const float MIN_FALLS_SPEED = 30.0;
+// The water stands this much higher at a landing and lower at a brink (world units), within FALL_LEVEL_REACH half-widths
+static const float FALL_LEVEL_STEP = 2.0;
+static const float FALL_LEVEL_REACH = 2.0;
+// Within FALL_CHURN_REACH half-widths of a falls, waves and wakes die this much faster per second: a little at a
+// landing (its churn), more at a brink (the water speeding over it carries them off)
+static const float FALL_CHURN_REACH = 3.0;
+static const float LANDING_DAMPING = 1.0;
+static const float BRINK_DAMPING = 3.0;
+// The water speeds up toward a brink: this much faster at its edge, easing off over BRINK_RUSH_REACH half-widths
+static const float BRINK_RUSH = 1.0;
+static const float BRINK_RUSH_REACH = 1.5;
+// In a river the falls act within this many half-widths, their outward push and pull at this share: some turbulence where
+// they meet it, not a counter-current upstream
+static const float RIVER_FALL_REACH = 3.0;
+static const float RIVER_RADIAL_SHARE = 0.4;
+// Per second the falls' own push (D22 emitters) pulls the water's velocity toward it; their current mostly does the work
+static const float FALL_PUSH_PULL = 1.5;
+// Per second the water inside an actor's body takes its velocity: solid, so the flow parts around it
+static const float BODY_PULL = 30.0;
+
 static const float BED_CHANGE_THRESHOLD = 2.0;  // World units
+// Still water calms faster: a current carries waves and wakes off downstream, but in a pond they stay where they were made
+static const float STILL_SPEED = 60.0;       // World units/s of current under which the water counts as still
+static const float STILL_DAMPING = 1.5;      // Extra per-second damping of waves on still water
+static const float STILL_LEVEL_RELAX = 2.0;  // Extra per-second pull of its surface back to rest
 
 RWTexture2D<float> DepthOut : register(u0);
 RWTexture2D<float2> VelocityOut : register(u1);
 RWTexture2D<float2> CellMapOut : register(u2);
+
+/**
+ * @brief The falls' current mixed into the river's. Water without a river current (a pond, or a flowmap-less water type)
+ * takes it all, over all of it, unfaded: out of each landing and into each brink like sources and sinks in potential flow
+ * (the sim's walls bend it around the rocks), plus each falls' own direction across its width, with its level a little
+ * higher at a landing and lower at a brink. In a river, within RIVER_FALL_REACH half-widths: a landing's jet takes FallMix
+ * of the current along its width, a weaker push and pull adds some turbulence, and the river speeds up toward a brink.
+ * Nothing reaches past FallReach. a_churn is the extra damping near the falls.
+ */
+float2 MixFallCurrents(float2 a_worldPos, float a_surface, float2 a_river, out float a_level, out float a_churn)
+{
+	float2 falls = 0.0;  // Ponds: all of it. Rivers: the jets, which take FallMix of the current where they run
+	float2 extra = 0.0;  // Rivers: the local push, pull and rush, on top of the river
+	float nearest = 0.0;
+	a_level = 0.0;
+	a_churn = 0.0;
+	const bool noRiver = length(a_river) < NO_RIVER_SPEED;
+	for (uint i = 0; i < FallCurrentCount; i++) {
+		const FallCurrent c = FallCurrents[i];
+		if (abs(a_surface - c.Level) > FALL_LEVEL_MATCH)
+			continue;
+		const float2 d = a_worldPos - c.Position;
+		const float r = length(d);
+		const float reach = 1.0 - smoothstep(0.5 * FallReach, FallReach, r);
+		// A river already knows where its water goes: the falls only act right around them, or they push it back upstream
+		const float local = 1.0 - smoothstep(c.HalfWidth, RIVER_FALL_REACH * c.HalfWidth, r);
+		const float fade = noRiver ? 1.0 : min(reach, local);
+		if (fade <= 0.0)
+			continue;
+		if (noRiver)
+			a_level += c.Kind * FALL_LEVEL_STEP * (1.0 - smoothstep(0.0, FALL_LEVEL_REACH * c.HalfWidth, r));
+		const float near = 1.0 - smoothstep(c.HalfWidth, FALL_CHURN_REACH * c.HalfWidth, r);
+		a_churn = max(a_churn, near * (c.Kind > 0.0 ? LANDING_DAMPING : BRINK_DAMPING));
+		const float rushWeight = exp(-r * r / max(BRINK_RUSH_REACH * BRINK_RUSH_REACH * c.HalfWidth * c.HalfWidth, 1.0));
+		const float rush = c.Kind < 0.0 ? 1.0 + BRINK_RUSH * rushWeight : 1.0;
+		const float2 radial = d / max(r, 1e-3) * c.Kind * c.Speed * rush * c.HalfWidth / max(r, c.HalfWidth) * (noRiver ? 1.0 : RIVER_RADIAL_SHARE);
+		const float jet = exp(-r * r / max(c.HalfWidth * c.HalfWidth, 1.0));
+		const float2 along = c.Direction * c.Speed * jet;
+		if (noRiver) {
+			falls += (radial + along) * fade;
+			nearest = max(nearest, fade);
+		} else {
+			// Toward a river's brink its own current speeds up
+			const float2 riverRush = c.Kind < 0.0 ? a_river * BRINK_RUSH * rushWeight : 0.0;
+			falls += along * fade;
+			extra += (radial + riverRush) * fade;
+			nearest = max(nearest, jet * fade);
+		}
+	}
+	if (noRiver) {
+		const float speed = length(falls);
+		return nearest > 0.0 && speed > 1e-3 ? falls * max(speed, MIN_FALLS_SPEED) / speed : falls;
+	}
+	return a_river * (1.0 - FallMix * nearest) + FallMix * falls + extra;
+}
 
 /** @brief Cell-centred velocity from the staggered faces (u on the west face, v on the south face). */
 float2 CentredVelocity(int2 logical)
@@ -117,6 +213,11 @@ float2 StirVelocity(float2 worldPos)
 	bool vanillaWet = vanillaDepth > WetThreshold;
 	// Rivers follow the flowmap; lakes and the sea (water types without the flowmap) stay still
 	float2 restVelocity = vanillaWet ? (FlowmapEnabled != 0 ? SampleRiverFlow(worldPos) * SampleRiverFlowScale(worldPos) : Current) : 0.0;
+	// Eddies are stirred in by the river's own speed: a pond the falls drive would churn all over
+	const float riverSpeed = length(restVelocity);
+	float fallLevel = 0.0, fallChurn = 0.0;
+	if (vanillaWet)
+		restVelocity = MixFallCurrents(worldPos, map.y, restVelocity, fallLevel, fallChurn);
 
 	// Cells that scrolled in, and every cell after a reset, start as calm vanilla water
 	bool kept = HistoryValid != 0 && all(cell >= PrevGridMin) && all(cell < PrevGridMin + int(GridRes));
@@ -144,9 +245,14 @@ float2 StirVelocity(float2 worldPos)
 			float2 d = position - e.Position;
 			float w = exp(-dot(d, d) / (e.Radius * e.Radius));
 			// Outward from the centre, strongest around its edge (a plunge spreading out)
+			if (e.RadialSpeed < 0.0) {
+				velocity = lerp(velocity, e.Velocity, smoothstep(0.3, 0.8, w) * saturate(DeltaTime * BODY_PULL));
+				continue;
+			}
 			float distance = length(d);
 			float2 radial = e.RadialSpeed > 0.0 ? (d / max(distance, 1e-3)) * e.RadialSpeed * saturate(distance / max(e.Radius * 0.5, 1e-3)) : 0.0;
-			velocity = lerp(velocity, e.Velocity + radial, w * saturate(DeltaTime * 8.0));
+			// Wakes and splashes take hold fast; the falls' push gently, or it erases every wake near a landing
+			velocity = lerp(velocity, e.Velocity + radial, w * saturate(DeltaTime * (e.RadialSpeed > 0.0 ? FALL_PUSH_PULL : 8.0)));
 			depth += e.DepthRate * w * DeltaTime;
 		}
 	}
@@ -160,7 +266,6 @@ float2 StirVelocity(float2 worldPos)
 		if (!besideObstacle)
 			velocity += ConfinementForce(logical) * DeltaTime;
 		// Stir moving water in proportion to the river's speed
-		float riverSpeed = length(restVelocity);
 		if (riverSpeed > 1.0)
 			velocity += StirVelocity(worldPos) * riverSpeed * STIR_STRENGTH * Vorticity * DeltaTime;
 		// Not a per-cell random nudge: that rings shores at the grid frequency
@@ -169,7 +274,7 @@ float2 StirVelocity(float2 worldPos)
 	velocity = lerp(velocity, restVelocity, saturate(CurrentRelax * DeltaTime));
 	// D170: drawdown: water is pulled toward a fall's lip, harder nearer it, and its rest level drops toward the brink (a
 	// free overfall passes critical depth, about two thirds of the upstream depth, just before the edge)
-	float levelDepth = vanillaDepth;
+	float levelDepth = max(vanillaDepth + fallLevel, 0.0);
 	if (depth > WetThreshold) {
 		const float4 lip = LipAt(worldPos);
 		if (lip.z > 1e-3) {
@@ -179,10 +284,11 @@ float2 StirVelocity(float2 worldPos)
 			const float own = max(dot(restVelocity, way), 0.0);
 			const float2 target = way * max(lerp(own, speed, saturate(lip.z)), dot(velocity, way));
 			velocity = lerp(velocity, target, sqrt(saturate(lip.z)) * saturate(LIP_PULL * DeltaTime));
-			levelDepth = vanillaDepth - min(vanillaDepth * LIP_DRAWDOWN, LIP_DRAWDOWN_MOST) * saturate(lip.z);
+			levelDepth -= min(vanillaDepth * LIP_DRAWDOWN, LIP_DRAWDOWN_MOST) * saturate(lip.z);
 		}
 	}
-	depth = lerp(depth, levelDepth, saturate(LevelRelax * DeltaTime));
+	const float still = 1.0 - saturate(length(restVelocity) / STILL_SPEED);
+	depth = lerp(depth, levelDepth, saturate((LevelRelax + STILL_LEVEL_RELAX * still + fallChurn) * DeltaTime));
 
 	// Absorbing border: a per-second pull to vanilla growing quadratically toward the edge, so waves fade instead of bouncing
 	float edgeWeight = EdgeWeight(logical);
@@ -192,5 +298,5 @@ float2 StirVelocity(float2 worldPos)
 
 	DepthOut[id] = max(depth, 0.0);
 	// Only the deviation from the river decays, so damping calms waves, not the current
-	VelocityOut[id] = restVelocity + (velocity - restVelocity) * VelocityDecay;
+	VelocityOut[id] = restVelocity + (velocity - restVelocity) * VelocityDecay * exp(-(STILL_DAMPING * still + fallChurn) * DeltaTime);
 }

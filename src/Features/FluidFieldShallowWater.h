@@ -7,6 +7,7 @@
 #include "FluidField/VanillaFoam.h"
 #include "FluidField/WakeSources.h"
 #include "FluidField/WaterMapBuilder.h"
+#include "FluidField/WaterfallSources.h"
 
 /**
  * @brief Shallow Water: a shallow-water simulation on the rivers around the player, shown on vanilla's water.
@@ -50,6 +51,9 @@ struct FluidFieldShallowWater : Feature
 		bool ReplaceVanillaFoam = true;      ///< Hide vanilla's placed foam, splash and spray effects where the water is simulated
 		float WakeStrength = 1.0f;           ///< How strongly the player drags the water along
 		float SplashStrength = 1.0f;         ///< How hard actors entering or leaving the water push it
+		float FallPush = 1.0f;               ///< How hard waterfalls landing in the water push and foam it (D22)
+		float FallReach = 4096.0f;           ///< World units from a falls at which its current has faded out
+		float FallMix = 0.7f;                ///< Share of the water's current the falls take at a falls; the flowmap keeps the rest
 		uint WaterResolution = 1024;         ///< Near water texels per side
 		float WaterSize = 8818.0f;           ///< Near water width in world units (full detail: obstacles, wakes)
 		bool FarWater = true;                ///< A coarser water level around the near one, so rivers stay simulated further out
@@ -158,8 +162,10 @@ private:
 	/** @brief Near water world units per texel. */
 	float GetWaterCellSize() const { return settings.WaterSize / static_cast<float>(settings.WaterResolution); }
 	FluidFieldSim::WakeSources wakeSources;
+	FluidFieldSim::WaterfallSources fallSources;  ///< D22: every loaded falls landing in the water pushes it, cached site or not
 	FluidFieldSim::VanillaFoam vanillaFoam;
-	std::vector<FluidFieldSim::WaterEmitter> levelEmitters;  ///< This level's emitters: wakes and waterfalls
+	std::vector<FluidFieldSim::WaterFallCurrent> fallCurrents;  ///< This step's landings and brinks
+	std::vector<FluidFieldSim::WaterEmitter> levelEmitters;     ///< This level's emitters: wakes and waterfalls
 
 	/** @brief Creates a level's GPU resources and shaders as needed; false if it cannot run. */
 	bool EnsureWater(WaterLevel& a_level, uint32_t a_resolution, float a_size, bool a_obstacles);

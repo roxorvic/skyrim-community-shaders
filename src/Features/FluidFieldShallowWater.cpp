@@ -30,6 +30,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ReplaceVanillaFoam,
 	WakeStrength,
 	SplashStrength,
+	FallPush,
+	FallReach,
+	FallMix,
 	WaterResolution,
 	WaterSize,
 	FarWater,
@@ -81,6 +84,12 @@ void FluidFieldShallowWater::DrawSettings()
 	tooltip(T(TKEY("wake_strength_tooltip"), "How strongly actors push the water when moving through it."));
 	ImGui::SliderFloat(T(TKEY("splash_strength"), "Splash Strength"), &settings.SplashStrength, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	tooltip(T(TKEY("splash_strength_tooltip"), "How hard jumping or falling into the water, or climbing out of it, pushes the water."));
+	ImGui::SliderFloat(T(TKEY("fall_push"), "Falls Push"), &settings.FallPush, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fall_push_tooltip"), "How hard waterfalls landing in the water push it along and foam it."));
+	ImGui::SliderFloat(T(TKEY("fall_reach"), "Falls Reach"), &settings.FallReach, 256.0f, 8192.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fall_reach_tooltip"), "The farthest a waterfall's current reaches. In rivers it only acts close around the falls; water without a river current takes it all over."));
+	ImGui::SliderFloat(T(TKEY("fall_mix"), "Falls Current Mix"), &settings.FallMix, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fall_mix_tooltip"), "How much of the water's current comes from the waterfalls near them, the rest from the river's flowmap."));
 
 	if (ImGui::CollapsingHeader(T(TKEY("quality"), "Quality"))) {
 		ImGui::PushID("QualitySection");
@@ -135,6 +144,9 @@ FluidFieldShallowWater::Settings FluidFieldShallowWater::Sanitize(Settings a_set
 	a_settings.SurfaceNormalStrength = std::isfinite(a_settings.SurfaceNormalStrength) ? std::clamp(a_settings.SurfaceNormalStrength, 0.0f, 8.0f) : defaults.SurfaceNormalStrength;
 	a_settings.WaveDamping = std::isfinite(a_settings.WaveDamping) ? std::clamp(a_settings.WaveDamping, 0.0f, 5.0f) : defaults.WaveDamping;
 	a_settings.SplashStrength = std::isfinite(a_settings.SplashStrength) ? std::clamp(a_settings.SplashStrength, 0.0f, 3.0f) : defaults.SplashStrength;
+	a_settings.FallPush = std::isfinite(a_settings.FallPush) ? std::clamp(a_settings.FallPush, 0.0f, 3.0f) : defaults.FallPush;
+	a_settings.FallReach = std::isfinite(a_settings.FallReach) ? std::clamp(a_settings.FallReach, 256.0f, 8192.0f) : defaults.FallReach;
+	a_settings.FallMix = std::isfinite(a_settings.FallMix) ? std::clamp(a_settings.FallMix, 0.0f, 1.0f) : defaults.FallMix;
 	a_settings.RiverSpeed = std::isfinite(a_settings.RiverSpeed) ? std::clamp(a_settings.RiverSpeed, 0.0f, 400.0f) : defaults.RiverSpeed;
 	a_settings.CurrentPull = std::isfinite(a_settings.CurrentPull) ? std::clamp(a_settings.CurrentPull, 0.0f, 2.0f) : defaults.CurrentPull;
 	a_settings.Turbulence = std::isfinite(a_settings.Turbulence) ? std::clamp(a_settings.Turbulence, 0.0f, 5.0f) : defaults.Turbulence;
@@ -188,6 +200,7 @@ void FluidFieldShallowWater::Release()
 		level->resourceFailed = false;
 	}
 	wakeSources.Clear();
+	fallSources.Clear();
 	vanillaFoam.RestoreAll();
 	waterShaderData = {};
 	if (bedRays.GetSampleCount() > 0)
@@ -280,6 +293,11 @@ void FluidFieldShallowWater::Prepass()
 		waterShaderData.FarEnabled = 0;
 	}
 	BindWaterOutputs(context);
+	{
+		// D22: the falls over the whole simulated area, far level included
+		const float simulated = 0.5f * (settings.FarWater ? settings.WaterSize * settings.FarWaterScale : settings.WaterSize);
+		fallSources.Update(water, playerPos.x, playerPos.y, simulated);
+	}
 	if (settings.ReplaceVanillaFoam) {
 		// The simulated area, less the fade toward vanilla at its edge
 		const float simulated = 0.5f * (settings.FarWater ? settings.WaterSize * settings.FarWaterScale : settings.WaterSize) * 0.85f;
@@ -527,6 +545,8 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 	// D35: the falls' plunges push both levels, after the wakes
 	const auto& waterfalls = globals::features::fluidFieldWaterfalls;
 	waterfalls.AppendWaterEmitters(levelEmitters, a_gridMin, a_cellSize, a_resolution, FluidFieldSim::ShallowWaterSolver::MAX_EMITTERS, a_near);
+	// D22: then every loaded falls where it lands, cached site or vanilla
+	fallSources.AppendEmitters(levelEmitters, a_gridMin, a_cellSize, a_resolution, settings.FallPush, FluidFieldSim::ShallowWaterSolver::MAX_EMITTERS, a_near);
 	const std::span<const FluidFieldSim::WaterEmitter> emitters = levelEmitters;
 
 	FluidFieldSim::WaterParams params;
@@ -535,6 +555,12 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 	params.currentRelax = settings.CurrentPull;
 	params.vorticity = settings.Turbulence;
 	params.foamStrength = settings.FoamStrength;
+	// Out of the falls' landings and into their brinks
+	fallCurrents.clear();
+	fallSources.AppendCurrents(fallCurrents, settings.FallPush);
+	params.fallCurrents = fallCurrents;
+	params.fallReach = settings.FallReach;
+	params.fallMix = settings.FallMix;
 	if (!a_near) {
 		// Far cells are FarWaterScale times wider, so sources cover more water: less foam, held less
 		params.foamStrength *= FAR_FOAM_SCALE;

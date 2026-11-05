@@ -42,7 +42,9 @@ cbuffer WaterCB : register(b1)
 	float PlungeInverseCell;  // Its texels per world unit
 	uint PlungeSize;          // Its texels per side (0: none)
 	uint LipMapOn;            // D170: LipMap is bound, on the plunge map's lattice
-	float3 LipPad;
+	uint FallCurrentCount;    // Entries in FallCurrents (WaterForcesCS.hlsl)
+	float FallReach;          // World units from a falls at which its current has faded out
+	float FallMix;            // Share of the rest current the falls take at a falls; the flowmap keeps the rest
 };
 
 static const float NO_WATER = -1.0e8;
