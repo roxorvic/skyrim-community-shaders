@@ -778,9 +778,31 @@ namespace FluidFieldSim
 			const auto& cacheMembers = unifiedCaches[unifiedIndex].members;
 			std::vector<RE::BSGeometry*> unifiedLit;
 			RE::NiNode* unifiedRoot = nullptr;
+			// The sheet replaces its members and the effects round them; falls it doesn't cover keep their whole vanilla look,
+			// mist and splashes included (each effect goes with its nearest falling water, as it clustered)
+			const auto cached = [&](uint32_t a_member) { return std::ranges::find(cacheMembers, refs[a_member].formID) != cacheMembers.end(); };
 			for (const uint32_t member : site.members) {
-				unifiedSiteRefs.insert(refs[member].formID);
-				if (refs[member].cls != FxClass::Body || std::ranges::find(cacheMembers, refs[member].formID) == cacheMembers.end())
+				if (refs[member].cls == FxClass::Body) {
+					if (cached(member))
+						unifiedSiteRefs.insert(refs[member].formID);
+					continue;
+				}
+				float nearestGap = FLT_MAX;
+				bool nearestCached = false;
+				for (const uint32_t body : site.members) {
+					if (refs[body].cls != FxClass::Body)
+						continue;
+					const float gap = BoxGap(refs[member].min, refs[member].max, refs[body].min, refs[body].max);
+					if (gap < nearestGap) {
+						nearestGap = gap;
+						nearestCached = cached(body);
+					}
+				}
+				if (nearestCached)
+					unifiedSiteRefs.insert(refs[member].formID);
+			}
+			for (const uint32_t member : site.members) {
+				if (refs[member].cls != FxClass::Body || !cached(member))
 					continue;
 				auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(refs[member].formID);
 				auto* root = ref ? ref->Get3D() : nullptr;

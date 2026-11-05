@@ -227,7 +227,7 @@ namespace FluidFieldSim
 		/** @brief D91: app-culls the current sheets and forgets the ones gone. */
 		void ApplyLitHidden();
 		bool takeover = false;                           ///< SetTakeover
-		std::unordered_set<RE::FormID> unifiedSiteRefs;  ///< Every reference of a cached site, hidden on takeover
+		std::unordered_set<RE::FormID> unifiedSiteRefs;  ///< The cached members and the effects nearest them, hidden on takeover
 		/** @brief D56: tests queued sheets' vertices against the rock, a few ms a frame. */
 		void ClipStep();
 		/** @brief D106: each sheet's depth behind its vertices, from its bake, once its cuts are done. */
