@@ -2,7 +2,6 @@
 
 #include "../I18n/I18n.h"
 #include "FluidField/Field.h"
-#include "FluidFieldWaterfalls.h"
 #include "Menu.h"
 #include "Profiler.h"
 #include "State.h"
@@ -542,10 +541,7 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 			{ .wakeStrength = settings.WakeStrength, .splashStrength = settings.SplashStrength });
 		levelEmitters.assign(wakes.begin(), wakes.end());
 	}
-	// D35: the falls' plunges push both levels, after the wakes
-	const auto& waterfalls = globals::features::fluidFieldWaterfalls;
-	waterfalls.AppendWaterEmitters(levelEmitters, a_gridMin, a_cellSize, a_resolution, FluidFieldSim::ShallowWaterSolver::MAX_EMITTERS, a_near);
-	// D22: then every loaded falls where it lands, cached site or vanilla
+	// D22: every loaded falls pushes and foams the water where it lands, after the wakes
 	fallSources.AppendEmitters(levelEmitters, a_gridMin, a_cellSize, a_resolution, settings.FallPush, FluidFieldSim::ShallowWaterSolver::MAX_EMITTERS, a_near);
 	const std::span<const FluidFieldSim::WaterEmitter> emitters = levelEmitters;
 
@@ -565,15 +561,6 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 		// Far cells are FarWaterScale times wider, so sources cover more water: less foam, held less
 		params.foamStrength *= FAR_FOAM_SCALE;
 		params.foamMax = FAR_FOAM_MAX;
-	}
-	// D44: the plunges foam the water along the falls' whole width
-	if (FluidFieldWaterfalls::PlungeMaps plunges; waterfalls.GetPlungeMaps(plunges)) {
-		params.plungeMap = plunges.plunge;
-		params.plungeOrigin[0] = plunges.origin[0];
-		params.plungeOrigin[1] = plunges.origin[1];
-		params.plungeInverseCell = plunges.inverseCell;
-		params.plungeSize = plunges.size;
-		params.lipMap = plunges.lip;  // D170: on the plunge map's lattice
 	}
 	// Cells entering the near level take the far level's foam, so it doesn't reset as the player approaches
 	if (a_near && settings.FarWater && farWater.solver.HasMap() && waterShaderData.FarEnabled) {

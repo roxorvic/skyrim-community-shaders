@@ -15,7 +15,6 @@ namespace FluidFieldSim
 		constexpr std::uint32_t MAX_SRVS = 4;    // t0..t3; the map sits at t4, fine detail at t5, the flowmap at t6
 		constexpr std::uint32_t MAP_SLOT = 4;
 		constexpr std::uint32_t BOUND_SRVS = 12;         // Slots t0..t11, up to the falls' currents
-		constexpr std::uint32_t LIP_SLOT = 10;           // D170: the falls' lips, read by the forces and output passes
 		constexpr std::uint32_t FALL_CURRENT_SLOT = 11;  // The falls' currents, read by the forces pass
 		constexpr std::uint32_t FOAM_SLOT = 7;           // The foam pass reads last step's foam here
 		constexpr std::uint32_t MAX_UAVS = 3;
@@ -263,17 +262,12 @@ namespace FluidFieldSim
 			.seedGridMin = { params.seedGridMin[0], params.seedGridMin[1] },
 			.seedRes = params.seedFoam ? params.seedRes : 0u,
 			.seedCellSize = params.seedCellSize,
-			.plungeOrigin = { params.plungeOrigin[0], params.plungeOrigin[1] },
-			.plungeInverseCell = params.plungeInverseCell,
-			.plungeSize = params.plungeMap ? params.plungeSize : 0u,
-			.lipMapOn = params.plungeMap && params.lipMap ? 1u : 0u,
 			.fallCurrentCount = fallCurrentCount,
 			.fallReach = params.fallReach,
-			.fallMix = params.fallMix
+			.fallMix = params.fallMix,
+			.pad = 0.0f
 		};
-		lipSRV = params.plungeMap ? params.lipMap : nullptr;
 		seedFoamSRV = params.seedFoam;
-		plungeSRV = params.plungeMap;
 		UpdateBuffer(context, waterConstants.get(), &waterData, sizeof(waterData));
 
 		if (emitterCount > 0)
@@ -293,8 +287,6 @@ namespace FluidFieldSim
 			ClearObstacles(context);
 		ID3D11ShaderResourceView* mapSRVs[] = { map.srv.get(), obstacles.srv.get(), params.flowmap };
 		context->CSSetShaderResources(MAP_SLOT, 3, mapSRVs);
-		ID3D11ShaderResourceView* lip = lipSRV;
-		context->CSSetShaderResources(LIP_SLOT, 1, &lip);
 		ID3D11ShaderResourceView* fallCurrents = fallCurrentSRV.get();
 		context->CSSetShaderResources(FALL_CURRENT_SLOT, 1, &fallCurrents);
 	}
@@ -363,13 +355,13 @@ namespace FluidFieldSim
 	void ShallowWaterSolver::Foam(ID3D11DeviceContext* context)
 	{
 		// Last step's foam goes in its own slot, beside the state at t0..t3
-		ID3D11ShaderResourceView* previous[3] = { foam[currentFoam].srv.get(), seedFoamSRV, plungeSRV };
-		context->CSSetShaderResources(FOAM_SLOT, 3, previous);
+		ID3D11ShaderResourceView* previous[2] = { foam[currentFoam].srv.get(), seedFoamSRV };
+		context->CSSetShaderResources(FOAM_SLOT, 2, previous);
 		ID3D11ShaderResourceView* srvs[] = { depth[currentDepth].srv.get(), velocity[currentVelocity].srv.get(), cellMap[currentCellMap].srv.get(), emitterSRV.get() };
 		ID3D11UnorderedAccessView* uavs[] = { foam[currentFoam ^ 1].uav.get() };
 		Dispatch(context, foamCS.get(), srvs, uavs);
-		ID3D11ShaderResourceView* nullSRVs[3] = {};
-		context->CSSetShaderResources(FOAM_SLOT, 3, nullSRVs);
+		ID3D11ShaderResourceView* nullSRVs[2] = {};
+		context->CSSetShaderResources(FOAM_SLOT, 2, nullSRVs);
 		currentFoam ^= 1;
 	}
 
@@ -380,8 +372,6 @@ namespace FluidFieldSim
 
 		ID3D11Buffer* cbs[] = { gridConstants.get(), waterConstants.get() };
 		context->CSSetConstantBuffers(0, 2, cbs);
-		ID3D11ShaderResourceView* lip = lipSRV;  // D170: the output's flow carries the lips' weight (w)
-		context->CSSetShaderResources(LIP_SLOT, 1, &lip);
 		ID3D11ShaderResourceView* srvs[] = { depth[currentDepth].srv.get(), velocity[currentVelocity].srv.get(), cellMap[currentCellMap].srv.get(), foam[currentFoam].srv.get() };
 		ID3D11UnorderedAccessView* uavs[] = { surface.uav.get(), flow.uav.get() };
 		Dispatch(context, outputCS.get(), srvs, uavs);

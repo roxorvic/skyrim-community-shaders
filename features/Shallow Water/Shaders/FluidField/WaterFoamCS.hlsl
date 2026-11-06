@@ -24,21 +24,6 @@ StructuredBuffer<Emitter> Emitters : register(t3);
 Texture2D<float> FoamIn : register(t7);
 // Another level's flow output (foam in z), seeding cells that scroll in
 Texture2D<float4> SeedFlow : register(t8);
-// D44: where waterfalls plunge into the water, 0 to 1 (FallSites::BuildPlungeMap)
-Texture2D<float> PlungeMap : register(t9);
-
-/** How strongly a waterfall plunges into the water at a world position, bilinear; 0 without a map. */
-float Plunge(float2 worldXY)
-{
-	if (PlungeSize == 0)
-		return 0.0;
-	const float2 texel = (worldXY - PlungeOrigin) * PlungeInverseCell;
-	const int2 c = int2(floor(texel));
-	if (any(c < 0) || any(c + 1 >= int(PlungeSize)))
-		return 0.0;
-	const float2 t = texel - float2(c);
-	return lerp(lerp(PlungeMap.Load(int3(c, 0)), PlungeMap.Load(int3(c + int2(1, 0), 0)), t.x), lerp(PlungeMap.Load(int3(c + int2(0, 1), 0)), PlungeMap.Load(int3(c + int2(1, 1), 0)), t.x), t.y);
-}
 
 /** Foam from the seeding level at a world position, bilinear; 0 without one or outside it. */
 float SeedFoam(float2 worldXY)
@@ -82,10 +67,6 @@ static const float BOW_RATE = 4.0;
 static const float BOW_FULL_SPEED = 60.0;
 static const float BOW_FRESH_SPEED = 250.0;
 static const float BOW_FRESH_RAMP = 150.0;
-/** D44: foam per second where a waterfall plunges in at full strength; enough for the pools under falls to read white. */
-static const float PLUNGE_RATE = 1.1;
-/** D49: extra foam where the falls meet the water (plunge near 1), solid to hide the falls' cut. */
-static const float PLUNGE_RIM_RATE = 1.0;  // Higher saturates the pool into a flat band
 
 /** Eight neighbour directions, for finding obstacles. */
 static const int2 NEIGHBOURS[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
@@ -168,10 +149,6 @@ float SampleFoam(float2 position)
 	// D71: thresholds sit above an ordinary river (150 units/s over 20 deep is already Froude 1.3; eddies shear 1-2/s)
 	float made = SHEAR_RATE * saturate((shear - 4.0) / 4.0) + IMPACT_RATE * saturate((impact - 90.0) / 120.0) +
 	             WALL_RATE * wallRush + BREAKING_RATE * saturate((froude - 2.5) / 1.5);
-
-	// Waterfalls plunging in (D44): white along their whole width, carried downstream
-	const float plunge = Plunge((float2(GridMin + logical) + 0.5) * CellSize);
-	made += PLUNGE_RATE * plunge + PLUNGE_RIM_RATE * smoothstep(0.7, 0.95, plunge);  // D49: lace around, solid at the line itself
 
 	// Actors: wakes, and splashes much more; the foam parts around them, the wake foaming at its edges
 	float cleared = 0.0, bodyCleared = 0.0;

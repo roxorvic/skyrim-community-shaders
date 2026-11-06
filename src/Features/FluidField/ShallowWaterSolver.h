@@ -61,13 +61,6 @@ namespace FluidFieldSim
 		std::int32_t seedGridMin[2]{};
 		std::uint32_t seedRes = 0;
 		float seedCellSize = 0.0f;
-		/// D44: where waterfalls plunge, 0 to 1 per texel (FallSites::BuildPlungeMap); the water foams there
-		ID3D11ShaderResourceView* plungeMap = nullptr;
-		float plungeOrigin[2]{};
-		float plungeInverseCell = 0.0f;
-		std::uint32_t plungeSize = 0;
-		/// D170: the falls' lips on the plunge map's lattice (FallSites::BuildLipMap): pull velocity toward a lip (xy), strength (z)
-		ID3D11ShaderResourceView* lipMap = nullptr;
 		/// The falls' landings and brinks: with the river, they set the current the water rests at, within fallReach of them
 		std::span<const WaterFallCurrent> fallCurrents;
 		float fallReach = 4096.0f;  ///< World units from a falls at which its current has faded out
@@ -83,7 +76,7 @@ namespace FluidFieldSim
 	class ShallowWaterSolver
 	{
 	public:
-		static constexpr std::uint32_t MAX_EMITTERS = 96;  // Wakes, splashes and the falls' plunges (D35)
+		static constexpr std::uint32_t MAX_EMITTERS = 96;  // Wakes, splashes and the falls' pushes
 		static constexpr std::uint32_t MAX_FALL_CURRENTS = 32;
 		static constexpr float NO_WATER = -1.0e8f;  ///< Map surface value meaning "no vanilla water here"
 
@@ -193,15 +186,12 @@ namespace FluidFieldSim
 			std::int32_t seedGridMin[2];
 			std::uint32_t seedRes;
 			float seedCellSize;
-			float plungeOrigin[2];
-			float plungeInverseCell;
-			std::uint32_t plungeSize;
-			std::uint32_t lipMapOn;
 			std::uint32_t fallCurrentCount;
 			float fallReach;
 			float fallMix;
+			float pad;
 		};
-		static_assert(sizeof(WaterConstants) == 144);
+		static_assert(sizeof(WaterConstants) == 128);
 
 		static Layer CreateLayer(ID3D11Device* device, std::uint32_t resolution, DXGI_FORMAT format, const NameFn& name, const char* label, bool unordered = true);
 		static void UpdateBuffer(ID3D11DeviceContext* context, ID3D11Buffer* buffer, const void* data, std::size_t size);
@@ -219,8 +209,6 @@ namespace FluidFieldSim
 
 		std::uint32_t resolution = 0;
 		ID3D11ShaderResourceView* seedFoamSRV = nullptr;  ///< This step's seed foam (not owned)
-		ID3D11ShaderResourceView* lipSRV = nullptr;       ///< D170: this step's lip map (not owned)
-		ID3D11ShaderResourceView* plungeSRV = nullptr;    ///< This step's plunge map (not owned)
 		std::uint32_t mapResolution = 0;
 		float mapSpacing = 64.0f;
 		bool mapUploaded = false;

@@ -174,12 +174,6 @@ static const float STIR_RATE = 0.35;
 /** @brief Stirring acceleration per unit of river speed (1/s), before Turbulence scales it. */
 static const float STIR_STRENGTH = 0.9;
 
-/** @brief D170: per-second rate at which water at a lip (full weight) takes the lip's velocity. */
-static const float LIP_PULL = 6.0;
-/** @brief D170: share of the depth drawn down at a lip's brink, and its cap in world units. */
-static const float LIP_DRAWDOWN = 0.3;
-static const float LIP_DRAWDOWN_MOST = 16.0;
-
 /** @brief Curl noise from a slowly changing stream function: swirls water without piling it up, so rivers never settle. */
 float2 StirVelocity(float2 worldPos)
 {
@@ -272,21 +266,7 @@ float2 StirVelocity(float2 worldPos)
 	}
 
 	velocity = lerp(velocity, restVelocity, saturate(CurrentRelax * DeltaTime));
-	// D170: drawdown: water is pulled toward a fall's lip, harder nearer it, and its rest level drops toward the brink (a
-	// free overfall passes critical depth, about two thirds of the upstream depth, just before the edge)
 	float levelDepth = max(vanillaDepth + fallLevel, 0.0);
-	if (depth > WetThreshold) {
-		const float4 lip = LipAt(worldPos);
-		if (lip.z > 1e-3) {
-			const float speed = length(lip.xy);
-			const float2 way = lip.xy / max(speed, 1e-3);
-			// D179: target speed ramps from the river's own to the lip's at the brink: every stretch of a cascade lies near some lip
-			const float own = max(dot(restVelocity, way), 0.0);
-			const float2 target = way * max(lerp(own, speed, saturate(lip.z)), dot(velocity, way));
-			velocity = lerp(velocity, target, sqrt(saturate(lip.z)) * saturate(LIP_PULL * DeltaTime));
-			levelDepth -= min(vanillaDepth * LIP_DRAWDOWN, LIP_DRAWDOWN_MOST) * saturate(lip.z);
-		}
-	}
 	const float still = 1.0 - saturate(length(restVelocity) / STILL_SPEED);
 	depth = lerp(depth, levelDepth, saturate((LevelRelax + STILL_LEVEL_RELAX * still + fallChurn) * DeltaTime));
 

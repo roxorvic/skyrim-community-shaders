@@ -1,5 +1,5 @@
 // Fluid Field water, pass 5: outputs for other shaders. Surface: (slope x, slope y, height above vanilla, coverage);
-// Flow: (cell-centred velocity, foam, lip draw). Coverage is 0 when dry and fades out toward the edge and shores.
+// Flow: (cell-centred velocity, foam, 0). Coverage is 0 when dry and fades out toward the edge and shores.
 
 #include "FluidField/WaterCommon.hlsli"
 
@@ -147,6 +147,5 @@ float Swirl(int2 logical)
 		foam += 0.125 * Foam[LogicalToStorage(clamp(logical + int2(0, -1), 0, int(GridRes) - 1))];
 	}
 	// With a far level, foam is not edge-faded: the water shader cross-fades it, and fading here too leaves a seam.
-	// D170: w is the lip draw (the water shader speeds up its detail there)
-	FlowOut[id] = float4(flow, SeedRes != 0 ? foam : foam * edgeFade, wet ? saturate(LipAt(CellWorldPos(logical)).z) : 0.0);
+	FlowOut[id] = float4(flow, SeedRes != 0 ? foam : foam * edgeFade, 0.0);
 }
