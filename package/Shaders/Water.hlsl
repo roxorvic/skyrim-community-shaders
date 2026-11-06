@@ -1998,9 +1998,11 @@ PS_OUTPUT main(PS_INPUT input)
 			waterOpacity = fallOpacity;
 		}
 #							else
-		// the falls' lobe foam look on the river's foam (FoamLook)
+		// the water's lobe foam (FoamLook): thick, lumpy, with gaps
 		{
-			const FoamLook::Sample look = FluidField::FoamLookAt(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz);
+			FoamLook::Sample look = FluidField::FoamLookAt(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz);
+			// Measured: the lobes' cover mostly sits between 0.3 and 0.7, so gaps never cleared; open them, firm the lobes
+			look.cover = smoothstep(0.3, 0.6, look.cover) * FoamLook::FOAM_OPACITY;
 			if (look.cover > 0.0) {
 				const float3 foamLight = FoamLook::Light(look, fluidRiverFoamLight, normal, viewDirection, SharedData::DirLightDirection.xyz,
 					ShadowSampling::GetDirectionalLighting() * surfaceShadow, fluidAmbientLight, diffuseOutput.refractionDiffuseColor, specularColor, fresnel);

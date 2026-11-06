@@ -18,15 +18,6 @@ namespace FluidField
 	static const float FLOW_DETAIL_PERIOD = 0.6;
 	/** Fastest detail drift (world units/s). */
 	static const float FLOW_DETAIL_MAX_DRIFT = 120.0;
-	/** D170: fastest detail and foam drift at a fall's lip (flow's w), so the surface speeds up into the drop. */
-	static const float LIP_MAX_DRIFT = 240.0;
-
-	/** D170: the drift cap, raised from FLOW_DETAIL_MAX_DRIFT toward a fall's lip. */
-	float MaxDrift(float a_lip)
-	{
-		return lerp(FLOW_DETAIL_MAX_DRIFT, LIP_MAX_DRIFT, saturate(a_lip));
-	}
-
 	/** Flow speed (world units/s) at which the detail reaches full strength. */
 	static const float FLOW_DETAIL_FULL_SPEED = 160.0;
 	/** Share of the near level's width over which it hands over to the far level (matches WaterOutputCS). */
@@ -328,6 +319,8 @@ namespace FluidField
 
 	/** Strongest whitening of the water body by bubbles (fraction of the foam colour). */
 	static const float MAX_AERATION = 0.3;
+	/** The milky water's colour as a share of the foam's: dimmer, so the foam's lobes stand out on it. */
+	static const float AERATION_SHADE = 0.6;
 	/** How far foam's colour goes from the lit water colour toward the scene light. */
 	static const float FOAM_WHITENESS = 0.1;
 
@@ -342,7 +335,7 @@ namespace FluidField
 
 	/** How far the river's foam leans toward the water's hue, and how much of the scene light it returns. */
 	static const float RIVER_FOAM_TINT = 0.15;
-	static const float RIVER_FOAM_ALBEDO = 0.35;
+	static const float RIVER_FOAM_ALBEDO = 0.6;
 
 	/** The river's foam: near-white lit by the scene light, slightly tinted by the water; FoamColor's water-based colour read grey wherever the water reads dark. */
 	float3 RiverFoamColor(float3 a_waterLit, float3 a_light)
@@ -355,8 +348,9 @@ namespace FluidField
 	void ApplyAeration(inout float3 a_color, float3 a_worldPosition, float3 a_foamColor, float a_amount)
 	{
 		const float4 flowFoam = FlowFoamAtWorld(a_worldPosition.xy);
-		const float aeration = saturate(flowFoam.z * 0.6 + length(flowFoam.xy) / 600.0) * MAX_AERATION * a_amount;
-		a_color = lerp(a_color, a_foamColor, aeration);
+		// Only where the foam is (measured: the falls currents' speed alone milked the whole pool, flattening the foam against it)
+		const float aeration = smoothstep(0.1, 0.5, flowFoam.z) * MAX_AERATION * a_amount;
+		a_color = lerp(a_color, a_foamColor * AERATION_SHADE, aeration);
 	}
 
 	/** How much foam dulls the glint and reflection (0 to 1): foam is a rough, matte layer. */
@@ -369,10 +363,12 @@ namespace FluidField
 	static const float FOAM_OPACITY = 0.8;
 	/** World units one tile of the foam's breakup pattern covers. */
 	static const float FOAM_TILE = 160.0;
+	/** How much of the foam the pattern can thin out. */
+	static const float FOAM_BREAKUP = 0.5;
 	/** Seconds between restarts of each foam pattern phase; short so it never stretches far. */
-	static const float FOAM_PERIOD = 0.6;
+	static const float FOAM_PERIOD = 2.0;
 	/** Fastest foam pattern drift (world units/s). */
-	static const float FOAM_MAX_DRIFT = 120.0;
+	static const float FOAM_MAX_DRIFT = 30.0;
 
 	/**
 	 * Foam cover (0 to 1): simulated foam broken up by vanilla's normal texture dragged two-phase along the smoothed flow
@@ -398,14 +394,13 @@ namespace FluidField
 		const float phase1 = frac(time + 0.5);
 		const float2 uv = a_worldPosition.xy / FOAM_TILE;
 		float2 flow = SampleFlow(a_worldPosition);
-		flow *= min(1.0, max(FOAM_MAX_DRIFT, MaxDrift(flowFoam.w)) / max(length(flow), 1e-3));  // D170: faster toward a lip
+		flow *= min(1.0, FOAM_MAX_DRIFT / max(length(flow), 1e-3));
 		const float2 drift = flow * FOAM_PERIOD / FOAM_TILE;
 		const float p0 = length(Normals01Tex.SampleBias(Normals01Sampler, uv - drift * phase0, SharedData::MipBias).xy * 2.0 - 1.0);
 		const float p1 = length(Normals01Tex.SampleBias(Normals01Sampler, uv - drift * phase1 + 0.37, SharedData::MipBias).xy * 2.0 - 1.0);
 		const float pattern = saturate(lerp(p0, p1, abs(phase0 * 2.0 - 1.0)) * 1.4);
-		// Dense foam covers solidly; thin foam only shows in the pattern's bubbles and streaks
-		const float threshold = pattern * 0.5;
-		return smoothstep(threshold, threshold + 0.25, foam) * FOAM_OPACITY;
+		// A soft breakup: a hard cut through the pattern turned medium foam into speckle, streaked by the drift, and dense foam solid
+		return saturate(foam) * lerp(1.0 - FOAM_BREAKUP, 1.0, pattern) * FOAM_OPACITY;
 	}
 
 	/** The river's foam in the falls' lobe look (FoamLook), on two flow-dragged phases, its foam as their aeration. */
@@ -427,9 +422,10 @@ namespace FluidField
 		const float time = SharedData::Timer / FOAM_PERIOD + offset * 2.0;
 		const float phase0 = frac(time), phase1 = frac(time + 0.5);
 		float2 flow = SampleFlow(a_worldPosition);
-		flow *= min(1.0, max(FOAM_MAX_DRIFT, MaxDrift(flowFoam.w)) / max(length(flow), 1e-3));
+		flow *= min(1.0, FOAM_MAX_DRIFT / max(length(flow), 1e-3));
 		const float2 drift = flow * FOAM_PERIOD;
-		const float aeration = lerp(FoamLook::AERATION_FROM_FOAM.x, FoamLook::AERATION_FROM_FOAM.y, saturate(foam));
+		// Kept under the lobes' heavy cover: on a flat pool heavy cover reads as one solid sheet, with no gaps or lumps
+		const float aeration = min(saturate(foam) * FoamLook::AERATION_PER_FOAM, FoamLook::AERATION_HEAVY.x);
 		const FoamLook::Sample a = FoamLook::At(Normals01Tex, Normals01Sampler, (a_worldPosition.xy - drift * phase0) / FoamLook::UV_WORLD, aeration, SharedData::MipBias, SharedData::Timer);
 		const FoamLook::Sample b = FoamLook::At(Normals01Tex, Normals01Sampler, (a_worldPosition.xy - drift * phase1) / FoamLook::UV_WORLD + 0.37, aeration, SharedData::MipBias, SharedData::Timer);
 		const float w = abs(phase0 * 2.0 - 1.0);  // Each phase's weight is 0 where it restarts
@@ -484,7 +480,7 @@ namespace FluidField
 			const float speed = length(flow);
 			const float amount = flowDetail * smoothstep(5.0, 40.0, speed) * lerp(0.4, 1.0, smoothstep(0.0, FLOW_DETAIL_FULL_SPEED * 1.5, speed));
 			if (amount > 0.0) {
-				const float3 detail = FlowDetailNormal(a_worldPosition, flow, MaxDrift(FlowFoamAtWorld(a_worldPosition.xy).w));  // D170
+				const float3 detail = FlowDetailNormal(a_worldPosition, flow);
 				const float3 detailNormal = normalize(float3(detail.xy * amount, 1.0));
 				combined = normalize(ReorientNormal(detailNormal, combined));
 			}

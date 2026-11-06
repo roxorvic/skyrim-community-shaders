@@ -1,21 +1,19 @@
-// The falls' lobe foam on the river's foam (FluidField::FoamLookAt), on a flow coordinate the river sim carries. FallShading's
-// functions and values, copied because FallShading needs the falls' constant buffer. Tune the river here.
+// The water's lobe foam (FluidField::FoamLookAt): thick, lumpy foam with gaps, on a flow coordinate the water sim carries. It
+// started as a copy of the falls' foam and is the water's own now: tune it here, the falls are separate.
 
 namespace FoamLook
 {
 
 	/** World units one flow-uv unit spans on a falls sheet (the noises' cells are per such unit). */
 	static const float UV_WORLD = 968.0;
-	/** The river sim's foam (0 to 1) as the lobes' baked aeration: its least foam where theirs starts, its densest past their heavy cover. */
-	static const float2 AERATION_FROM_FOAM = float2(0.2, 0.9);
+	/** The sim's foam (0 to 1) times this is the lobes' aeration: lobes from foam about 0.17, full cover by 0.5 (measured: a landing pool runs 0.1 to 0.65). */
+	static const float AERATION_PER_FOAM = 1.2;
 
-	// Copied from FallShading
 	static const float FALLS_UV_WORLD = 512.0;
 	static const float FOAM_TILE = 160.0;
 	static const float FOAM_OPACITY = 0.8;
 	static const float FOAM_BREAKUP_LEAST = 0.75;
-	static const float MORPH_SECONDS = 2.5;
-	static const float FOAM_CHURN_SECONDS = 1.6;
+	static const float MORPH_SECONDS = 6.0;  // Slow: a quicker re-roll read as twitching on still water
 	static const float2 UNIFIED_AERATION_DRIVE = float2(0.2, 0.62);
 	static const float2 AERATION_HEAVY = float2(0.52, 0.66);
 	static const float AERATION_HEAVY_DRIVE = 1.5;
@@ -25,7 +23,7 @@ namespace FoamLook
 	static const float2 AERATION_GAP_CELLS = float2(22.0, 14.0);
 	static const float AERATION_GAP_PERIOD = 6.0;
 	static const float AERATION_GAP_LIFE = 0.35;
-	static const float AERATION_GAP_CHANCE = 0.3;
+	static const float AERATION_GAP_CHANCE = 0.6;
 	static const float2 AERATION_GAP_SIZE = float2(0.18, 0.38);
 	static const float AERATION_GAP_STRETCH = 1.8;
 	static const float AERATION_GAP_DRIFT = 0.8;
@@ -40,20 +38,21 @@ namespace FoamLook
 	static const float2 LUMP_BIG_CELLS = float2(20.0, 25.0);
 	static const float LUMP_BIG = 0.5;
 	static const float2 LUMP_FROM = float2(0.35, 0.6);
-	static const float FOAM_MOUND = 20.0;
-	static const float HOLLOW_DARK = 0.45;
-	static const float TWO_TONE = 0.55;
-	static const float RIM_GLOW = 2.5;
+	static const float FOAM_MOUND = 8.0;
+	static const float HOLLOW_DARK = 0.5;
+	static const float TWO_TONE = 0.3;
+	static const float RIM_GLOW = 0.5;
 	static const float FOAM_DIFFUSE = 0.55;
 	static const float FOAM_WRAP = 1.0;
 	static const float FOAM_REFLECT = 0.15;
-	static const float FOAM_SSS_BACK = 0.35;
+	static const float FOAM_SSS_BACK = 0.15;
 	static const float FOAM_SSS_POWER = 2.0;
 	static const float FOAM_SSS_WRAP = 0.9;
 	static const float FOAM_SSS_WRAP_LIGHT = 0.1;
 	static const float FOAM_SSS_TINT = 0.6;
 	static const float FOAM_SSS_THICK = 0.4;
-	static const float FOAM_ALBEDO = 0.85;
+	/** The brightest the foam gets, as a share of the scene light (sun and sky) this shader receives; measured: at 0.3 solid foam read only 35% above the water. */
+	static const float FOAM_ALBEDO = 0.6;
 	static const float FOAM_KNEE = 0.75;
 
 	float2 FlowScale(float a_worldScale)
@@ -123,14 +122,6 @@ namespace FoamLook
 		return gap;
 	}
 
-	float FoamChurn(float a_time, out float2 a_jumpA, out float2 a_jumpB)
-	{
-		const float cycle = a_time / FOAM_CHURN_SECONDS;
-		a_jumpA = float2(BubbleHash(float2(floor(cycle), 4.3)) * 7.0, 0.0);
-		a_jumpB = float2(BubbleHash(float2(floor(cycle + 0.5), 9.1)) * 7.0, 0.0);
-		return 1.0 - abs(frac(cycle) * 2.0 - 1.0);
-	}
-
 	float FlowFoamOnce(Texture2D<float4> a_tex, SamplerState a_sampler, float2 a_uv, float2 a_dx, float2 a_dy)
 	{
 		const float p0 = length(a_tex.SampleGrad(a_sampler, a_uv, a_dx, a_dy).xy * 2.0 - 1.0);
@@ -160,8 +151,9 @@ namespace FoamLook
 
 	float AerationCover(float a_aeration, float a_pattern)
 	{
+		// Crisp lobe edges: seen from above a flat pool, a soft ramp read as a blur, not clumps with gaps
 		const float threshold = a_pattern * 0.6;
-		return smoothstep(threshold + 0.15, threshold + 0.75, a_aeration) * FOAM_OPACITY;
+		return smoothstep(threshold + 0.1, threshold + 0.3, a_aeration) * FOAM_OPACITY;
 	}
 
 	struct Sample
@@ -193,12 +185,8 @@ namespace FoamLook
 		const float clump = lerp(lerp(1.0 - AERATION_CLUMP, 1.0, Morphing(a_uv, AERATION_CLUMP_CELLS, a_time + 5.1)), 1.0, heavy);
 		const float drive = smoothstep(UNIFIED_AERATION_DRIVE.x, UNIFIED_AERATION_DRIVE.y, a_aeration) * lerp(1.0, AERATION_HEAVY_DRIVE, heavy) * (1.0 - gap) * clump * lumpEdge *
 		                    lerp(FoamBreakup(a_tex, a_sampler, a_uv, a_mipBias), 1.0, heavy);
-		// Top layer, its grain churning in place
-		float2 jumpA, jumpB;
-		const float weight = FoamChurn(a_time, jumpA, jumpB);
-		const float coverB = saturate(AerationCover(drive, FlowFoamPatternGrad(a_tex, a_sampler, a_uv + jumpB, tilesDx, tilesDy, a_mipBias)) * AERATION_LAYER_OPACITY);
-		const float coverA = saturate(AerationCover(drive, FlowFoamPatternGrad(a_tex, a_sampler, a_uv + jumpA, tilesDx, tilesDy, a_mipBias)) * AERATION_LAYER_OPACITY);
-		s.cover = drive > 0.01 ? lerp(coverB, coverA, weight) : 0.0;
+		// Top layer: no churn jumps (on flat water they read as the foam twitching), the flow carries it instead
+		s.cover = drive > 0.01 ? saturate(AerationCover(drive, FlowFoamPatternGrad(a_tex, a_sampler, a_uv, tilesDx, tilesDy, a_mipBias)) * AERATION_LAYER_OPACITY) : 0.0;
 		s.whole = saturate(s.cover / FOAM_OPACITY);
 		return s;
 	}
