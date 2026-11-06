@@ -802,6 +802,8 @@ namespace FluidFieldSim
 				// Each vanilla falls mesh as its own piece: a copy cut to what can be seen (D172, D173), drawn by the engine in its own
 				// material until it has a bake, then by the falls pass. A group is made whole in one batch, so its meshes hide each other
 				std::vector<RE::NiPointer<RE::BSGeometry>> siteNew, siteCopied;
+				bool siteBaked = false;  // the falls pass draws one of its copies: its vanilla skirts, mist and splashes go
+				std::vector<RE::FormID> siteCopiedRefs;
 				for (const uint32_t member : site.members) {
 					const auto& fx = refs[member];
 					const float cx = 0.5f * (fx.min[0] + fx.max[0]), cy = 0.5f * (fx.min[1] + fx.max[1]);
@@ -831,6 +833,7 @@ namespace FluidFieldSim
 						if (denseOf.contains(a_geometry)) {  // drawn by its copy, found as its sibling
 							denseSeen.insert(a_geometry);
 							siteCopied.emplace_back(a_geometry);
+							siteCopiedRefs.push_back(fx.formID);
 							return RE::BSVisit::BSVisitControl::kContinue;
 						}
 						auto* triShape = a_geometry->AsTriShape();
@@ -840,6 +843,7 @@ namespace FluidFieldSim
 						if (denseShapes.contains(a_geometry)) {
 							// shortcut: only a copy with a bake joins the falls pass; the bakes come per mesh from the harness (plan step 4)
 							if (bakeFields.contains(a_geometry)) {
+								siteBaked = true;
 								grounded.insert(a_geometry);
 								litMeshes.insert(a_geometry);
 								litMeshList.push_back({ RE::NiPointer<RE::BSGeometry>(a_geometry) });
@@ -852,6 +856,19 @@ namespace FluidFieldSim
 						}
 						return RE::BSVisit::BSVisitControl::kContinue;
 					});
+				}
+				if (siteBaked) {
+					// the user's spec: at a group we draw, every vanilla skirt, mist and splash hides, and the copied falls' other layers;
+					// thin falls (not copied) and the river's rapids stay
+					for (const RE::FormID copied : siteCopiedRefs)
+						unifiedSiteRefs.insert(copied);
+					for (const uint32_t member : site.members) {
+						const auto& fx = refs[member];
+						const float cx = 0.5f * (fx.min[0] + fx.max[0]), cy = 0.5f * (fx.min[1] + fx.max[1]);
+						if ((fx.cls == FxClass::Skirt || fx.cls == FxClass::Mist || fx.cls == FxClass::Splash) && cx >= PER_MESH_AREA[0] && cy >= PER_MESH_AREA[1] &&
+							cx <= PER_MESH_AREA[2] && cy <= PER_MESH_AREA[3])
+							unifiedSiteRefs.insert(fx.formID);
+					}
 				}
 				if (!siteNew.empty()) {
 					// its copies made again with the new ones (FinishDenseWork swaps them)
@@ -3661,6 +3678,14 @@ namespace FluidFieldSim
 				ok = true;
 			}
 		}
+		// and a group bake's fall progress (group_bake.py: its group solved at once, nothing to link)
+		if (ok && !field->bulge.empty() && file.peek() != std::char_traits<char>::eof()) {
+			get(field->progress);
+			if (!ok) {
+				field->progress.clear();
+				ok = true;
+			}
+		}
 		// a per-mesh bake's uv table, at the very end behind its footer (table bytes, "UVMP"): bake_meshes.py
 		if (ok) {
 			constexpr uint32_t UV_MAP_MAGIC = 0x504D5655;  // "UVMP"
@@ -4256,6 +4281,7 @@ namespace FluidFieldSim
 			float foot = FLT_MAX;                                     ///< D190: the lowest its fall reaches, down the meshes it runs into
 			float arriving = 0.0f;                                    ///< D190: the recent fall its water arrives with (for the log)
 			bool unified = false;                                     ///< A site's unified sheet: across is its own flow uv
+			bool group = false;                                       ///< A group bake: its fields are linked already (group_bake.py)
 			std::vector<float> column;                                ///< A unified sheet's streak columns (its bake's seed, as u)
 		};
 		std::vector<Node> nodes;
@@ -4267,6 +4293,7 @@ namespace FluidFieldSim
 			node.field = field.get();
 			// a site's sheet, or a mesh baked offline with the layers (bake_meshes.py: streaks, contact, flow): shaded as one
 			node.unified = linkUnified.contains(geometry) || (!field->streak.empty() && field->streak.size() == field->position.size());
+			node.group = field->progress.size() == field->position.size();
 			const auto w = static_cast<int32_t>(field->width), h = static_cast<int32_t>(field->height);
 			node.first.assign(w, -1);
 			node.last.assign(w, -1);
@@ -4298,12 +4325,14 @@ namespace FluidFieldSim
 		}
 		// Each mesh's feeder: the higher mesh on whose lowest rows most of its top edge lies (a quarter of it at least)
 		for (auto& node : nodes) {
+			if (node.group)
+				continue;  // its water came down its group with it
 			const BakeField& field = *node.field;
 			const auto w = static_cast<int32_t>(field.width);
 			const auto columns = static_cast<std::size_t>(std::count_if(node.first.begin(), node.first.end(), [](int32_t a_row) { return a_row >= 0; }));
 			for (std::size_t a = 0; a < nodes.size(); a++) {
 				const Node& above = nodes[a];
-				if (&above == &node || above.top <= node.top + 16.0f)
+				if (&above == &node || above.group || above.top <= node.top + 16.0f)
 					continue;
 				bool apart = false;
 				for (int k = 0; k < 3; k++)
@@ -4347,7 +4376,7 @@ namespace FluidFieldSim
 		}
 		// D68 diagnostics: for a mesh nothing feeds, how near its top edge comes to any higher mesh, and where on it
 		for (const auto& node : nodes) {
-			if (node.feeder >= 0)
+			if (node.feeder >= 0 || node.group)
 				continue;
 			const BakeField& field = *node.field;
 			const auto w = static_cast<int32_t>(field.width);
@@ -4447,6 +4476,13 @@ namespace FluidFieldSim
 					a_node.column[i] = atLip(across0, seed);
 				}
 				a_node.along[i] = atLip(along0, seed) + (field.along.size() == count ? field.along[i] : 0.0f);
+				if (a_node.group) {
+					// its texture u, ribbons, travel and fall came down the group with it
+					a_node.across[i] = a_node.column[i] = seed;
+					a_node.along[i] = field.along[i];
+					a_node.fallen[i] = field.fallen[i];
+					continue;
+				}
 				// D190: what it carried in clears over its calm runs here, as the strands' own fall does
 				const float calm = field.calm.size() == count ? field.calm[i] : 0.0f;
 				a_node.fallen[i] = atLip(fallen0, seed) * std::exp(-calm / FallStrands::CALM_RUN) + (field.fallen.size() == count ? field.fallen[i] : 0.0f);
@@ -4666,6 +4702,10 @@ namespace FluidFieldSim
 			const BakeField& field = *node.field;
 			const auto w = static_cast<int32_t>(field.width), h = static_cast<int32_t>(field.height);
 			const std::size_t count = static_cast<std::size_t>(w) * h;
+			if (bake != flowBakes.end() && node.group) {
+				progressOf[n] = field.progress;
+				continue;
+			}
 			if (bake == flowBakes.end() || bake->second.texels.size() != count * BAKE_TEXELS_PER || std::isnan(node.tangent))
 				continue;
 			const float span = std::max(node.tangent - node.foot, 1.0f);

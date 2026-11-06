@@ -493,10 +493,10 @@ namespace FluidFieldSim
 		static constexpr float CLIP_MARGIN = 6.0f;            ///< A vertex this far inside rock still shows (water lying on it)
 		static constexpr float CLIP_RANGE = 32.0f;            ///< The most a vertex counts as in or out, so the cut stays near the rock's face
 		static constexpr double CLIP_BUDGET_MS = 3.0;
-		static constexpr uint32_t BAKE_MOST_SIDE = 512;  ///< The most bake texels along a side (a whole site)
-		static constexpr float SIM_GRAVITY = 686.0f;     ///< D74: world units per second squared (Skyrim's)
-		static constexpr float SIM_INFLOW = 250.0f;      ///< D74: world units per second the water comes onto a mesh's top at
-		static constexpr float SIM_TERMINAL = 900.0f;    ///< D74: world units per second sliding water tends to (its drag)
+		static constexpr uint32_t BAKE_MOST_SIDE = 1024;  ///< The most bake texels along a side (a tall mesh at group_bake.py's 5 units a texel)
+		static constexpr float SIM_GRAVITY = 686.0f;      ///< D74: world units per second squared (Skyrim's)
+		static constexpr float SIM_INFLOW = 250.0f;       ///< D74: world units per second the water comes onto a mesh's top at
+		static constexpr float SIM_TERMINAL = 900.0f;     ///< D74: world units per second sliding water tends to (its drag)
 		struct BakeField;
 		/** @brief A site's offline sheet (tools/unify), from FluidField/Sites/*.unfs, drawn in place of its members' meshes. */
 		struct UnifiedCache
@@ -551,7 +551,7 @@ namespace FluidFieldSim
 		std::unordered_set<const RE::BSGeometry*> denseShapes;
 		std::unordered_map<const RE::BSGeometry*, std::vector<uint16_t>> untrimmedIndices;  ///< D172: by copy, the whole sheet (bakes read it)
 		static constexpr float DENSE_TRIM_UNDER = 24.0f;                                    ///< D172: cut this far under the landscape (the cut line stays in the ground)
-		static constexpr float DENSE_EDGE = 48.0f;                                          ///< D73: longest edge, budget allowing (D91: only longer split); runtime falls: low-tri
+		static constexpr float DENSE_EDGE = 32.0f;                                          ///< D73: longest edge, budget allowing (D91: only longer split); 32: the shader drives the vertices
 		static constexpr float DENSE_EDGE_NEAR = 16.0f;                                     ///< D186: ...and near a solid at most this (cut lines round boulders run smooth)
 		static constexpr float DENSE_NEAR_REACH = 64.0f;                                    ///< D186: world units from a solid an edge's middle counts as near it
 		static constexpr std::size_t DENSE_NEAR_BUDGET = 35000;                             ///< D186: no finer splitting near solids past this (16-bit indices)
@@ -636,6 +636,7 @@ namespace FluidFieldSim
 			std::vector<float> streak;                ///< Streaks left (1, to 0 once its water has met rock)
 			std::vector<float> contact, contactTail;  ///< Distance to rock, land or the pool, and that swept down the flow
 			std::vector<float> bulge;                 ///< Heave over hidden rock (0 to 1)
+			std::vector<float> progress;              ///< A group bake (group_bake.py): its fall's progress, linked already; its seed is its texture u
 			/** A per-mesh bake's grid lies in its flow uv (bake_meshes.py: v downstream): its mesh's vanilla uv to that, a table over
 			 * vanillaMin..+vanillaSize (empty: the bake is in the mesh's own uv). */
 			uint32_t uvMapWidth = 0, uvMapHeight = 0;
