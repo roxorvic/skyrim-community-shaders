@@ -322,7 +322,8 @@ namespace FluidField
 	{
 		const float exponent = a_exponent * lerp(1.0, 0.33, saturate(PixelRoughness / 1.5));
 		const float energy = (exponent + 2.0) / max(a_exponent + 2.0, 1e-3);
-		return exp2(exponent * log2(a_cosine)) * energy;
+		// As vanilla's (upstream a0d3808): a zero exponent and a zero cosine made 0 * -inf, a NaN
+		return exponent > 0.0 ? exp2(exponent * log2(a_cosine)) * energy : 1.0;
 	}
 
 	/** Strongest whitening of the water body by bubbles (fraction of the foam colour). */
