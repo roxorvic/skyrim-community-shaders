@@ -60,8 +60,18 @@ namespace
 					const int px = p.gridMin[0] + x - prev[0];
 					const int py = p.gridMin[1] + y - prev[1];
 					Vec2 v{};
-					if (historyValid && px >= 0 && px < n && py >= 0 && py < n)
+					if (historyValid && px >= 0 && px < n && py >= 0 && py < n) {
 						v = velocity[Index(px, py)];
+						// Vorticity confinement (AddForcesCS), on the previous step's texels
+						const float curl = Curl(p, prev, x, y);
+						const float gx = std::abs(Curl(p, prev, x + 1, y)) - std::abs(Curl(p, prev, x - 1, y));
+						const float gy = std::abs(Curl(p, prev, x, y + 1)) - std::abs(Curl(p, prev, x, y - 1));
+						const float magnitude = std::sqrt(gx * gx + gy * gy);
+						if (magnitude > 1e-6f) {
+							v.x += VORTICITY * p.cellSize * curl * (gy / magnitude) * p.deltaTime;
+							v.y += VORTICITY * p.cellSize * curl * (-gx / magnitude) * p.deltaTime;
+						}
+					}
 
 					for (const Emitter& e : p.emitters) {
 						const float dx = x + 0.5f - e.position[0];
@@ -159,6 +169,29 @@ namespace
 		float LoadOrZero(const std::vector<float>& f, int x, int y) const
 		{
 			return (x < 0 || y < 0 || x >= n || y >= n) ? 0.0f : f[Index(x, y)];
+		}
+
+		static constexpr float VORTICITY = 0.6f;  // AddForcesCS's
+
+		/**
+		 * @brief The previous step's velocity as the GPU reads it at logical (x, y), clamped to the grid: from the toroidal
+		 * texel the cell maps to, so a cell that scrolled in reads whatever the previous window left there.
+		 */
+		Vec2 PreviousAt(const StepParams& p, const int a_prev[2], int x, int y) const
+		{
+			x = std::clamp(x, 0, n - 1);
+			y = std::clamp(y, 0, n - 1);
+			const int px = ((p.gridMin[0] + x - a_prev[0]) % n + n) % n;
+			const int py = ((p.gridMin[1] + y - a_prev[1]) % n + n) % n;
+			return velocity[Index(px, py)];
+		}
+
+		/** @brief AddForcesCS's Curl, on the previous step's velocity. */
+		float Curl(const StepParams& p, const int a_prev[2], int x, int y) const
+		{
+			const Vec2 east = PreviousAt(p, a_prev, x + 1, y), west = PreviousAt(p, a_prev, x - 1, y);
+			const Vec2 north = PreviousAt(p, a_prev, x, y + 1), south = PreviousAt(p, a_prev, x, y - 1);
+			return ((east.y - west.y) - (north.x - south.x)) / (2.0f * p.cellSize);
 		}
 
 		Vec2 SampleBilinear(const std::vector<Vec2>& f, float px, float py) const
