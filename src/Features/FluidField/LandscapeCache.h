@@ -45,6 +45,8 @@ namespace FluidFieldSim
 		bool SampleHeight(float a_worldX, float a_worldY, float& a_height) const;
 
 		std::size_t GetCellCount() const { return cells.size(); }
+		/** @brief D172: a copy of the cells over a world area, for a worker (the cache changes each frame). */
+		LandscapeCache Subset(float a_minX, float a_minY, float a_maxX, float a_maxY) const;
 
 	private:
 		std::unordered_map<uint64_t, Cell> cells;

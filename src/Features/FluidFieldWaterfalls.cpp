@@ -26,7 +26,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FallAerationFrom,
 	FallAerationMilk,
 	ExportSiteInputs,
-	HotReloadBakes)
+	HotReloadBakes,
+	DebugCopyTint)
 
 void FluidFieldWaterfalls::DrawSettings()
 {
@@ -150,6 +151,7 @@ void FluidFieldWaterfalls::Prepass()
 
 	fallSites.SetExportSiteInputs(settings.ExportSiteInputs);
 	fallSites.SetHotReloadBakes(settings.HotReloadBakes);
+	fallSites.SetDebugTint(settings.DebugCopyTint);
 	// Vanilla's pieces at the cached sites hide while our pass draws their falls
 	if (!RefractiveFallsActive())
 		fallsShown = false;
@@ -403,8 +405,10 @@ void FluidFieldWaterfalls::PrepareFallGroundData(const RE::BSGeometry* a_geometr
 	auto* property = a_property;
 	auto* material = property ? property->material : nullptr;
 	const uint32_t buffer = globals::game::smState ? globals::game::smState->textureTransformCurrentBuffer : 0;
-	fallGroundData.TexOffset[0] = material ? material->texCoordOffset[buffer].x : 0.0f;
-	fallGroundData.TexOffset[1] = material ? material->texCoordOffset[buffer].y : 0.0f;
+	// a per-mesh copy's uvs are its bake's flow uv: the vanilla material's scroll and zoom do not apply
+	const bool flowUv = fallSites.HasFlowUv(a_geometry);
+	fallGroundData.TexOffset[0] = material && !flowUv ? material->texCoordOffset[buffer].x : 0.0f;
+	fallGroundData.TexOffset[1] = material && !flowUv ? material->texCoordOffset[buffer].y : 0.0f;
 	// D85: one phase per frame, latched at the first falls draw
 	if (const uint32_t frame = globals::state->frameCount; frame != fallPhaseFrame) {
 		fallPhaseFrame = frame;
@@ -448,8 +452,8 @@ void FluidFieldWaterfalls::PrepareFallGroundData(const RE::BSGeometry* a_geometr
 	uint32_t vertexBase = 0;
 	fallGroundData.VertexBase = fallClipSRV && fallSites.GetVertexClip(a_geometry, vertexBase) && vertexBase < fallSites.GetVertexClips().size() ? vertexBase : UINT32_MAX;
 	// D57: vanilla's slow texture zoom is taken out too
-	fallGroundData.InverseScale[0] = material && material->texCoordScale[buffer].x > 1e-4f ? 1.0f / material->texCoordScale[buffer].x : 1.0f;
-	fallGroundData.InverseScale[1] = material && material->texCoordScale[buffer].y > 1e-4f ? 1.0f / material->texCoordScale[buffer].y : 1.0f;
+	fallGroundData.InverseScale[0] = material && !flowUv && material->texCoordScale[buffer].x > 1e-4f ? 1.0f / material->texCoordScale[buffer].x : 1.0f;
+	fallGroundData.InverseScale[1] = material && !flowUv && material->texCoordScale[buffer].y > 1e-4f ? 1.0f / material->texCoordScale[buffer].y : 1.0f;
 	// D59: this mesh's flow bake, where it is solved
 	o_bake = nullptr;
 	if (const auto it = fallBakeSRVs.find(a_geometry); it != fallBakeSRVs.end()) {

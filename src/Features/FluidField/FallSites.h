@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FallCapture.h"
+#include "FallVisibility.h"
 #include "LandscapeCache.h"
 #include "ShallowWaterSolver.h"
 #include "WaterSurfaces.h"
@@ -116,6 +117,12 @@ namespace FluidFieldSim
 		/** @brief D26: whether a geometry is a falling-water mesh at a ground-captured site; the pointer is only compared. */
 		bool IsGrounded(const RE::BSGeometry* a_geometry) const { return grounded.contains(a_geometry); }
 		/** @brief D56: a sheet's first index into GetVertexClips (per vertex: cuts, fades, water height, shifts). */
+		/** @brief Whether a mesh's uvs are its bake's own flow uv (a per-mesh copy built through its bake's table): no material transform. */
+		bool HasFlowUv(const RE::BSGeometry* a_geometry) const
+		{
+			const auto it = bakeFields.find(a_geometry);
+			return it != bakeFields.end() && it->second && !it->second->uvMap.empty();
+		}
 		bool GetVertexClip(const RE::BSGeometry* a_geometry, uint32_t& a_base) const
 		{
 			const auto it = vertexClipBase.find(a_geometry);
@@ -187,9 +194,28 @@ namespace FluidFieldSim
 		mutable std::size_t loggedLips = SIZE_MAX;  ///< Lip count last logged
 
 		/** @brief Writes each cached site's sheets, statics, landscape and captured rock next to the log, for tools/unify. */
-		void SetExportSiteInputs(bool a_on) { exportSiteInputs = a_on; }
+		void SetExportSiteInputs(bool a_on)
+		{
+			exportDue = exportDue || (a_on && !exportSiteInputs);  // switched on: written at the next idle update
+			exportSiteInputs = a_on;
+		}
 		/** @brief Dev: rereads a site's bake when its file changes on disk. */
 		void SetHotReloadBakes(bool a_on) { hotReloadBakes = a_on; }
+		/** @brief Dev: copies made again with each triangle its own shade of its fall group's colour (vertex colours), every other
+		 * falls piece in the area hidden: the copies' meshes show alone. */
+		void SetDebugTint(bool a_on)
+		{
+			if (a_on != debugTint) {
+				debugTint = a_on;
+				for (auto& hidden : debugHidden) {
+					if (hidden)
+						hidden->SetAppCulled(false);
+				}
+				debugHidden.clear();
+				RemoveDense();  // made again (the originals hidden again then)
+				groundedDue = true;
+			}
+		}
 
 		static constexpr float CLUSTER_RADIUS = 512.0f;
 		static constexpr float RAPIDS_CLUSTER_RADIUS = 128.0f;  ///< Rapids and splashes away from any fall cluster only this close
@@ -218,7 +244,11 @@ namespace FluidFieldSim
 		uint64_t waterSignature = 0;
 		uint32_t updatesUntilScan = 0;
 		bool exportSiteInputs = false;
+		bool exportDue = false;
 		bool hotReloadBakes = false;
+		bool debugTint = false;
+		bool groundedDue = false;                                 ///< RefreshGrounded at the next idle update (a dev toggle: no event brings it)
+		std::vector<RE::NiPointer<RE::BSGeometry>> debugHidden;   ///< Dev: the vanilla falls pieces SetDebugTint hid
 		std::unordered_map<uint64_t, std::string> cellSummaries;  ///< Last summary logged per cell
 		std::unordered_map<uint64_t, FallCapture> captures;       ///< By Site::captureKey
 		std::unordered_set<const RE::BSGeometry*> grounded;
@@ -370,6 +400,7 @@ namespace FluidFieldSim
 			Cull,
 			Link,
 			Plunges,
+			Dense,
 			Count
 		};
 		struct LoadTiming
@@ -489,6 +520,9 @@ namespace FluidFieldSim
 			std::vector<RE::NiPointer<RE::BSGeometry>> hidden;  ///< The members' meshes it replaces (app-culled)
 		};
 		std::vector<UnifiedCache> unifiedCaches;
+		static constexpr bool UNIFIED_SITES = false;  ///< The offline unified sheets, parked: the falls are each vanilla mesh culled at runtime
+		/** shortcut: per-mesh falls only between Riverwood and Whiterun (x min, y min, x max, y max); drop once every fall is covered. */
+		static constexpr float PER_MESH_AREA[4] = { 27000.0f, -35000.0f, 38500.0f, -14000.0f };
 		bool unifiedLoaded = false;
 		std::unordered_map<std::size_t, UnifiedShape> unifiedOf;  ///< By cache index
 		std::unordered_set<const RE::BSGeometry*> unifiedShapes;
@@ -502,6 +536,81 @@ namespace FluidFieldSim
 		RE::BSTriShape* AttachUnified(std::size_t a_cache, RE::NiNode* a_root, RE::BSGeometry* a_material);
 		/** @brief Detaches every site shape and shows the members' meshes again. */
 		void RemoveUnified();
+		/**
+		 * @brief D73: a copy of a vanilla falls mesh, built by the engine and drawn in its place, cut to what can be seen: under the
+		 * landscape (D172) and hidden from outside (D173). Cuts, seams and bakes work on the copy.
+		 */
+		struct DenseCopy
+		{
+			RE::NiPointer<RE::BSTriShape> shape;
+			RE::NiPointer<RE::BSGeometry> original;
+			RE::NiPointer<RE::NiNode> parent;
+			uint32_t site = 0;  ///< Its fall group (Site::id when it was made)
+		};
+		std::unordered_map<const RE::BSGeometry*, DenseCopy> denseOf;  ///< By original
+		std::unordered_set<const RE::BSGeometry*> denseShapes;
+		std::unordered_map<const RE::BSGeometry*, std::vector<uint16_t>> untrimmedIndices;  ///< D172: by copy, the whole sheet (bakes read it)
+		static constexpr float DENSE_TRIM_UNDER = 24.0f;                                    ///< D172: cut this far under the landscape (the cut line stays in the ground)
+		static constexpr float DENSE_EDGE = 48.0f;                                          ///< D73: longest edge, budget allowing (D91: only longer split); runtime falls: low-tri
+		static constexpr float DENSE_EDGE_NEAR = 16.0f;                                     ///< D186: ...and near a solid at most this (cut lines round boulders run smooth)
+		static constexpr float DENSE_NEAR_REACH = 64.0f;                                    ///< D186: world units from a solid an edge's middle counts as near it
+		static constexpr std::size_t DENSE_NEAR_BUDGET = 35000;                             ///< D186: no finer splitting near solids past this (16-bit indices)
+		static constexpr int DENSE_LEVELS = 8;                                              ///< D73: splitting passes at most
+		static constexpr int DENSE_SHAPE_PASSES = 5;                                        ///< D186: Taubin pairs smoothing the copy's shape at the end...
+		static constexpr int DENSE_UV_PASSES = 0;                                           ///< D188: UV relaxing passes per smoothing round (0: off, zigzags)
+		static constexpr float DENSE_UV_STEP = 0.4f;                                        ///< D188: ...how far toward their neighbours' mean each pass
+		static constexpr int DENSE_SHAPE_LEVEL_PASSES = 2;                                  ///< D186: ...and after each round of splitting
+		static constexpr int DENSE_CURVE_SPREAD = 3;                                        ///< D190: bend-spreading passes per pass
+		static constexpr int DENSE_CURVE_SOLVE = 120;                                       ///< D190: passes solving the shape to the spread bend
+		static constexpr float DENSE_CURVE_STEP = 0.8f;                                     ///< D190: ...each this share of the way
+		static constexpr int DENSE_CURVE_TIDY = 1;                                          ///< D190: Taubin pairs after it
+		static constexpr float DENSE_SHAPE_MOST = 40.0f;                                    ///< D186: most a vertex moves in shaping, eased (tanh)
+		static constexpr int DENSE_NORMAL_PASSES = 7;                                       ///< D186: passes softening the copy's normals over its neighbours
+		/** @brief D172: a copy in the making: the original's geometry copied on the render thread, made on a worker. */
+		struct DenseJob
+		{
+			RE::NiPointer<RE::BSGeometry> geometry;
+			std::vector<RE::NiPoint3> positions, normals, tangents, bitangents;
+			std::vector<RE::NiPoint2> uvs;
+			std::vector<RE::NiColorA> colors;
+			std::vector<std::array<uint32_t, 3>> triangles, untrimmed;
+			std::vector<uint16_t> indices;
+			RE::NiTransform world;
+			LandscapeCache land;  ///< The cells round the mesh
+			bool haveColors = false, interior = false, ok = false;
+			uint32_t site = 0;  ///< Its fall group: a group's meshes are made and trimmed in one batch
+			double computeMs = 0.0;
+			bool facets = false;  ///< Dev (SetDebugTint): each triangle its own vertices, shaded apart
+			uint32_t vertexCount = 0, triangleCount = 0, trimmedAway = 0, trimmedSplit = 0;
+			uint32_t hiddenAway = 0;  ///< D173: triangles seen from nowhere (TrimHidden)
+			float lo[2]{}, hi[2]{};   ///< D173: its world bounds (x, y)
+		};
+		/** @brief D173: what TrimHidden needs from the render thread: what can hide the batch's sheets. */
+		struct ShellInput
+		{
+			std::vector<Triangle> occluders;  ///< The statics' triangles round the batch (other groups' copies are not in it)
+			LandscapeCache land;              ///< The landscape as far as the rays reach
+			bool interior = false;
+			double gatherMs = 0.0;
+		};
+		/** @brief D173: on the worker, after the batch's copies are made: their triangles seen from nowhere dropped. */
+		static void TrimHidden(const std::vector<DenseJob*>& a_jobs, const ShellInput& a_shell);
+		static constexpr float OCCLUDER_REACH = 1024.0f;  ///< D173: world units round a batch its statics are gathered
+		static constexpr float SHELL_MARGIN = 64.0f;      ///< D173: world units along a sheet past what is seen that are kept
+		bool ReadDense(RE::BSGeometry* a_geometry, DenseJob& o_job) const;
+		static void ComputeDense(DenseJob& a_job, const ShellInput* a_solids = nullptr);
+		bool AttachDense(DenseJob& a_job);
+		/** @brief D172: attaches the copies a finished worker made, and grounds them. */
+		void FinishDenseWork();
+		std::future<void> denseWork;
+		std::vector<std::unique_ptr<DenseJob>> denseJobs;
+		std::unordered_set<const RE::BSGeometry*> denseFailed;  ///< D172: originals with no copy: drawn as they are
+		std::chrono::steady_clock::time_point denseStarted;
+		double trimMs = 0.0;  ///< D173: the last batch's TrimHidden
+		/** @brief D73: removes every copy and shows the originals again. */
+		void RemoveDense();
+		/** @brief A copy's offline bake (FluidField/Bakes/<form ID>_<shape>.ffbk, tools/unify/bake_meshes.py), or null. */
+		static std::shared_ptr<BakeField> LoadMeshBake(RE::BSGeometry* a_original);
 		static constexpr int32_t FRAME_REACH = 4;  ///< D186: texels each way the flow's frame is measured over
 		static constexpr int FRAME_BLUR = 3;       ///< D186: passes softening it
 		/** @brief D173: the statics' render triangles over an area (not the falls' models); o_report logs each reference's fate. */
@@ -518,15 +627,22 @@ namespace FluidFieldSim
 			std::vector<float> turn, speed, wake, foam;  ///< Across per down (texels), speed (world units/s over 300), aeration and foam
 			std::vector<float> seed, along;              ///< D80: the lip column each texel's strand came over (texels), and its run from the top (texture v)
 			std::vector<RE::NiPoint3> normal;
-			std::vector<uint8_t> rock;                 ///< D75: texels inside rock
-			std::vector<float> swell;                  ///< D82: how much the water piles up there (the vertex push)
-			std::vector<float> disturbance;            ///< D85: how stirred the water is there (the wobble's size)
-			std::vector<float> fallen;                 ///< D190: world units its water has recently fallen down steep faces
-			std::vector<float> calm;                   ///< D190: world units run on calm water from the lip
-			std::vector<RE::NiPoint3> flow;            ///< Flow direction (world, unit)
-			std::vector<float> streak;                 ///< Streaks left (1, to 0 once its water has met rock)
-			std::vector<float> contact, contactTail;   ///< Distance to rock, land or the pool, and that swept down the flow
-			std::vector<float> bulge;                  ///< Heave over hidden rock (0 to 1)
+			std::vector<uint8_t> rock;                ///< D75: texels inside rock
+			std::vector<float> swell;                 ///< D82: how much the water piles up there (the vertex push)
+			std::vector<float> disturbance;           ///< D85: how stirred the water is there (the wobble's size)
+			std::vector<float> fallen;                ///< D190: world units its water has recently fallen down steep faces
+			std::vector<float> calm;                  ///< D190: world units run on calm water from the lip
+			std::vector<RE::NiPoint3> flow;           ///< Flow direction (world, unit)
+			std::vector<float> streak;                ///< Streaks left (1, to 0 once its water has met rock)
+			std::vector<float> contact, contactTail;  ///< Distance to rock, land or the pool, and that swept down the flow
+			std::vector<float> bulge;                 ///< Heave over hidden rock (0 to 1)
+			/** A per-mesh bake's grid lies in its flow uv (bake_meshes.py: v downstream): its mesh's vanilla uv to that, a table over
+			 * vanillaMin..+vanillaSize (empty: the bake is in the mesh's own uv). */
+			uint32_t uvMapWidth = 0, uvMapHeight = 0;
+			float vanillaMin[2]{}, vanillaSize[2]{};
+			std::vector<RE::NiPoint2> uvMap;
+			/** @brief A vanilla uv in this bake's grid's uv (bilinear in the table; unchanged without one). */
+			RE::NiPoint2 FlowUv(const RE::NiPoint2& a_vanilla) const;
 			std::vector<float> clearFront, clearBack;  ///< D104: open water or air on each side of the sheet
 		};
 		static constexpr float PLUNGE_WHITE_HEIGHT = 300.0f;  ///< D190: world units from tangent to foot over which a fall whitens fully
