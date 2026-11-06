@@ -83,9 +83,9 @@ static const float BOW_FULL_SPEED = 60.0;
 static const float BOW_FRESH_SPEED = 250.0;
 static const float BOW_FRESH_RAMP = 150.0;
 /** D44: foam per second where a waterfall plunges in at full strength; enough for the pools under falls to read white. */
-static const float PLUNGE_RATE = 2.2;
+static const float PLUNGE_RATE = 1.1;
 /** D49: extra foam where the falls meet the water (plunge near 1), solid to hide the falls' cut. */
-static const float PLUNGE_RIM_RATE = 2.0;  // Higher saturates the pool into a flat band
+static const float PLUNGE_RIM_RATE = 1.0;  // Higher saturates the pool into a flat band
 
 /** Eight neighbour directions, for finding obstacles. */
 static const int2 NEIGHBOURS[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };

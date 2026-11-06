@@ -327,7 +327,7 @@ namespace FluidField
 	}
 
 	/** Strongest whitening of the water body by bubbles (fraction of the foam colour). */
-	static const float MAX_AERATION = 0.15;
+	static const float MAX_AERATION = 0.3;
 	/** How far foam's colour goes from the lit water colour toward the scene light. */
 	static const float FOAM_WHITENESS = 0.1;
 
@@ -338,6 +338,17 @@ namespace FluidField
 	float3 FoamColor(float3 a_waterLit, float3 a_light)
 	{
 		return lerp(a_waterLit, a_light, FOAM_WHITENESS);
+	}
+
+	/** How far the river's foam leans toward the water's hue, and how much of the scene light it returns. */
+	static const float RIVER_FOAM_TINT = 0.15;
+	static const float RIVER_FOAM_ALBEDO = 0.35;
+
+	/** The river's foam: near-white lit by the scene light, slightly tinted by the water; FoamColor's water-based colour read grey wherever the water reads dark. */
+	float3 RiverFoamColor(float3 a_waterLit, float3 a_light)
+	{
+		const float3 hue = a_waterLit / max(max(a_waterLit.r, max(a_waterLit.g, a_waterLit.b)), 1e-4);
+		return a_light * RIVER_FOAM_ALBEDO * lerp(1.0, hue, RIVER_FOAM_TINT);
 	}
 
 	/** Bubbles make rapids milkier than pools: blends toward the foam colour by foam and flow speed. */

@@ -1700,6 +1700,7 @@ PS_OUTPUT main(PS_INPUT input)
 	// Foam lies on the surface, so it takes the surface's shadow, not the refracted point's under the
 	// water: that one moves with every ripple and makes the foam flicker in sunlight
 	const float3 fluidFoamLight = FluidField::FoamColor(dirColor + ambientColor, ShadowSampling::GetDirectionalLighting() * surfaceShadow + fluidAmbientLight);
+	const float3 fluidRiverFoamLight = FluidField::RiverFoamColor(dirColor + ambientColor, ShadowSampling::GetDirectionalLighting() * surfaceShadow + fluidAmbientLight);
 #					if defined(FLUID_FIELD_FALLS)
 	// D189: the surface foam lit over its relief
 	float3 fallFoamLight = fluidFoamLight * fallFoamShade *
@@ -1747,8 +1748,8 @@ PS_OUTPUT main(PS_INPUT input)
 	{
 		// Bubbles in fast, foamy water make the water body lighter and milkier
 		const float3 fluidPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
-		FluidField::ApplyAeration(diffuseOutput.refractionDiffuseColor, fluidPosition, fluidFoamLight, 1.0);
-		FluidField::ApplyAeration(diffuseOutput.refractionColor, fluidPosition, fluidFoamLight, 0.5);
+		FluidField::ApplyAeration(diffuseOutput.refractionDiffuseColor, fluidPosition, fluidRiverFoamLight, 1.0);
+		FluidField::ApplyAeration(diffuseOutput.refractionColor, fluidPosition, fluidRiverFoamLight, 0.5);
 	}
 #					endif
 #					if defined(FLUID_FIELD_FALLS)
@@ -1885,7 +1886,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float specularFraction = lerp(1, fresnel * surfaceMul, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(diffuseColor, specularColor, specularFraction) + sunColor * sunMul;
 #						if defined(FLUID_FIELD)
-	FluidField::ApplyFoam(finalColorPreFog, input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, fluidFoamLight);
+	FluidField::ApplyFoam(finalColorPreFog, input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, fluidRiverFoamLight);
 #						endif
 
 #						if !defined(UNIFIED_WATER)
@@ -2001,7 +2002,7 @@ PS_OUTPUT main(PS_INPUT input)
 		{
 			const FoamLook::Sample look = FluidField::FoamLookAt(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz);
 			if (look.cover > 0.0) {
-				const float3 foamLight = FoamLook::Light(look, fluidFoamLight, normal, viewDirection, SharedData::DirLightDirection.xyz,
+				const float3 foamLight = FoamLook::Light(look, fluidRiverFoamLight, normal, viewDirection, SharedData::DirLightDirection.xyz,
 					ShadowSampling::GetDirectionalLighting() * surfaceShadow, fluidAmbientLight, diffuseOutput.refractionDiffuseColor, specularColor, fresnel);
 				const float opacity = lerp(waterOpacity, 1.0, look.cover);
 				finalColorPreFog = (finalColorPreFog * (waterOpacity * (1.0 - look.cover)) + foamLight * look.cover) / max(opacity, 1e-3);

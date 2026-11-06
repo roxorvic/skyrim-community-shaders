@@ -55,7 +55,7 @@ namespace FluidFieldSim
 		float riverSpeed = 0.0f;          ///< World units per second at full flowmap strength
 		float vorticity = 0.0f;           ///< Vorticity confinement strength (0: off)
 		float foamStrength = 1.0f;        ///< Scales how much foam the flow makes (0: none)
-		float foamMax = 1.5f;             ///< Most foam a cell holds (1 is fully white once drawn)
+		float foamMax = 1.0f;             ///< Most foam a cell holds (1 is fully white once drawn)
 		/// Another level's flow output (foam in z) and placement, seeding foam in cells entering the grid so the near level inherits it
 		ID3D11ShaderResourceView* seedFoam = nullptr;
 		std::int32_t seedGridMin[2]{};

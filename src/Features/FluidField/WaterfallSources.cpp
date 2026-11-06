@@ -40,7 +40,7 @@ namespace FluidFieldSim
 		constexpr float BRINK_SPEED = 150.0f;
 
 		/** @brief Foam made per second at the plunge. */
-		constexpr float FOAM_RATE = 0.6f;
+		constexpr float FOAM_RATE = 0.3f;
 
 		std::string Lowercase(const char* a_text)
 		{
