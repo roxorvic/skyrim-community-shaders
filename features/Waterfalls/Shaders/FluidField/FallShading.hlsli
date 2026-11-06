@@ -300,6 +300,8 @@ namespace FallShading
 	 * scattered inside it). */
 	static const float FOAM_DIFFUSE = 0.55;
 	static const float FOAM_WRAP = 1.0;
+	/** The falls' white (foam, milk, bubbles) at night as a share of its day brightness: less light scatters through it. */
+	static const float FOAM_NIGHT_LIGHT = 0.4;
 	/** The foam never brighter than a white surface of FOAM_ALBEDO under the sun and sky, eased in above FOAM_KNEE of that. */
 	static const float FOAM_ALBEDO = 0.85;
 	/**

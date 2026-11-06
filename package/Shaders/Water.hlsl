@@ -1699,8 +1699,15 @@ PS_OUTPUT main(PS_INPUT input)
 #					endif
 	// Foam lies on the surface, so it takes the surface's shadow, not the refracted point's under the
 	// water: that one moves with every ripple and makes the foam flicker in sunlight
-	const float3 fluidFoamLight = FluidField::FoamColor(dirColor + ambientColor, ShadowSampling::GetDirectionalLighting() * surfaceShadow + fluidAmbientLight);
-	const float3 fluidRiverFoamLight = FluidField::RiverFoamColor(dirColor + ambientColor, ShadowSampling::GetDirectionalLighting() * surfaceShadow + fluidAmbientLight);
+	const float3 fluidLight = ShadowSampling::GetDirectionalLighting() * surfaceShadow + fluidAmbientLight;
+	const float fluidFoamFade = FluidField::FoamDaylight();
+	float3 fluidFoamLight = FluidField::FoamTint(FluidField::FoamColor(dirColor + ambientColor, fluidLight), fluidLight);
+#					if defined(FLUID_FIELD_FALLS)
+	fluidFoamLight *= lerp(FallShading::FOAM_NIGHT_LIGHT, 1.0, FluidField::Daylight());
+#					endif
+	// The river's foam lies flat: the sun or moon lights it by its height, or a low moon over-lights it against the land
+	const float3 fluidRiverFoamSun = ShadowSampling::GetDirectionalLighting() * surfaceShadow * saturate(SharedData::DirLightDirection.z);
+	const float3 fluidRiverFoamLight = FluidField::FoamTint(FluidField::RiverFoamColor(dirColor + ambientColor, fluidRiverFoamSun + fluidAmbientLight), fluidLight);
 #					if defined(FLUID_FIELD_FALLS)
 	// D189: the surface foam lit over its relief
 	float3 fallFoamLight = fluidFoamLight * fallFoamShade *
@@ -1748,8 +1755,8 @@ PS_OUTPUT main(PS_INPUT input)
 	{
 		// Bubbles in fast, foamy water make the water body lighter and milkier
 		const float3 fluidPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
-		FluidField::ApplyAeration(diffuseOutput.refractionDiffuseColor, fluidPosition, fluidRiverFoamLight, 1.0);
-		FluidField::ApplyAeration(diffuseOutput.refractionColor, fluidPosition, fluidRiverFoamLight, 0.5);
+		FluidField::ApplyAeration(diffuseOutput.refractionDiffuseColor, fluidPosition, fluidRiverFoamLight, fluidFoamFade);
+		FluidField::ApplyAeration(diffuseOutput.refractionColor, fluidPosition, fluidRiverFoamLight, 0.5 * fluidFoamFade);
 	}
 #					endif
 #					if defined(FLUID_FIELD_FALLS)
@@ -1861,7 +1868,7 @@ PS_OUTPUT main(PS_INPUT input)
 #						else
 		const float fluidMatte = FluidField::FoamMatte(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz);
 #						endif
-		sunColor *= 1.0 - 0.9 * fluidMatte;
+		sunColor *= 1.0 - fluidMatte;  // even a tenth of a glint shows through the foam's gaps as white flecks
 		specularColor *= 1.0 - 0.5 * fluidMatte;
 	}
 #					endif
@@ -1885,9 +1892,6 @@ PS_OUTPUT main(PS_INPUT input)
 #					if defined(VC)
 	float specularFraction = lerp(1, fresnel * surfaceMul, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(diffuseColor, specularColor, specularFraction) + sunColor * sunMul;
-#						if defined(FLUID_FIELD)
-	FluidField::ApplyFoam(finalColorPreFog, input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, fluidRiverFoamLight);
-#						endif
 
 #						if !defined(UNIFIED_WATER)
 	float fogDistanceFactor = input.FogParam.w;
@@ -1992,25 +1996,14 @@ PS_OUTPUT main(PS_INPUT input)
 					const float eased = knee + (ceiling - knee) * (1.0 - exp(-(lum - knee) / (ceiling - knee)));
 					fallFoamLight *= eased / lum;
 				}
+				fallFoamLight = FluidField::FoamTint(fallFoamLight, fluidLight);
 			}
 			const float fallOpacity = lerp(waterOpacity, 1.0, fallFoam);
 			finalColorPreFog = (finalColorPreFog * (waterOpacity * (1.0 - fallFoam)) + fallFoamLight * fallFoam) / max(fallOpacity, 1e-3);
 			waterOpacity = fallOpacity;
 		}
 #							else
-		// the water's lobe foam (FoamLook): thick, lumpy, with gaps
-		{
-			FoamLook::Sample look = FluidField::FoamLookAt(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz);
-			// Measured: the lobes' cover mostly sits between 0.3 and 0.7, so gaps never cleared; open them, firm the lobes
-			look.cover = smoothstep(0.3, 0.6, look.cover) * FoamLook::FOAM_OPACITY;
-			if (look.cover > 0.0) {
-				const float3 foamLight = FoamLook::Light(look, fluidRiverFoamLight, normal, viewDirection, SharedData::DirLightDirection.xyz,
-					ShadowSampling::GetDirectionalLighting() * surfaceShadow, fluidAmbientLight, diffuseOutput.refractionDiffuseColor, specularColor, fresnel);
-				const float opacity = lerp(waterOpacity, 1.0, look.cover);
-				finalColorPreFog = (finalColorPreFog * (waterOpacity * (1.0 - look.cover)) + foamLight * look.cover) / max(opacity, 1e-3);
-				waterOpacity = opacity;
-			}
-		}
+		// shortcut: the river's lobe foam (FoamLook) is off: its sparse peaks read as bright white specks; redo it before drawing it again
 #							endif
 	}
 #						endif

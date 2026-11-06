@@ -52,7 +52,7 @@ namespace FoamLook
 	static const float FOAM_SSS_TINT = 0.6;
 	static const float FOAM_SSS_THICK = 0.4;
 	/** The brightest the foam gets, as a share of the scene light (sun and sky) this shader receives; measured: at 0.3 solid foam read only 35% above the water. */
-	static const float FOAM_ALBEDO = 0.6;
+	static const float FOAM_ALBEDO = 0.3;
 	static const float FOAM_KNEE = 0.75;
 
 	float2 FlowScale(float a_worldScale)

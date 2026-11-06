@@ -335,13 +335,41 @@ namespace FluidField
 
 	/** How far the river's foam leans toward the water's hue, and how much of the scene light it returns. */
 	static const float RIVER_FOAM_TINT = 0.15;
-	static const float RIVER_FOAM_ALBEDO = 0.6;
+	static const float RIVER_FOAM_ALBEDO = 0.3;
 
 	/** The river's foam: near-white lit by the scene light, slightly tinted by the water; FoamColor's water-based colour read grey wherever the water reads dark. */
 	float3 RiverFoamColor(float3 a_waterLit, float3 a_light)
 	{
 		const float3 hue = a_waterLit / max(max(a_waterLit.r, max(a_waterLit.g, a_waterLit.b)), 1e-4);
 		return a_light * RIVER_FOAM_ALBEDO * lerp(1.0, hue, RIVER_FOAM_TINT);
+	}
+
+	/** Foam's share of its day look at night: less light scatters through it, so it sinks back toward the water. */
+	static const float FOAM_NIGHT = 0.2;
+	/** The sun's height (direction z) from full night to full day, for the foam's fade. */
+	static const float2 FOAM_DAY_SUN = float2(-0.05, 0.25);
+
+	/** 1 by day, 0 at night, by the sun's height. */
+	float Daylight()
+	{
+		return smoothstep(FOAM_DAY_SUN.x, FOAM_DAY_SUN.y, SharedData::SunDirection.z);
+	}
+
+	/** 1 by day, FOAM_NIGHT at night. */
+	float FoamDaylight()
+	{
+		return lerp(FOAM_NIGHT, 1.0, Daylight());
+	}
+
+	/** How much of the light's hue white foam keeps. */
+	static const float FOAM_LIGHT_TINT = 0.3;
+
+	/** Foam reads white-ish whatever the light's colour: its brightness kept, a little of the light's hue (sun and sky). */
+	float3 FoamTint(float3 a_foam, float3 a_light)
+	{
+		const float3 luma = float3(0.2126, 0.7152, 0.0722);
+		const float3 lightHue = a_light / max(dot(a_light, luma), 1e-4);
+		return dot(a_foam, luma) * lerp(1.0, lightHue, FOAM_LIGHT_TINT);
 	}
 
 	/** Bubbles make rapids milkier than pools: blends toward the foam colour by foam and flow speed. */
@@ -359,49 +387,12 @@ namespace FluidField
 		return saturate(FlowFoamAtWorld(a_worldPosition.xy).z * 1.5);
 	}
 
-	/** D181: most foam cover (river, falls and pools), slightly see-through. */
-	static const float FOAM_OPACITY = 0.8;
 	/** World units one tile of the foam's breakup pattern covers. */
 	static const float FOAM_TILE = 160.0;
-	/** How much of the foam the pattern can thin out. */
-	static const float FOAM_BREAKUP = 0.5;
 	/** Seconds between restarts of each foam pattern phase; short so it never stretches far. */
 	static const float FOAM_PERIOD = 2.0;
 	/** Fastest foam pattern drift (world units/s). */
 	static const float FOAM_MAX_DRIFT = 30.0;
-
-	/**
-	 * Foam cover (0 to 1): simulated foam broken up by vanilla's normal texture dragged two-phase along the smoothed flow
-	 * at a capped speed; raw flow's tight swirls smear it.
-	 */
-	float GetFoamCover(float3 a_worldPosition)
-	{
-		const float4 flowFoam = FlowFoamAtWorld(a_worldPosition.xy);
-		const float foam = flowFoam.z;
-		if (foam <= 0.02)
-			return 0.0;
-		// D68: per-patch restart offset; with one clock the cross-fade thinned all foam at once and it pulsed
-		const float2 foamPatch = a_worldPosition.xy / (FOAM_TILE * 2.5);
-		const float2 cell = floor(foamPatch);
-		const float2 f = foamPatch - cell;
-		const float2 s = f * f * (3.0 - 2.0 * f);
-		const float4 corner = frac(sin(float4(dot(cell, float2(127.1, 311.7)), dot(cell + float2(1, 0), float2(127.1, 311.7)), dot(cell + float2(0, 1), float2(127.1, 311.7)),
-									   dot(cell + float2(1, 1), float2(127.1, 311.7)))) *
-								   43758.5453);
-		const float offset = lerp(lerp(corner.x, corner.y, s.x), lerp(corner.z, corner.w, s.x), s.y);
-		const float time = SharedData::Timer / FOAM_PERIOD + offset * 2.0;
-		const float phase0 = frac(time);
-		const float phase1 = frac(time + 0.5);
-		const float2 uv = a_worldPosition.xy / FOAM_TILE;
-		float2 flow = SampleFlow(a_worldPosition);
-		flow *= min(1.0, FOAM_MAX_DRIFT / max(length(flow), 1e-3));
-		const float2 drift = flow * FOAM_PERIOD / FOAM_TILE;
-		const float p0 = length(Normals01Tex.SampleBias(Normals01Sampler, uv - drift * phase0, SharedData::MipBias).xy * 2.0 - 1.0);
-		const float p1 = length(Normals01Tex.SampleBias(Normals01Sampler, uv - drift * phase1 + 0.37, SharedData::MipBias).xy * 2.0 - 1.0);
-		const float pattern = saturate(lerp(p0, p1, abs(phase0 * 2.0 - 1.0)) * 1.4);
-		// A soft breakup: a hard cut through the pattern turned medium foam into speckle, streaked by the drift, and dense foam solid
-		return saturate(foam) * lerp(1.0 - FOAM_BREAKUP, 1.0, pattern) * FOAM_OPACITY;
-	}
 
 	/** The river's foam in the falls' lobe look (FoamLook), on two flow-dragged phases, its foam as their aeration. */
 	FoamLook::Sample FoamLookAt(float3 a_worldPosition)
@@ -435,15 +426,6 @@ namespace FluidField
 		r.slope = lerp(a.slope, b.slope, w);
 		r.whole = lerp(a.whole, b.whole, w);
 		return r;
-	}
-
-	/** Draws foam (a_foamColor, from FoamColor) over a water colour. Returns the foam cover. */
-	float ApplyFoam(inout float3 a_color, float3 a_worldPosition, float3 a_foamColor)
-	{
-		const float cover = GetFoamCover(a_worldPosition);
-		if (cover > 0.0)
-			a_color = lerp(a_color, a_foamColor, cover);
-		return cover;
 	}
 
 	/** Water depth (world units) at which the tint reaches its full strength. */
