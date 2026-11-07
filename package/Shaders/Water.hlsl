@@ -1474,8 +1474,10 @@ PS_OUTPUT main(PS_INPUT input)
 		const float gap = FallShading::AerationGaps(fallFlow.uvA, FallGround::Time) * (1.0 - 0.7 * heavy);
 		fallAerationGap = gap;
 		const float clump = lerp(lerp(1.0 - FallShading::AERATION_CLUMP, 1.0, FallShading::Morphing(fallFlow.uvA, FallShading::AERATION_CLUMP_CELLS, FallGround::Time + 5.1)), 1.0, heavy);
+		// in the gaps between the dropped water's ribbons it thins (its own gaps fell elsewhere, and the two together covered it all)
+		const float betweenRibbons = lerp(1.0, FallShading::AERATION_BETWEEN_RIBBONS, (1.0 - smoothstep(0.0, 0.5, fallRibbons.x)) * fallDropped * (1.0 - heavy));
 		const float drive = smoothstep(FallShading::UNIFIED_AERATION_DRIVE.x, FallShading::UNIFIED_AERATION_DRIVE.y, fallFlow.fields.w) * lerp(1.0, FallShading::AERATION_HEAVY_DRIVE, heavy) *
-		                    fallLip * (1.0 - gap) * clump * fallLumpEdge * lerp(fallBreakup, 1.0, heavy);
+		                    fallLip * (1.0 - gap) * clump * fallLumpEdge * lerp(fallBreakup, 1.0, heavy) * betweenRibbons;
 		fallUnifiedAerationDrive = drive;
 		float2 jumpA, jumpB;
 		const float churnWeight = FallShading::FoamChurn(FallGround::Time, jumpA, jumpB);
