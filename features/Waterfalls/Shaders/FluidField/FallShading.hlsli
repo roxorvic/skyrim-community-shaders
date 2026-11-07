@@ -101,7 +101,7 @@ namespace FallShading
 	static const float BUBBLE_HIGHLIGHT = 2.0;
 	/** D180: world units of water through a falling sheet, for its depth tint. */
 	static const float SHEET_DEPTH = 96.0;  // Less reads as glass beside the river
-	static const float BED_FILM = 40.0;     // World units of water the least over its bed (the bake's depth behind is 0 where it lies on rock)
+	static const float SHEET_FILM = 40.0;   // World units of water a falls sheet's clear look is tinted by (a film over air or rock)
 	/** D181: the least depth a sheet is tinted as (the river's shallows tint ramps over 256). */
 	static const float SHEET_TINT_DEPTH = 160.0;
 	/** D186: how milky aeration and speed make the falls (FluidField::ApplyAeration's measure). */

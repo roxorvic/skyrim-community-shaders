@@ -1245,6 +1245,7 @@ namespace FluidFieldSim
 		}
 		if (clipQueue.empty()) {
 			logger::info("[Fluid Field] Waterfall rock cut: {} vertices of {} lit meshes tested", clipTested, vertexClipBase.size());
+			linkDue = true;  // linked again with every mesh's clip base: the swell and wobble (ComputePushes) skip a mesh without one
 			// D172: on a worker (1.8 s in one frame for a cascade); Update holds everything else back meanwhile (Busy)
 			heavyWork = std::async(std::launch::async, [this]() {
 				const auto start = std::chrono::steady_clock::now();

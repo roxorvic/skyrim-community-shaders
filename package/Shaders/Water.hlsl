@@ -1200,8 +1200,8 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 #					if defined(FLUID_FIELD_FALLS)
 	// D180: a falling sheet holds its own thickness along the view, not the (mostly air) path behind it, which read as deep, opaque water
 	// ...and so does a crest bulging over its lip (where FallFalling is 0): through it the view reached the bed far below and read as
-	// deep, opaque water. At most the water over its bed (FallData.x, the bake's depth behind), at least BED_FILM
-	distanceMul = min(distanceMul, saturate(min(FallShading::SHEET_DEPTH / max(abs(dot(viewDirection, FallUp)), 0.25), max(input.FallData.x, FallShading::BED_FILM)) / FogParam.z));
+	// deep, opaque water. A falls sheet is a film, whatever lies behind it (under a dome that is mostly air): at most SHEET_FILM
+	distanceMul = min(distanceMul, saturate(min(FallShading::SHEET_DEPTH / max(abs(dot(viewDirection, FallUp)), 0.25), FallShading::SHEET_FILM) / FogParam.z));
 #					endif
 #				endif
 
