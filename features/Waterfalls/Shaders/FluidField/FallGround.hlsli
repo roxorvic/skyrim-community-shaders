@@ -13,8 +13,8 @@ namespace FallGround
 		float Size;         // Texels per side
 		uint Enabled;       // This draw is a grounded mesh
 		uint Pad0;
-		float Time;  // Seconds
-		float Pad1;
+		float Time;           // Seconds
+		float AerationBuild;  // how fast the water takes in air (scales the bake's air: 1 as baked)
 		float2 Scroll;        // D67: the falls' shared scroll (texture coordinates, at most one repeat) and its rate per second
 		float2 TexOffset;     // Vanilla's texture scroll, removed from the coordinates
 		float3 CameraOffset;  // D38: FrameBuffer::CameraPosAdjust, for vertex shaders without it
@@ -349,6 +349,8 @@ namespace FallGround
 		result.wake = 0.0;
 		result.runTime = max(baked.y, 0.0) / max(Scroll.y, 1e-3);
 		result.fields = BakeFieldsAt(uvStill);
+		// the bake's aeration is 1 - exp(-air): the setting scales its air
+		result.fields.w = 1.0 - pow(saturate(1.0 - result.fields.w), max(AerationBuild, 0.0));
 		const float4 third = BakeRowsAt(uvStill, 2);
 		result.streak = saturate(third.x);
 		result.contact = BakeRowsAt(uvStill, 4).xyz;

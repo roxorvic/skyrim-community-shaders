@@ -1161,7 +1161,7 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 #				if defined(FLUID_FIELD_FALLS)
 	// D159: the river's offset along the sheet, by the normal's tilt off the sheet's own normal (MPosition is camera-relative here)
 	const float3 fallTilt = normal - dot(normal, FallUp) * FallUp;
-	const float4 refractionClip = mul(FrameBuffer::CameraViewProj, float4(input.MPosition.xyz + VarAmounts.w * refractionsDepthFactor * fallTilt, 1));
+	const float4 refractionClip = mul(FrameBuffer::CameraViewProj, float4(input.MPosition.xyz + VarAmounts.w * refractionsDepthFactor * FallShading::FLOW_REFRACTION * fallTilt, 1));
 	float2 refractionUvRaw = saturate(refractionClip.xy / max(refractionClip.w, 1e-4) * float2(0.5, -0.5) + 0.5);
 #				else
 	float4 refractionNormal = mul(transpose(TextureProj), float4((VarAmounts.w * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));

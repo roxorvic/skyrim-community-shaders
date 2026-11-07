@@ -36,6 +36,7 @@ struct FluidFieldWaterfalls : Feature
 		float FallAerationFoam = 1.0f;    ///< Share of the bake's aeration that turns to white foam
 		float FallAerationFrom = 0.3f;    ///< Aeration where that foam begins (whole at 1)
 		float FallAerationMilk = 1.0f;    ///< Scales how milky aeration makes the clear water
+		float FallAerationBuild = 1.0f;   ///< How fast the water takes in air as it runs (scales the group bake's air)
 		bool ExportSiteInputs = false;    ///< Dev: writes each site's inputs next to the log for tools/unify (JSON only)
 		bool HotReloadBakes = false;      ///< Dev: re-reads a site's bake when its file changes (JSON only)
 		bool DebugCopyTint = false;       ///< Dev: tints each per-mesh copy by its fall group; untinted falls are vanilla (JSON only)
@@ -127,7 +128,7 @@ private:
 		uint32_t Enabled;
 		uint32_t Pad0;
 		float Time;
-		float Pad1;
+		float AerationBuild;  ///< FallAerationBuild
 		float Scroll[2];
 		float TexOffset[2];
 		float CameraOffset[3];

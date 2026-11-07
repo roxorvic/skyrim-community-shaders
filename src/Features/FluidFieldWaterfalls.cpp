@@ -25,6 +25,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FallAerationFoam,
 	FallAerationFrom,
 	FallAerationMilk,
+	FallAerationBuild,
 	ExportSiteInputs,
 	HotReloadBakes,
 	DebugCopyTint)
@@ -48,6 +49,8 @@ void FluidFieldWaterfalls::DrawSettings()
 	tooltip(T(TKEY("fall_aeration_from_tooltip"), "The bake's aeration where that foam begins: lower starts the foam higher up the drop."));
 	ImGui::SliderFloat(T(TKEY("fall_aeration_milk"), "Aeration Milk"), &settings.FallAerationMilk, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	tooltip(T(TKEY("fall_aeration_milk_tooltip"), "How milky aeration makes the clear water (0: stays clear)."));
+	ImGui::SliderFloat(T(TKEY("fall_aeration_build"), "Aeration Build"), &settings.FallAerationBuild, 0.1f, 4.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fall_aeration_build_tooltip"), "How fast the water takes in air as it runs down the falls: higher turns it white sooner, lower keeps it clear longer."));
 	ImGui::SliderFloat(T(TKEY("fall_speed"), "Falls Speed"), &settings.FallSpeed, 0.5f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
 	tooltip(T(TKEY("fall_speed_tooltip"), "How fast the falls' water runs, against vanilla's own speed. The whole flow speeds up alike, so the texture never stretches."));
 	ImGui::Checkbox(T(TKEY("hide_underwater_falls"), "Hide Buried Falls"), &settings.HideUnderwaterFalls);
@@ -65,7 +68,8 @@ FluidFieldWaterfalls::Settings FluidFieldWaterfalls::Sanitize(Settings a_setting
 	// The look floats reach the shaders as they are, so only non-finite values are replaced
 	for (auto [value, fallback] : { std::pair{ &a_settings.FallSpeed, defaults.FallSpeed }, std::pair{ &a_settings.FallFoamStart, defaults.FallFoamStart },
 			 std::pair{ &a_settings.FallAerationFoam, defaults.FallAerationFoam }, std::pair{ &a_settings.FallAerationFrom, defaults.FallAerationFrom },
-			 std::pair{ &a_settings.FallAerationMilk, defaults.FallAerationMilk } }) {
+			 std::pair{ &a_settings.FallAerationMilk, defaults.FallAerationMilk },
+			 std::pair{ &a_settings.FallAerationBuild, defaults.FallAerationBuild } }) {
 		if (!std::isfinite(*value))
 			*value = fallback;
 	}
@@ -397,6 +401,7 @@ void FluidFieldWaterfalls::UpdateFallGround(const RE::NiPoint3& a_playerPos)
 	fallGroundData.AerationLook[1] = settings.FallAerationFoam;
 	fallGroundData.AerationLook[2] = settings.FallAerationMilk;
 	fallGroundData.AerationLook[3] = settings.FallAerationFrom;
+	fallGroundData.AerationBuild = settings.FallAerationBuild;
 }
 
 void FluidFieldWaterfalls::PrepareFallGroundData(const RE::BSGeometry* a_geometry, RE::BSShaderProperty* a_property, ID3D11ShaderResourceView*& o_bake)

@@ -1400,6 +1400,8 @@
     "feature.fluid_field_waterfalls.description": "Draws waterfalls as clear, flowing water shaded like the river they pour from.",
     "feature.fluid_field_waterfalls.enabled": "Enabled",
     "feature.fluid_field_waterfalls.enabled_tooltip": "Draws the waterfalls as clear, flowing water shaded like the river they pour from.",
+    "feature.fluid_field_waterfalls.fall_aeration_build": "Aeration Build",
+    "feature.fluid_field_waterfalls.fall_aeration_build_tooltip": "How fast the water takes in air as it runs down the falls: higher turns it white sooner, lower keeps it clear longer.",
     "feature.fluid_field_waterfalls.fall_aeration_foam": "Aeration Foam",
     "feature.fluid_field_waterfalls.fall_aeration_foam_tooltip": "How much of the bake's aeration turns to white foam: higher makes the lower falls frothier.",
     "feature.fluid_field_waterfalls.fall_aeration_from": "Aeration Threshold",

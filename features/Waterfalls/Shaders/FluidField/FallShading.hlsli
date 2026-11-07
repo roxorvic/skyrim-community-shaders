@@ -107,7 +107,7 @@ namespace FallShading
 	/** D186: how milky aeration and speed make the falls (FluidField::ApplyAeration's measure). */
 	static const float MILK_AERATION = 0.35;
 	/** D189: the most the falls go toward the foam's light; the river's MAX_AERATION left them near black out of the sun. */
-	static const float MILK_MOST = 0.3;
+	static const float MILK_MOST = 0.15;
 	/** D189: the falls' body colour floor, as a share of ambient light (low: ambient runs well over 1). */
 	static const float BODY_AMBIENT = 0.06;
 	/** D189: milk streaked down the fall: foam pattern scale across and along the flow, and how far it moves the milk either way. */
@@ -220,7 +220,9 @@ namespace FallShading
 		return lerp(body, a_light * 1.4, rim * BUBBLE_RIM) + a_sunColor * highlight * BUBBLE_HIGHLIGHT;
 	}
 
-	static const float DROP_CREST_NORMAL = 0.25;
+	static const float DROP_CREST_NORMAL = 1.0;  // the user, 2026-11-07: clear falls water keeps its flow's normals, or it reads as glass
+	/** How far the falls' normals bend what shows through them (x the river's refraction): moving water distorts its bed. */
+	static const float FLOW_REFRACTION = 2.5;
 
 	static const float RIBBON_STREAK_DETAIL = 0.25;
 	/** D191: field threshold where ribbons start and where they have merged. */
@@ -278,7 +280,7 @@ namespace FallShading
 	/** The share of time a streak is on (its life noise over 1 minus this). */
 	static const float STREAK_ON_SHARE = 0.67;
 	/** The aeration from which the surface whitens (below it, only milk and bubbles under the surface). */
-	static const float SURFACE_WHITE_FROM = 0.95;
+	static const float SURFACE_WHITE_FROM = 0.5;  // group bakes: the ribbons build with the aeration, streaks first
 	/** The clear water's opacity over rock close behind and over a gap, and the depth behind (world units) between. */
 	static const float CLEAR_OVER_ROCK = 0.2;
 	static const float CLEAR_OVER_GAP = 0.95;
@@ -346,13 +348,13 @@ namespace FallShading
 	 * back where its foam covers over UNIFIED_MILK_UNDER_FOAM (of whole cover): its body toward a milky white kept UNIFIED_MILK_HUE in
 	 * its own colour, by UNIFIED_MILK; what lies behind veiled by UNIFIED_MILK_VEIL and shown UNIFIED_MURK less.
 	 */
-	static const float2 UNIFIED_MILK_FROM = float2(0.1, 0.65);
+	static const float2 UNIFIED_MILK_FROM = float2(0.3, 1.0);
 	static const float2 UNIFIED_MILK_UNDER_FOAM = float2(0.05, 0.9);  ///< its foam's drive over which milk eases down (gradually)
 	static const float UNIFIED_MILK_IN_FOAM = 0.02;                   ///< what is left of it where foam forms (its openings barely milky)
-	static const float UNIFIED_MILK = 0.6;
+	static const float UNIFIED_MILK = 0.3;
 	static const float UNIFIED_MILK_HUE = 0.4;
 	static const float UNIFIED_MILK_VEIL = 0.45;
-	static const float UNIFIED_MURK = 0.5;
+	static const float UNIFIED_MURK = 0.3;
 
 	/** How milky the water is (0 to 1): by its baked aeration, none where its foam forms (a_foam: the foam's drive, so its openings
 	 * stay clear too), past its crest (a_lip). */
@@ -387,7 +389,7 @@ namespace FallShading
 	static const float STREAK_FOAM_DRIVE = 1.4;
 	static const float STREAK_CLUMP = 0.675;
 	static const float STREAK_OPACITY = 0.85;
-	static const float2 UNIFIED_AERATION_DRIVE = float2(0.2, 0.62);  ///< its baked aeration (tops out near 0.8) from none to whole aeration foam
+	static const float2 UNIFIED_AERATION_DRIVE = float2(0.6, 1.0);  ///< its baked aeration from none to whole aeration foam (group bakes reach 1)
 	/** Brief clear patches in the aeration, opening and shutting in place. */
 	static const float2 AERATION_GAP_CELLS = float2(22.0, 14.0);    ///< per uv unit, across and along; a second lattice is 1.6 x finer
 	static const float AERATION_GAP_PERIOD = 6.0;                   ///< seconds between a cell's patches
@@ -403,7 +405,7 @@ namespace FallShading
 	/** The aeration clumped by a slow noise (cells across and along), down to 1 - AERATION_CLUMP between clumps. */
 	static const float2 AERATION_CLUMP_CELLS = float2(40.0, 12.0);
 	/** From this baked aeration to the next the most aerated water is nearly covered (drive past whole, less clumping and gaps). */
-	static const float2 AERATION_HEAVY = float2(0.52, 0.66);
+	static const float2 AERATION_HEAVY = float2(0.9, 1.0);
 	static const float AERATION_HEAVY_DRIVE = 1.5;     // More drives every grain value past the cover: a flat sheet
 	static const float AERATION_LAYER_OPACITY = 1.06;  ///< the top layer's cover, at most ~85% (the volume's own is 0.7)
 	static const float AERATION_CLUMP = 0.6;
