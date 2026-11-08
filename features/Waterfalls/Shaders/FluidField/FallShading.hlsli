@@ -355,10 +355,10 @@ namespace FallShading
 	 * back where its foam covers over UNIFIED_MILK_UNDER_FOAM (of whole cover): its body toward a milky white kept UNIFIED_MILK_HUE in
 	 * its own colour, by UNIFIED_MILK; what lies behind veiled by UNIFIED_MILK_VEIL and shown UNIFIED_MURK less.
 	 */
-	static const float2 UNIFIED_MILK_FROM = float2(0.15, 0.8);
+	static const float2 UNIFIED_MILK_FROM = float2(0.05, 0.6);
 	static const float2 UNIFIED_MILK_UNDER_FOAM = float2(0.05, 0.9);  ///< its foam's drive over which milk eases down (gradually)
 	static const float UNIFIED_MILK_IN_FOAM = 0.02;                   ///< what is left of it where foam forms (its openings barely milky)
-	static const float UNIFIED_MILK = 0.2;
+	static const float UNIFIED_MILK = 0.35;
 	static const float UNIFIED_MILK_HUE = 0.4;
 	static const float UNIFIED_MILK_VEIL = 0.45;
 	static const float UNIFIED_MURK = 0.4;
@@ -396,7 +396,7 @@ namespace FallShading
 	static const float STREAK_FOAM_DRIVE = 1.4;
 	static const float STREAK_CLUMP = 0.675;
 	static const float STREAK_OPACITY = 0.85;
-	static const float2 UNIFIED_AERATION_DRIVE = float2(0.3, 0.85);  ///< its baked aeration from none to whole aeration foam (group bakes reach 1)
+	static const float2 UNIFIED_AERATION_DRIVE = float2(0.15, 0.95);  ///< its baked aeration from none to whole aeration foam (group bakes reach 1)
 	/** Brief clear patches in the aeration, opening and shutting in place. */
 	static const float2 AERATION_GAP_CELLS = float2(22.0, 14.0);    ///< per uv unit, across and along; a second lattice is 1.6 x finer
 	static const float AERATION_GAP_PERIOD = 6.0;                   ///< seconds between a cell's patches
