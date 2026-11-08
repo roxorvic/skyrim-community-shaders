@@ -1423,7 +1423,7 @@ PS_OUTPUT main(PS_INPUT input)
 	const float fallLip = max(FallShading::Lip(input.FallData.y, fallFlow.runTime), fallDropped);
 	const float fallBehind = max(SharedData::GetScreenDepth(DepthTex.Load(int3(input.HPosition.xy, 0)).x) - fallDepth, 0.0);
 	const float fallAboveWater = FallShading::AboveWater(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, input.FallFade.z, input.FallFade.y, input.FallData.y);
-	const float fallFoamStretch = fallFlow.stretch;  // D182: no shear (FlowFoamPattern wraps the coordinate)
+	const float fallFoamStretch = fallFlow.stretch / FallShading::FOAM_STREAK_LENGTH;  // D182: no shear (FlowFoamPattern wraps the coordinate)
 	// D189: the bake's own foam (strikes, squeezes, rejoins) and the ribbons'
 	const float fallBakeFoam = saturate(fallFlow.foam * FallShading::BAKE_FOAM) * fallLip;
 	const float fallFoamSource = max(fallBakeFoam, fallWhite * FallShading::PLUNGE_WHITE_FOAM * fallLip);
@@ -1475,7 +1475,7 @@ PS_OUTPUT main(PS_INPUT input)
 		fallAerationGap = gap;
 		const float clump = lerp(lerp(1.0 - FallShading::AERATION_CLUMP, 1.0, FallShading::Morphing(fallFlow.uvA, FallShading::AERATION_CLUMP_CELLS, FallGround::Time + 5.1)), 1.0, heavy);
 		// in the gaps between the dropped water's ribbons it thins (its own gaps fell elsewhere, and the two together covered it all)
-		const float betweenRibbons = lerp(1.0, FallShading::AERATION_BETWEEN_RIBBONS, (1.0 - smoothstep(0.0, 0.5, fallRibbons.x)) * fallDropped * (1.0 - heavy));
+		const float betweenRibbons = lerp(1.0, FallShading::AERATION_BETWEEN_RIBBONS, (1.0 - smoothstep(0.0, 0.5, fallRibbons.x)) * fallDropped * (1.0 - heavy) * (1.0 - smoothstep(FallShading::LOBE_FLAT.x, FallShading::LOBE_FLAT.y, abs(FallUp.z))));  // (curtains only: lobes have no ribbons)
 		const float drive = smoothstep(FallShading::UNIFIED_AERATION_DRIVE.x, FallShading::UNIFIED_AERATION_DRIVE.y, fallFlow.fields.w) * lerp(1.0, FallShading::AERATION_HEAVY_DRIVE, heavy) *
 		                    fallLip * (1.0 - gap) * clump * fallLumpEdge * lerp(fallBreakup, 1.0, heavy) * betweenRibbons;
 		fallUnifiedAerationDrive = drive;
@@ -1714,9 +1714,9 @@ PS_OUTPUT main(PS_INPUT input)
 	const float3 fluidRiverFoamLight = FluidField::FoamTint(FluidField::RiverFoamColor(dirColor + ambientColor, fluidRiverFoamSun + fluidAmbientLight), fluidLight);
 #					if defined(FLUID_FIELD_FALLS)
 	// D189: the surface foam lit over its relief
-	float3 fallFoamLight = fluidFoamLight * fallFoamShade *
+	float3 fallFoamLight = FluidField::FoamTint(fluidLight * FallShading::FOAM_BASE_ALBEDO, fluidLight) * lerp(FallShading::FOAM_NIGHT_LIGHT, 1.0, FluidField::Daylight()) * fallFoamShade *
 	                       lerp(1.0, FallShading::FoamRelief(FallUp, fallFoamNormal, fallFoamPattern, fallFoamSunHeight, SharedData::DirLightDirection.xyz, Color::RGBToLuminance(ShadowSampling::GetDirectionalLighting() * surfaceShadow), Color::RGBToLuminance(fluidAmbientLight)),
-							   fallSurfaceShare);
+							   fallSurfaceShare * lerp(1.0, FallShading::LOBE_RELIEF, smoothstep(FallShading::LOBE_FLAT.x, FallShading::LOBE_FLAT.y, abs(FallUp.z)) * smoothstep(FallShading::AERATION_HEAVY.x, FallShading::AERATION_HEAVY.y, fallFlow.fields.w)));
 	// D189: the body takes at least some ambient light (by drop and steepness), or falls out of the sun go black
 	diffuseOutput.refractionDiffuseColor = max(diffuseOutput.refractionDiffuseColor,
 		fluidAmbientLight * FallShading::BODY_AMBIENT * max(fallDropped, saturate((1.0 - abs(FallUp.z)) * 1.5)));

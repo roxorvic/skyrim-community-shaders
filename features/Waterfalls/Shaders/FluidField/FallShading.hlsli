@@ -28,6 +28,13 @@ namespace FallShading
 	static const float FOAM_TILE = 160.0;
 	static const float FOAM_PERIOD = 0.6;
 	static const float FOAM_MAX_DRIFT = 120.0;
+	/** The falls' foam grain drawn out this many times along the flow: streaks, not round blobs (leopard). */
+	static const float FOAM_STREAK_LENGTH = 3.0;
+	/** The falls' foam lit as a white surface of this albedo (the river's FoamColor is mostly the water's own colour: grey here). */
+	static const float FOAM_BASE_ALBEDO = 0.6;
+	/** On flat, fully aerated water (lobes) the flow coordinates fan and curl: the relief kept to this share there, or it draws marble. */
+	static const float LOBE_RELIEF = 0.25;
+	static const float2 LOBE_FLAT = float2(0.35, 0.75);
 	/** Output cap: one runaway HDR value becomes a square after bloom and the upscalers. */
 	static const float MAX_OUTPUT = 64.0;
 	static const float NONE_ABOVE = 500.0;
