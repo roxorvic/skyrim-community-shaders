@@ -1423,7 +1423,9 @@ PS_OUTPUT main(PS_INPUT input)
 	const float fallLip = max(FallShading::Lip(input.FallData.y, fallFlow.runTime), fallDropped);
 	const float fallBehind = max(SharedData::GetScreenDepth(DepthTex.Load(int3(input.HPosition.xy, 0)).x) - fallDepth, 0.0);
 	const float fallAboveWater = FallShading::AboveWater(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, input.FallFade.z, input.FallFade.y, input.FallData.y);
-	const float fallFoamStretch = fallFlow.stretch / FallShading::FOAM_STREAK_LENGTH;  // D182: no shear (FlowFoamPattern wraps the coordinate)
+	// the foam's holes drawn out along the flow as its grain is; narrowed across, not slowed along, so they keep the water's pace (round holes read as spots)
+	const float2 fallHoleUv = fallFlow.uvA * float2(FallShading::FOAM_STREAK_LENGTH, 1.0);  // (narrowed across: slowing the along slid them against the water)
+	const float fallFoamStretch = fallFlow.stretch;                                         // D182: no shear (FlowFoamPattern wraps the coordinate)
 	// D189: the bake's own foam (strikes, squeezes, rejoins) and the ribbons'
 	const float fallBakeFoam = saturate(fallFlow.foam * FallShading::BAKE_FOAM) * fallLip;
 	const float fallFoamSource = max(fallBakeFoam, fallWhite * FallShading::PLUNGE_WHITE_FOAM * fallLip);
@@ -1441,14 +1443,12 @@ PS_OUTPUT main(PS_INPUT input)
 		// the lumps: only well below where the foam starts (by the aeration, which only grows down the sheet), coming and going with
 		// the streaks' own intervals (their column's on/off timer)
 		const float lumps = smoothstep(FallShading::LUMP_FROM.x, FallShading::LUMP_FROM.y, fallFlow.fields.w) * lerp(FallShading::LUMP_STREAK_OFF, 1.0, fallStreakOn);
-		const float fine = lerp(1.0 - FallShading::LUMP_EDGE, 1.0 + 0.5 * FallShading::LUMP_EDGE, FallShading::Morphing(fallFlow.uvA * float2(1.0, 1.0 / FallShading::FOAM_STREAK_LENGTH), FallShading::LUMP_EDGE_CELLS, boil * FallShading::LUMP_EDGE_RATE + 3.1));
+		const float fine = lerp(1.0 - FallShading::LUMP_EDGE, 1.0 + 0.5 * FallShading::LUMP_EDGE, FallShading::Morphing(fallHoleUv, FallShading::LUMP_EDGE_CELLS, boil * FallShading::LUMP_EDGE_RATE + 3.1));
 		// and bigger ones over them (the lumps from fine up to LUMP_BIG_CELLS in size)
-		const float big = lerp(1.0 - FallShading::LUMP_BIG, 1.0 + 0.4 * FallShading::LUMP_BIG, FallShading::Morphing(fallFlow.uvA * float2(1.0, 1.0 / FallShading::FOAM_STREAK_LENGTH), FallShading::LUMP_BIG_CELLS, boil + 8.3));
+		const float big = lerp(1.0 - FallShading::LUMP_BIG, 1.0 + 0.4 * FallShading::LUMP_BIG, FallShading::Morphing(fallHoleUv, FallShading::LUMP_BIG_CELLS, boil + 8.3));
 		fallLumpEdge = lerp(1.0, fine * big, lumps);
 	}
 	// The foam's breakup, shared by its kinds
-	// the foam's holes drawn out along the flow as its grain is (round holes read as spots)
-	const float2 fallHoleUv = fallFlow.uvA * float2(1.0, 1.0 / FallShading::FOAM_STREAK_LENGTH);
 	const float fallBreakup = FallShading::FoamBreakup(FallFoamTex, Normals01Sampler, fallFlow.uvA, SharedData::MipBias, 1.0 / FallShading::FOAM_STREAK_LENGTH);
 	const float fallFoamDrive = fallFoamSource * fallLumpEdge * lerp(fallBreakup, 1.0, smoothstep(0.45, 0.85, fallFoamSource));
 	// D190: read where the view meets the raised lumps (parallax)

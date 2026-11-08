@@ -697,11 +697,12 @@ namespace FallShading
 	/** D189: FlowFoamPattern taking its tiles' screen gradients (ddx, ddy of a_flowUv * FlowScale(FOAM_TILE)), for use in branches. */
 	float FlowFoamPatternGrad(Texture2D<float4> a_tex, SamplerState a_sampler, float2 a_flowUv, float2 a_tilesDx, float2 a_tilesDy, float a_mipBias, float a_stretch)
 	{
-		const float2 tiles = a_flowUv * FlowScale(FOAM_TILE);
+		// drawn out FOAM_STREAK_LENGTH along: phases that long, read that much further per phase (so it still moves with the water)
+		const float2 tiles = a_flowUv * FlowScale(FOAM_TILE) * float2(1.0, 1.0 / FOAM_STREAK_LENGTH);
 		const float phase0 = frac(tiles.y);
 		const float phase1 = frac(tiles.y + 0.5);
-		const float2 uv0 = float2(tiles.x, (phase0 - 0.5) * a_stretch);
-		const float2 uv1 = float2(tiles.x + 0.43, (phase1 - 0.5) * a_stretch + 0.29);
+		const float2 uv0 = float2(tiles.x, (phase0 - 0.5) * a_stretch * FOAM_STREAK_LENGTH);
+		const float2 uv1 = float2(tiles.x + 0.43, (phase1 - 0.5) * a_stretch * FOAM_STREAK_LENGTH + 0.29);
 		// Gradients from the unwrapped coordinates (the wrap's jump would pick the lowest mip along its seam)
 		const float bias = exp2(a_mipBias);
 		const float2 dx = a_tilesDx * float2(1.0, a_stretch) * bias, dy = a_tilesDy * float2(1.0, a_stretch) * bias;
