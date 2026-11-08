@@ -1441,13 +1441,15 @@ PS_OUTPUT main(PS_INPUT input)
 		// the lumps: only well below where the foam starts (by the aeration, which only grows down the sheet), coming and going with
 		// the streaks' own intervals (their column's on/off timer)
 		const float lumps = smoothstep(FallShading::LUMP_FROM.x, FallShading::LUMP_FROM.y, fallFlow.fields.w) * lerp(FallShading::LUMP_STREAK_OFF, 1.0, fallStreakOn);
-		const float fine = lerp(1.0 - FallShading::LUMP_EDGE, 1.0 + 0.5 * FallShading::LUMP_EDGE, FallShading::Morphing(fallFlow.uvA, FallShading::LUMP_EDGE_CELLS, boil * FallShading::LUMP_EDGE_RATE + 3.1));
+		const float fine = lerp(1.0 - FallShading::LUMP_EDGE, 1.0 + 0.5 * FallShading::LUMP_EDGE, FallShading::Morphing(fallFlow.uvA * float2(1.0, 1.0 / FallShading::FOAM_STREAK_LENGTH), FallShading::LUMP_EDGE_CELLS, boil * FallShading::LUMP_EDGE_RATE + 3.1));
 		// and bigger ones over them (the lumps from fine up to LUMP_BIG_CELLS in size)
-		const float big = lerp(1.0 - FallShading::LUMP_BIG, 1.0 + 0.4 * FallShading::LUMP_BIG, FallShading::Morphing(fallFlow.uvA, FallShading::LUMP_BIG_CELLS, boil + 8.3));
+		const float big = lerp(1.0 - FallShading::LUMP_BIG, 1.0 + 0.4 * FallShading::LUMP_BIG, FallShading::Morphing(fallFlow.uvA * float2(1.0, 1.0 / FallShading::FOAM_STREAK_LENGTH), FallShading::LUMP_BIG_CELLS, boil + 8.3));
 		fallLumpEdge = lerp(1.0, fine * big, lumps);
 	}
 	// The foam's breakup, shared by its kinds
-	const float fallBreakup = FallShading::FoamBreakup(FallFoamTex, Normals01Sampler, fallFlow.uvA, SharedData::MipBias, 1.0);
+	// the foam's holes drawn out along the flow as its grain is (round holes read as spots)
+	const float2 fallHoleUv = fallFlow.uvA * float2(1.0, 1.0 / FallShading::FOAM_STREAK_LENGTH);
+	const float fallBreakup = FallShading::FoamBreakup(FallFoamTex, Normals01Sampler, fallFlow.uvA, SharedData::MipBias, 1.0 / FallShading::FOAM_STREAK_LENGTH);
 	const float fallFoamDrive = fallFoamSource * fallLumpEdge * lerp(fallBreakup, 1.0, smoothstep(0.45, 0.85, fallFoamSource));
 	// D190: read where the view meets the raised lumps (parallax)
 	const float2 fallFoamUv = FallShading::FoamParallax(FallFoamTex, Normals01Sampler, fallFlow.uvA, fallViewShift, SharedData::MipBias, fallFoamStretch);
@@ -1471,9 +1473,9 @@ PS_OUTPUT main(PS_INPUT input)
 	{
 		// the most aerated water nearly covered: driven past whole, its gaps, clumps and breakup easing off
 		const float heavy = smoothstep(FallShading::AERATION_HEAVY.x, FallShading::AERATION_HEAVY.y, fallFlow.fields.w);
-		const float gap = FallShading::AerationGaps(fallFlow.uvA, FallGround::Time) * (1.0 - 0.7 * heavy);
+		const float gap = FallShading::AerationGaps(fallHoleUv, FallGround::Time) * (1.0 - 0.7 * heavy);
 		fallAerationGap = gap;
-		const float clump = lerp(lerp(1.0 - FallShading::AERATION_CLUMP, 1.0, FallShading::Morphing(fallFlow.uvA, FallShading::AERATION_CLUMP_CELLS, FallGround::Time + 5.1)), 1.0, heavy);
+		const float clump = lerp(lerp(1.0 - FallShading::AERATION_CLUMP, 1.0, FallShading::Morphing(fallHoleUv, FallShading::AERATION_CLUMP_CELLS, FallGround::Time + 5.1)), 1.0, heavy);
 		// in the gaps between the dropped water's ribbons it thins (its own gaps fell elsewhere, and the two together covered it all)
 		const float betweenRibbons = lerp(1.0, FallShading::AERATION_BETWEEN_RIBBONS, (1.0 - smoothstep(0.0, 0.5, fallRibbons.x)) * fallDropped * (1.0 - heavy) * (1.0 - smoothstep(FallShading::LOBE_FLAT.x, FallShading::LOBE_FLAT.y, abs(FallUp.z))));  // (curtains only: lobes have no ribbons)
 		const float drive = smoothstep(FallShading::UNIFIED_AERATION_DRIVE.x, FallShading::UNIFIED_AERATION_DRIVE.y, fallFlow.fields.w) * lerp(1.0, FallShading::AERATION_HEAVY_DRIVE, heavy) *
@@ -1488,7 +1490,7 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 	// The streaks' foam clumped, then joined with the aeration's into one foam (reinforcing where both are): one cover cut from them on
 	// the one grain, so they run into each other rather than lying one over the other
-	const float fallStreakClump = lerp(1.0 - FallShading::STREAK_CLUMP, 1.0, FallShading::Morphing(fallFlow.uvA, FallShading::AERATION_CLUMP_CELLS, FallGround::Time + 2.3));
+	const float fallStreakClump = lerp(1.0 - FallShading::STREAK_CLUMP, 1.0, FallShading::Morphing(fallHoleUv, FallShading::AERATION_CLUMP_CELLS, FallGround::Time + 2.3));
 	float fallFoam;
 	float fallSurfaceFoam;
 	float fallFoamForming;  // the foam's joined drive: no milk wherever foam forms (its openings stay clear)

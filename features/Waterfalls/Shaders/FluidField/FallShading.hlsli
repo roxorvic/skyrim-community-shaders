@@ -401,9 +401,9 @@ namespace FallShading
 	static const float2 AERATION_GAP_CELLS = float2(22.0, 14.0);    ///< per uv unit, across and along; a second lattice is 1.6 x finer
 	static const float AERATION_GAP_PERIOD = 6.0;                   ///< seconds between a cell's patches
 	static const float AERATION_GAP_LIFE = 0.35;                    ///< of the period a patch is open
-	static const float AERATION_GAP_CHANCE = 0.3;                   ///< of a cell's cycles that open one
+	static const float AERATION_GAP_CHANCE = 0.15;                  ///< of a cell's cycles that open one
 	static const int AERATION_GAP_LATTICES = 1;                     ///< 2: a second, finer lattice too
-	static const float2 AERATION_GAP_SIZE = float2(0.18, 0.38);     ///< radius across (cells), smallest to largest
+	static const float2 AERATION_GAP_SIZE = float2(0.12, 0.26);     ///< radius across (cells), smallest to largest
 	static const float AERATION_GAP_STRETCH = 1.8;                  ///< its length along over its width
 	static const float AERATION_GAP_DRIFT = 0.8;                    ///< cells along it may drift on its own over its life (each its own speed)
 	static const float AERATION_GAP_RAGGED = 0.6;                   ///< its rim broken by this share of its radius (two scales of noise)
@@ -416,7 +416,7 @@ namespace FallShading
 	static const float AERATION_BETWEEN_RIBBONS = 0.35;  ///< the aeration foam's share left between the dropped water's ribbons
 	static const float AERATION_HEAVY_DRIVE = 1.15;      // (1.5 drove every grain value past the cover: a flat sheet)
 	static const float AERATION_LAYER_OPACITY = 1.06;    ///< the top layer's cover, at most ~85% (the volume's own is 0.7)
-	static const float AERATION_CLUMP = 0.6;
+	static const float AERATION_CLUMP = 0.35;
 	/** Seconds per layout of the foam grain (two crossfaded, each jumping across while unseen: it churns, not slides). */
 	static const float FOAM_CHURN_SECONDS = 1.6;
 
