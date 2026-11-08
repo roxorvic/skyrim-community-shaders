@@ -396,7 +396,7 @@ namespace FallShading
 	static const float STREAK_FOAM_DRIVE = 1.4;
 	static const float STREAK_CLUMP = 0.675;
 	static const float STREAK_OPACITY = 0.85;
-	static const float2 UNIFIED_AERATION_DRIVE = float2(0.15, 0.95);  ///< its baked aeration from none to whole aeration foam (group bakes reach 1)
+	static const float2 UNIFIED_AERATION_DRIVE = float2(0.03, 0.85);  ///< its baked aeration from none to whole aeration foam (group bakes reach 1)
 	/** Brief clear patches in the aeration, opening and shutting in place. */
 	static const float2 AERATION_GAP_CELLS = float2(22.0, 14.0);    ///< per uv unit, across and along; a second lattice is 1.6 x finer
 	static const float AERATION_GAP_PERIOD = 6.0;                   ///< seconds between a cell's patches
