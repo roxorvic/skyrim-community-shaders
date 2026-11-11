@@ -295,6 +295,9 @@ void FluidFieldGroundFog::Prepass()
 	}
 
 	// Coarse to fine (each takes its edges from the one round it), then each absorbs the finer one
+	// Rocks, logs and trunks are walls on the fine and medium levels (the far level's cells are wider than a rock); from the
+	// ground map's last fill
+	const FluidFieldSim::WallMap walls{ .srv = groundHeight.GetSRV(), .min = { fogGroundMin[0], fogGroundMin[1] }, .resolution = FOG_GROUND_RESOLUTION, .cellSize = FOG_GROUND_CELL };
 	const auto step = [&](uint a_index, const FluidFieldSim::WindSolver* a_parent, const FluidFieldSim::WindSolver* a_child, float a_deltaTime, uint a_iterations) {
 		auto& level = levels[a_index];
 		FluidFieldSim::StepParams params{
@@ -306,7 +309,8 @@ void FluidFieldGroundFog::Prepass()
 			.movers = movers,
 			.fog = &fogParams,
 			.parent = a_parent,
-			.child = a_child
+			.child = a_child,
+			.walls = a_index < 2 && fogReady ? &walls : nullptr
 		};
 		static constexpr const char* NAMES[LEVEL_COUNT] = { "Fine", "Medium", "Far" };
 		ZoneScopedN("FluidField - Wind Step");

@@ -54,5 +54,5 @@ static const float EDGE_RELAX = 0.5;
 	if (HasOther != 0)
 		velocity = lerp(velocity, parent, Levels::EdgeWeight(logical) * EDGE_RELAX);
 
-	VelocityOut[id] = velocity;
+	VelocityOut[id] = Levels::Solid(logical) ? 0.0 : velocity;
 }

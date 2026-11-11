@@ -9,7 +9,8 @@ namespace FluidFieldSim
 	namespace
 	{
 		constexpr std::uint32_t GROUP_SIZE = 8;  // FLUIDFIELD_GROUP_SIZE in Common.hlsli
-		constexpr std::uint32_t MAX_SRVS = 6;
+		constexpr std::uint32_t MAX_SRVS = 6;    // Per pass; t7 holds the wall map for the whole step
+		constexpr std::uint32_t WALL_SLOT = 7;
 		constexpr std::uint32_t MAX_UAVS = 5;
 
 		ID3D11ShaderResourceView* const NULL_SRVS[MAX_SRVS] = {};
@@ -78,6 +79,10 @@ namespace FluidFieldSim
 		cbDesc.ByteWidth = sizeof(LevelConstants);
 		winrt::check_hresult(device->CreateBuffer(&cbDesc, nullptr, levelConstants.put()));
 		name(levelConstants.get(), ("FluidField::" + label + "LevelConstants").c_str());
+
+		cbDesc.ByteWidth = sizeof(WallConstants);
+		winrt::check_hresult(device->CreateBuffer(&cbDesc, nullptr, wallConstants.put()));
+		name(wallConstants.get(), ("FluidField::" + label + "WallConstants").c_str());
 
 		D3D11_BUFFER_DESC moverDesc{
 			.ByteWidth = sizeof(Mover) * MAX_MOVERS,
@@ -155,6 +160,7 @@ namespace FluidFieldSim
 		constants = nullptr;
 		fogConstants = nullptr;
 		levelConstants = nullptr;
+		wallConstants = nullptr;
 		moverBuffer = nullptr;
 		moverSRV = nullptr;
 		resolution = 0;
@@ -242,6 +248,24 @@ namespace FluidFieldSim
 		context->CSSetConstantBuffers(0, 2, cbs);
 		WriteLevel(context, params.parent, params.child, moverCount);
 
+		const bool hasWalls = params.walls && params.walls->srv && params.walls->resolution > 0;
+		const WallConstants walls{
+			.groundMin = { hasWalls ? params.walls->min[0] : 0, hasWalls ? params.walls->min[1] : 0 },
+			.groundRes = hasWalls ? params.walls->resolution : 1u,
+			.groundCellSize = hasWalls ? params.walls->cellSize : 1.0f,
+			.hasWalls = hasWalls ? 1u : 0u,
+			.wallRise = hasWalls ? params.walls->rise : 0.0f,
+			.pad = {}
+		};
+		if (SUCCEEDED(context->Map(wallConstants.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+			std::memcpy(mapped.pData, &walls, sizeof(walls));
+			context->Unmap(wallConstants.get(), 0);
+		}
+		ID3D11Buffer* wallCB = wallConstants.get();
+		context->CSSetConstantBuffers(3, 1, &wallCB);
+		ID3D11ShaderResourceView* wallSRV = hasWalls ? params.walls->srv : nullptr;
+		context->CSSetShaderResources(WALL_SLOT, 1, &wallSRV);
+
 		prevGridMin[0] = params.gridMin[0];
 		prevGridMin[1] = params.gridMin[1];
 	}
@@ -249,10 +273,11 @@ namespace FluidFieldSim
 	void WindSolver::EndStep(ID3D11DeviceContext* context)
 	{
 		historyValid = true;
-		ID3D11Buffer* nullCBs[3] = {};
+		ID3D11Buffer* nullCBs[4] = {};
 		context->CSSetShaderResources(0, MAX_SRVS, NULL_SRVS);
+		context->CSSetShaderResources(WALL_SLOT, 1, NULL_SRVS);
 		context->CSSetUnorderedAccessViews(0, MAX_UAVS, NULL_UAVS, nullptr);
-		context->CSSetConstantBuffers(0, 3, nullCBs);
+		context->CSSetConstantBuffers(0, 4, nullCBs);
 		context->CSSetShader(nullptr, nullptr, 0);
 	}
 

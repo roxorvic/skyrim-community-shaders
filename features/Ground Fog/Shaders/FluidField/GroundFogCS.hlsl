@@ -29,7 +29,7 @@ cbuffer GroundFogCB : register(b0)
 };
 
 Texture2D<float> DepthTexture : register(t0);
-Texture2D<float> GroundHeight : register(t1);
+Texture2D<float4> GroundHeight : register(t1);  // x ground, y object top, z floor under an overhang, w rise to a neighbour
 Texture2D<float> FogFine : register(t2);
 Texture2D<float> FogMedium : register(t3);
 Texture2D<float> FogFar : register(t4);
@@ -97,8 +97,32 @@ static const float WISP_MAX_DRIFT = 200.0;
 static const float NO_GROUND = -1.0e6;
 
 /** Bilinear ground height from the ground map; very low (no fog) where unknown or outside it. */
-float SampleGround(float2 worldXY, out float areaFade)
+/** World units of height between neighbouring ground texels past which they are two levels (a ledge, a cliff), not a slope. */
+static const float GROUND_STEP = 40.0;
+
+/** Rise to a neighbouring ground texel (world units, one texel across) over which the ground is a face fog does not lie on. */
+static const float2 STEEP_FACE = float2(16.0, 36.0);
+
+/**
+ * Of a ground texel's levels (x its ground, z the floor under an overhang there), the highest at or under height z; and
+ * (flat) how much fog lies on it: none on a steep face. The floor under an overhang is flat.
+ */
+float LevelUnder(float4 texel, float z, out float flat)
 {
+	const float upper = texel.x <= z ? texel.x : NO_GROUND * 10.0;
+	const float lower = texel.z > NO_GROUND && texel.z <= z ? texel.z : NO_GROUND * 10.0;
+	flat = upper >= lower ? 1.0 - smoothstep(STEEP_FACE.x, STEEP_FACE.y, texel.w) : 1.0;
+	return max(upper, lower);
+}
+
+/**
+ * Ground height under a world position for a point at height z: of each texel's levels (a ledge, the floor under its
+ * overhang) the highest under the point; bilinear where those lie on one slope, across a step (a ledge over lower ground)
+ * the highest, so the fog lies on each level rather than on a ramp hung between them.
+ */
+float SampleGround(float2 worldXY, float z, out float areaFade, out float flat)
+{
+	flat = 1.0;
 	const float2 cellPosition = worldXY / GroundCellSize - 0.5;
 	const float2 logical = cellPosition - float2(GroundMin);
 	const float fromEdge = min(min(logical.x, logical.y), min(GroundRes - 1 - logical.x, GroundRes - 1 - logical.y));
@@ -108,10 +132,22 @@ float SampleGround(float2 worldXY, out float areaFade)
 	const int2 c = int2(floor(cellPosition));
 	const float2 t = cellPosition - float2(c);
 	const int mask = int(GroundRes) - 1;
-	const float4 g = float4(GroundHeight.Load(int3(c & mask, 0)), GroundHeight.Load(int3((c + int2(1, 0)) & mask, 0)),
-		GroundHeight.Load(int3((c + int2(0, 1)) & mask, 0)), GroundHeight.Load(int3((c + int2(1, 1)) & mask, 0)));
+	const float4 c00 = GroundHeight.Load(int3(c & mask, 0)), c10 = GroundHeight.Load(int3((c + int2(1, 0)) & mask, 0));
+	const float4 c01 = GroundHeight.Load(int3((c + int2(0, 1)) & mask, 0)), c11 = GroundHeight.Load(int3((c + int2(1, 1)) & mask, 0));
 	// Unknown ground at any corner keeps the fog away rather than smearing a fake slope
-	return any(g < NO_GROUND) ? NO_GROUND * 10.0 : lerp(lerp(g.x, g.y, t.x), lerp(g.z, g.w, t.x), t.y);
+	if (min(min(c00.x, c10.x), min(c01.x, c11.x)) < NO_GROUND)
+		return NO_GROUND * 10.0;
+	float4 f;
+	const float4 g = float4(LevelUnder(c00, z, f.x), LevelUnder(c10, z, f.y), LevelUnder(c01, z, f.z), LevelUnder(c11, z, f.w));
+	flat = lerp(lerp(f.x, f.y, t.x), lerp(f.z, f.w, t.x), t.y);
+	const float highest = max(max(g.x, g.y), max(g.z, g.w));
+	if (highest - min(min(g.x, g.y), min(g.z, g.w)) < GROUND_STEP)
+		return lerp(lerp(g.x, g.y, t.x), lerp(g.z, g.w, t.x), t.y);
+	// Across a step, the highest level under the point, and its own flatness
+	flat = g.x == highest ? f.x : g.y == highest ? f.y :
+	                          g.z == highest     ? f.z :
+	                                               f.w;
+	return highest;
 }
 
 /** A level's bilinear sample position: its logical texel (c, t) and its share there (0 outside it, fading at its edge). */
@@ -201,8 +237,9 @@ float FogAt(float3 position, float maxTop, out float shading)
 {
 	shading = 1.0;
 	float areaFade;
-	const float ground = SampleGround(position.xy, areaFade);
-	const float fog = SampleFog(position.xy) * areaFade;
+	float flat;
+	const float ground = SampleGround(position.xy, position.z, areaFade, flat);
+	const float fog = SampleFog(position.xy) * areaFade * flat;
 	// Nothing below the ground (or the water surface the fog lies on)
 	const float height = position.z - ground;
 	if (fog <= 0.0 || height > maxTop || height < 0.0)
@@ -267,9 +304,9 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	// (often a mountain, which would leave the whole ray to march)
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float maxTop = Thickness * (1.0 + PILE_RISE) * (1.0 + LIFT) * (1.0 + BILLOW_HEIGHT);
-	float fadeA, fadeB;
+	float fadeA, fadeB, flatA, flatB;
 	const float3 endPoint = camera + direction * rayLength;
-	const float bandTop = max(SampleGround(camera.xy, fadeA), SampleGround(endPoint.xy, fadeB)) + maxTop;
+	const float bandTop = max(SampleGround(camera.xy, camera.z, fadeA, flatA), SampleGround(endPoint.xy, endPoint.z + 1.0, fadeB, flatB)) + maxTop;
 	if (rayLength <= 0.0 || min(camera.z, endPoint.z) > bandTop)
 		return float4(0.0, 0.0, 0.0, 1.0);
 	float rayStart = 0.0;

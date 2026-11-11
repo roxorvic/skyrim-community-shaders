@@ -72,6 +72,9 @@ float2 Shove(int2 logical)
 	float2 position = float2(logical) + 0.5;
 	float2 shove = Shove(logical);
 	float2 source = position - DeltaTime * (wind * FOG_DRAG + Drift + shove) / CellSize;
+	// Never carried out of a wall (D193): the drift and a wake go round rocks and logs, not through them
+	if (Levels::Solid(int2(floor(source))) || Levels::Solid(logical))
+		source = position;
 	float fog = SampleFog(source);
 	// Viscous: disturbances soften rather than staying sharp
 	float neighbours = 0.25 * (SampleFog(source + float2(1, 0)) + SampleFog(source - float2(1, 0)) + SampleFog(source + float2(0, 1)) + SampleFog(source - float2(0, 1)));

@@ -4,15 +4,31 @@
 #include "WaterSurfaces.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <string>
+#include <string_view>
 
 namespace FluidFieldSim
 {
 	namespace
 	{
-		/** @brief Rays continue past actors, clutter and trees (a trunk is not ground) this many times. */
+		/** @brief Rays continue past actors, clutter, trees, rocks and logs (not ground) this many times. */
 		constexpr uint32_t MAX_STEP_THROUGHS = 4;
 		constexpr float STEP_THROUGH_OFFSET = 2.0f;
+
+		/** @brief Model folders of things lying on the ground rather than ground: the fog lies round them, not on them. */
+		constexpr std::array<std::string_view, 6> NOT_GROUND = { "\\rocks\\", "\\trees\\", "\\logs\\", "\\plants\\", "\\clutter\\", "\\stumps\\" };
+
+		/** @brief A rock, log, tree, plant or clutter: the ray carries on under it. */
+		bool IsObjectOnGround(const RE::hkpCollidable& a_collidable)
+		{
+			const auto* ref = RE::TESHavokUtilities::FindCollidableRef(a_collidable);
+			const auto* model = ref && ref->GetBaseObject() ? ref->GetBaseObject()->As<RE::TESModel>() : nullptr;
+			std::string path = model && model->GetModel() ? model->GetModel() : "";
+			std::transform(path.begin(), path.end(), path.begin(), [](unsigned char a_c) { return static_cast<char>(std::tolower(a_c)); });
+			return std::ranges::any_of(NOT_GROUND, [&](std::string_view a_folder) { return path.find(a_folder) != std::string::npos; });
+		}
 
 		/** @brief Collision that is ground the fog lies on: the landscape and placed static meshes. */
 		bool IsGroundLayer(RE::COL_LAYER a_layer)
@@ -28,25 +44,76 @@ namespace FluidFieldSim
 			}
 		}
 
-		/** @brief The highest ground hit straight down between two heights, or NO_GROUND. */
-		float CastDown(RE::hkpWorld* a_world, float a_x, float a_y, float a_fromZ, float a_toZ)
+		/** @brief An overhang's underside must face down this much, and clear the floor under it by this much. */
+		constexpr float UNDERSIDE_FACING = -0.3f;
+		constexpr float OVERHANG_CLEARANCE = 40.0f;
+		/** @brief Ground faces up at least this much. */
+		constexpr float GROUND_FACING = 0.3f;
+
+		/** @brief One ray straight down: where it hit and what. */
+		struct Ray
+		{
+			bool hit = false;
+			float z = 0.0f;
+			float normalZ = 0.0f;
+			RE::COL_LAYER layer = RE::COL_LAYER::kUnidentified;
+			const RE::hkpCollidable* collidable = nullptr;
+		};
+
+		Ray RayDown(RE::hkpWorld* a_world, float a_x, float a_y, float a_fromZ, float a_toZ)
 		{
 			const float scale = RE::bhkWorld::GetWorldScale();
+			RE::hkpWorldRayCastInput input;
+			input.from = RE::hkVector4(a_x * scale, a_y * scale, a_fromZ * scale, 0.0f);
+			input.to = RE::hkVector4(a_x * scale, a_y * scale, a_toZ * scale, 0.0f);
+			RE::hkpWorldRayCastOutput output;
+			a_world->CastRay(input, output);
+			if (!output.HasHit() || !output.rootCollidable)
+				return {};
+			float normal[4];
+			_mm_storeu_ps(normal, output.normal.quad);
+			return { .hit = true, .z = a_fromZ + (a_toZ - a_fromZ) * output.hitFraction, .normalZ = normal[2], .layer = output.rootCollidable->GetCollisionLayer(), .collidable = output.rootCollidable };
+		}
+
+		/** @brief Straight down between two heights: the highest ground, the top of the highest object on it, and (D193) the
+		 * floor under it where that ground is an overhang (a ledge with open space beneath). */
+		struct Hit
+		{
+			float ground = GroundHeightMap::NO_GROUND;
+			float object = GroundHeightMap::NO_GROUND;
+			float lower = GroundHeightMap::NO_GROUND;
+		};
+
+		Hit CastDown(RE::hkpWorld* a_world, float a_x, float a_y, float a_fromZ, float a_toZ, bool a_lookUnder = true)
+		{
+			Hit hit;
 			float fromZ = a_fromZ;
 			for (uint32_t attempt = 0; attempt <= MAX_STEP_THROUGHS && fromZ > a_toZ; attempt++) {
-				RE::hkpWorldRayCastInput input;
-				input.from = RE::hkVector4(a_x * scale, a_y * scale, fromZ * scale, 0.0f);
-				input.to = RE::hkVector4(a_x * scale, a_y * scale, a_toZ * scale, 0.0f);
-				RE::hkpWorldRayCastOutput output;
-				a_world->CastRay(input, output);
-				if (!output.HasHit() || !output.rootCollidable)
+				const Ray ray = RayDown(a_world, a_x, a_y, fromZ, a_toZ);
+				if (!ray.hit)
 					break;
-				const float hitZ = fromZ + (a_toZ - fromZ) * output.hitFraction;
-				if (IsGroundLayer(output.rootCollidable->GetCollisionLayer()))
-					return hitZ;
-				fromZ = hitZ - STEP_THROUGH_OFFSET;
+				// D193: rocks, logs and trunks are walls to the fog, not ground under it
+				const bool object = ray.layer == RE::COL_LAYER::kTrees || (IsGroundLayer(ray.layer) && IsObjectOnGround(*ray.collidable));
+				if (object && hit.object == GroundHeightMap::NO_GROUND)
+					hit.object = ray.z;
+				// Ground faces up: a surface facing down is a ceiling, or a mesh's inside where the ray began within it
+				else if (!object && IsGroundLayer(ray.layer) && ray.normalZ > GROUND_FACING) {
+					hit.ground = ray.z;
+					// A placed mesh may overhang open ground: under its top the next surface faces down (its underside), and
+					// there is floor well under that
+					if (a_lookUnder && ray.layer != RE::COL_LAYER::kGround && ray.layer != RE::COL_LAYER::kTerrain) {
+						const Ray under = RayDown(a_world, a_x, a_y, ray.z - STEP_THROUGH_OFFSET, a_toZ);
+						if (under.hit && under.normalZ < UNDERSIDE_FACING) {
+							const Hit floor = CastDown(a_world, a_x, a_y, under.z - STEP_THROUGH_OFFSET, a_toZ, false);
+							if (floor.ground != GroundHeightMap::NO_GROUND && under.z - floor.ground > OVERHANG_CLEARANCE)
+								hit.lower = floor.ground;
+						}
+					}
+					return hit;
+				}
+				fromZ = ray.z - STEP_THROUGH_OFFSET;
 			}
-			return GroundHeightMap::NO_GROUND;
+			return hit;
 		}
 	}
 
@@ -55,6 +122,9 @@ namespace FluidFieldSim
 		texture = nullptr;
 		srv = nullptr;
 		heights.clear();
+		objects.clear();
+		lowers.clear();
+		upload.clear();
 		land.clear();
 		pending.clear();
 		resolution = 0;
@@ -72,7 +142,7 @@ namespace FluidFieldSim
 				.Height = a_resolution,
 				.MipLevels = 1,
 				.ArraySize = 1,
-				.Format = DXGI_FORMAT_R32_FLOAT,
+				.Format = DXGI_FORMAT_R32G32B32A32_FLOAT,
 				.SampleDesc = { 1, 0 },
 				.Usage = D3D11_USAGE_DEFAULT,
 				.BindFlags = D3D11_BIND_SHADER_RESOURCE,
@@ -89,6 +159,8 @@ namespace FluidFieldSim
 			cellSize = a_cellSize;
 			heights.assign(static_cast<std::size_t>(resolution) * resolution, NO_GROUND);
 			land.assign(heights.size(), NO_GROUND);
+			objects.assign(heights.size(), NO_GROUND);
+			lowers.assign(heights.size(), NO_GROUND);
 		}
 
 		const int32_t n = static_cast<int32_t>(resolution);
@@ -128,6 +200,8 @@ namespace FluidFieldSim
 				}
 				if (value != height) {
 					height = value;
+					objects[index] = NO_GROUND;
+					lowers[index] = NO_GROUND;
 					changed = true;
 				}
 			}
@@ -139,7 +213,26 @@ namespace FluidFieldSim
 
 		if (changed) {
 			maxHeight = *std::max_element(heights.begin(), heights.end());
-			a_context->UpdateSubresource(texture.get(), 0, nullptr, heights.data(), static_cast<UINT>(resolution * sizeof(float)), 0);
+			upload.resize(heights.size() * 4);
+			for (int32_t y = 0; y < n; y++) {
+				for (int32_t x = 0; x < n; x++) {
+					const std::size_t i = static_cast<std::size_t>(y) * n + x;
+					// D193: how steep the ground is there (its largest rise to a neighbour): fog does not cling to a cliff's face
+					float steep = 0.0f;
+					if (heights[i] != NO_GROUND) {
+						for (const auto [dx, dy] : { std::pair{ 1, 0 }, std::pair{ -1, 0 }, std::pair{ 0, 1 }, std::pair{ 0, -1 } }) {
+							const float other = heights[static_cast<std::size_t>((y + dy) & mask) * n + ((x + dx) & mask)];
+							if (other != NO_GROUND)
+								steep = std::max(steep, std::abs(other - heights[i]));
+						}
+					}
+					upload[i * 4] = heights[i];
+					upload[i * 4 + 1] = objects[i];
+					upload[i * 4 + 2] = lowers[i];
+					upload[i * 4 + 3] = steep;
+				}
+			}
+			a_context->UpdateSubresource(texture.get(), 0, nullptr, upload.data(), static_cast<UINT>(resolution * 4 * sizeof(float)), 0);
 		}
 		return true;
 	}
@@ -184,13 +277,21 @@ namespace FluidFieldSim
 			auto* world = bhkWorld ? bhkWorld->GetWorld1() : nullptr;
 			if (!world)
 				continue;
-			float top;
+			Hit hit;
 			{
 				const RE::BSReadLockGuard lock(bhkWorld->worldLock);
-				top = CastDown(world, worldX, worldY, landHeight + RAY_ABOVE, landHeight - RAY_BELOW);
+				hit = CastDown(world, worldX, worldY, landHeight + RAY_ABOVE, landHeight - RAY_BELOW);
 			}
-			if (top > landHeight + 1.0f) {
-				heights[index] = top;
+			if (hit.ground > landHeight + 1.0f) {
+				heights[index] = hit.ground;
+				changed = true;
+			}
+			if (hit.object != NO_GROUND) {
+				objects[index] = hit.object;
+				changed = true;
+			}
+			if (hit.lower != NO_GROUND && hit.ground > landHeight + 1.0f) {
+				lowers[index] = hit.lower;
 				changed = true;
 			}
 		}

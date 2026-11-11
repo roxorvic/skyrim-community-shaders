@@ -46,6 +46,16 @@ namespace FluidFieldSim
 
 	class WindSolver;
 
+	/** @brief D193: the fog's ground map (GroundHeightMap: ground, and the top of an object on it) for a level's walls. */
+	struct WallMap
+	{
+		ID3D11ShaderResourceView* srv = nullptr;
+		std::int32_t min[2]{};  ///< World cell of its texel (0, 0)
+		std::uint32_t resolution = 0;
+		float cellSize = 0.0f;
+		float rise = 8.0f;  ///< An object standing this far over the ground is a wall
+	};
+
 	/** @brief Inputs for one simulation step. */
 	struct StepParams
 	{
@@ -60,6 +70,8 @@ namespace FluidFieldSim
 		const WindSolver* parent = nullptr;
 		/** D193: the finer level inside this one, when it runs this frame: movers inside it are its own (it is absorbed). */
 		const WindSolver* child = nullptr;
+		/** D193: rocks, logs and trunks the air goes round; none when null. */
+		const WallMap* walls = nullptr;
 	};
 
 	/**
@@ -172,6 +184,18 @@ namespace FluidFieldSim
 		};
 		static_assert(sizeof(LevelConstants) == 48);
 
+		// Matches WallCB in Levels.hlsli
+		struct alignas(16) WallConstants
+		{
+			std::int32_t groundMin[2];
+			std::uint32_t groundRes;
+			float groundCellSize;
+			std::uint32_t hasWalls;
+			float wallRise;
+			float pad[2];
+		};
+		static_assert(sizeof(WallConstants) == 32);
+
 		static Layer CreateLayer(ID3D11Device* device, std::uint32_t resolution, DXGI_FORMAT format, const NameFn& name, const std::string& label);
 
 		void BeginStep(ID3D11DeviceContext* context, const StepParams& params);
@@ -210,6 +234,7 @@ namespace FluidFieldSim
 		winrt::com_ptr<ID3D11Buffer> constants;
 		winrt::com_ptr<ID3D11Buffer> fogConstants;
 		winrt::com_ptr<ID3D11Buffer> levelConstants;
+		winrt::com_ptr<ID3D11Buffer> wallConstants;
 		winrt::com_ptr<ID3D11Buffer> moverBuffer;
 		winrt::com_ptr<ID3D11ShaderResourceView> moverSRV;
 

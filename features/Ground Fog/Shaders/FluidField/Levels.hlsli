@@ -19,6 +19,19 @@ cbuffer LevelCB : register(b2)
 	uint EdgeBand;  // Cells along a level's edge that relax toward its parent
 };
 
+// D193: the fog's ground map (GroundHeightMap): x the ground, y the top of a rock, log or trunk standing on it
+cbuffer WallCB : register(b3)
+{
+	int2 GroundMin;  // World cell (of GroundCellSize) of the ground map's texel (0, 0)
+	uint GroundRes;
+	float GroundCellSize;
+	uint HasWalls;   // 0: this level has no walls (the far level, or none known)
+	float WallRise;  // An object standing this far over the ground is a wall to the air
+	float2 WallPad;
+};
+
+Texture2D<float2> GroundMap : register(t7);
+
 namespace Levels
 {
 	/** Splat values are stored times this (world units per second for the wind and the shove). */
@@ -76,6 +89,18 @@ namespace Levels
 	{
 		const float fromEdge = FromEdge(OtherLogical(worldXY) - 0.5, float(OtherGridRes));
 		return saturate((fromEdge - float(EdgeBand)) / float(EdgeBand));
+	}
+
+	/** True where a rock, log or trunk stands in the cell: no wind in it, and air and fog go round it. */
+	bool Solid(int2 logical)
+	{
+		if (HasWalls == 0)
+			return false;
+		const int2 texel = int2(floor(WorldOf(logical) / GroundCellSize));
+		if (any(texel < GroundMin) || any(texel >= GroundMin + int(GroundRes)))
+			return false;
+		const float2 g = GroundMap[texel & int(GroundRes - 1)];
+		return g.y > g.x + WallRise;
 	}
 
 	/** True where the running child draws this position's movers and is wholly absorbed back. */
