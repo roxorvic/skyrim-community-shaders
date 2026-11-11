@@ -26,10 +26,14 @@ cbuffer GroundFogCB : register(b0)
 	float2 PatternOffset;  // How far the resting pattern has drifted with the weather's wind, world units
 	uint DebugPad;
 	float FogPad;
+	int2 FineGroundMin;  // D193: the finer ground map near the player, as the ground map's fields (FineGroundRes 0: none)
+	uint FineGroundRes;
+	float FineGroundCellSize;
 };
 
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> GroundHeight : register(t1);  // x ground, y object top, z floor under an overhang, w rise to a neighbour
+Texture2D<float4> FineGround : register(t10);   // The same, finer, near the player
 Texture2D<float> FogFine : register(t2);
 Texture2D<float> FogMedium : register(t3);
 Texture2D<float> FogFar : register(t4);
@@ -120,20 +124,19 @@ float LevelUnder(float4 texel, float z, out float flat)
  * overhang) the highest under the point; bilinear where those lie on one slope, across a step (a ledge over lower ground)
  * the highest, so the fog lies on each level rather than on a ramp hung between them.
  */
-float SampleGround(float2 worldXY, float z, out float areaFade, out float flat)
+float SampleGroundMap(Texture2D<float4> map, int2 mapMin, uint mapRes, float mapCell, float2 worldXY, float z, out float fromEdge, out float flat)
 {
 	flat = 1.0;
-	const float2 cellPosition = worldXY / GroundCellSize - 0.5;
-	const float2 logical = cellPosition - float2(GroundMin);
-	const float fromEdge = min(min(logical.x, logical.y), min(GroundRes - 1 - logical.x, GroundRes - 1 - logical.y));
-	areaFade = smoothstep(0.0, 1.0, fromEdge / (AREA_FADE * GroundRes));
+	const float2 cellPosition = worldXY / mapCell - 0.5;
+	const float2 logical = cellPosition - float2(mapMin);
+	fromEdge = min(min(logical.x, logical.y), min(mapRes - 1 - logical.x, mapRes - 1 - logical.y));
 	if (fromEdge <= 0.0)
 		return NO_GROUND * 10.0;
 	const int2 c = int2(floor(cellPosition));
 	const float2 t = cellPosition - float2(c);
-	const int mask = int(GroundRes) - 1;
-	const float4 c00 = GroundHeight.Load(int3(c & mask, 0)), c10 = GroundHeight.Load(int3((c + int2(1, 0)) & mask, 0));
-	const float4 c01 = GroundHeight.Load(int3((c + int2(0, 1)) & mask, 0)), c11 = GroundHeight.Load(int3((c + int2(1, 1)) & mask, 0));
+	const int mask = int(mapRes) - 1;
+	const float4 c00 = map.Load(int3(c & mask, 0)), c10 = map.Load(int3((c + int2(1, 0)) & mask, 0));
+	const float4 c01 = map.Load(int3((c + int2(0, 1)) & mask, 0)), c11 = map.Load(int3((c + int2(1, 1)) & mask, 0));
 	// Unknown ground at any corner keeps the fog away rather than smearing a fake slope
 	if (min(min(c00.x, c10.x), min(c01.x, c11.x)) < NO_GROUND)
 		return NO_GROUND * 10.0;
@@ -143,11 +146,34 @@ float SampleGround(float2 worldXY, float z, out float areaFade, out float flat)
 	const float highest = max(max(g.x, g.y), max(g.z, g.w));
 	if (highest - min(min(g.x, g.y), min(g.z, g.w)) < GROUND_STEP)
 		return lerp(lerp(g.x, g.y, t.x), lerp(g.z, g.w, t.x), t.y);
-	// Across a step, the highest level under the point, and its own flatness
-	flat = g.x == highest ? f.x : g.y == highest ? f.y :
-	                          g.z == highest     ? f.z :
-	                                               f.w;
-	return highest;
+	// Across a step, the highest level under the point: blended over the texels on it alone, and fading out with how much of
+	// the point they cover, so its edge runs smoothly between texels rather than around them
+	const float4 bilinear = float4((1.0 - t.x) * (1.0 - t.y), t.x * (1.0 - t.y), (1.0 - t.x) * t.y, t.x * t.y);
+	const float4 onLevel = bilinear * (highest - g < GROUND_STEP ? 1.0 : 0.0);
+	const float cover = dot(onLevel, 1.0);
+	flat = dot(onLevel, f) / max(cover, 1e-4) * smoothstep(0.2, 0.7, cover);
+	return dot(onLevel, g) / max(cover, 1e-4);
+}
+
+/** Fine ground map texels over which it hands over to the coarse one at its edge. */
+static const float FINE_BLEND = 32.0;
+
+/** Ground under a world position for a point at height z (SampleGroundMap): the fine map near the player, the coarse beyond. */
+float SampleGround(float2 worldXY, float z, out float areaFade, out float flat)
+{
+	float coarseEdge;
+	float ground = SampleGroundMap(GroundHeight, GroundMin, GroundRes, GroundCellSize, worldXY, z, coarseEdge, flat);
+	areaFade = smoothstep(0.0, 1.0, coarseEdge / (AREA_FADE * GroundRes));
+	if (FineGroundRes > 0) {
+		float fineEdge, fineFlat;
+		const float fine = SampleGroundMap(FineGround, FineGroundMin, FineGroundRes, FineGroundCellSize, worldXY, z, fineEdge, fineFlat);
+		const float share = saturate(fineEdge / FINE_BLEND);
+		if (share > 0.0 && fine > NO_GROUND) {
+			ground = ground > NO_GROUND ? lerp(ground, fine, share) : fine;
+			flat = lerp(flat, fineFlat, share);
+		}
+	}
+	return ground;
 }
 
 /** A level's bilinear sample position: its logical texel (c, t) and its share there (0 outside it, fading at its edge). */

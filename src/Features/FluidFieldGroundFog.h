@@ -143,15 +143,24 @@ private:
 		float patternOffset[2];
 		uint32_t debugMode;
 		float pad;
+		int32_t fineGroundMin[2];
+		uint32_t fineGroundRes;
+		float fineGroundCellSize;
 	};
-	static_assert(sizeof(GroundFogConstants) == 160);
+	static_assert(sizeof(GroundFogConstants) == 176);
 	/** @brief The fog's ground map: texels per side and their size (as wide as the far level). */
 	static constexpr uint32_t FOG_GROUND_RESOLUTION = 512;
 	static constexpr float FOG_GROUND_CELL = 24.0f;
+	/** @brief D193: a finer ground map near the player (as wide as the medium level): ledges' and rocks' edges, the walls. */
+	static constexpr uint32_t FOG_FINE_GROUND_RESOLUTION = 512;
+	static constexpr float FOG_FINE_GROUND_CELL = 8.0f;
 	/** @brief Fog drift at the weather's full wind speed, world units per second. */
 	static constexpr float MAX_WEATHER_DRIFT = 150.0f;
 
 	FluidFieldSim::GroundHeightMap groundHeight;
+	FluidFieldSim::GroundHeightMap fineGround;
+	bool fineGroundReady = false;
+	int32_t fogFineGroundMin[2]{};
 	winrt::com_ptr<ID3D11ComputeShader> groundFogCS;
 	winrt::com_ptr<ID3D11ComputeShader> groundFogCompositeCS;  ///< D193: lays the half-resolution fog over the scene
 	std::unique_ptr<Texture2D> fogHalf;                        ///< In-scattered light (rgb) and transmittance (a), half resolution

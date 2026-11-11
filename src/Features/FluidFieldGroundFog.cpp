@@ -185,6 +185,8 @@ void FluidFieldGroundFog::Release()
 		level.running = false;
 	}
 	groundHeight.Release();
+	fineGround.Release();
+	fineGroundReady = false;
 	groundFogCS = nullptr;
 	groundFogCompositeCS = nullptr;
 	groundFogCB = nullptr;
@@ -297,7 +299,9 @@ void FluidFieldGroundFog::Prepass()
 	// Coarse to fine (each takes its edges from the one round it), then each absorbs the finer one
 	// Rocks, logs and trunks are walls on the fine and medium levels (the far level's cells are wider than a rock); from the
 	// ground map's last fill
-	const FluidFieldSim::WallMap walls{ .srv = groundHeight.GetSRV(), .min = { fogGroundMin[0], fogGroundMin[1] }, .resolution = FOG_GROUND_RESOLUTION, .cellSize = FOG_GROUND_CELL };
+	const FluidFieldSim::WallMap walls = fineGroundReady ?
+	                                         FluidFieldSim::WallMap{ .srv = fineGround.GetSRV(), .min = { fogFineGroundMin[0], fogFineGroundMin[1] }, .resolution = FOG_FINE_GROUND_RESOLUTION, .cellSize = FOG_FINE_GROUND_CELL } :
+	                                         FluidFieldSim::WallMap{ .srv = groundHeight.GetSRV(), .min = { fogGroundMin[0], fogGroundMin[1] }, .resolution = FOG_GROUND_RESOLUTION, .cellSize = FOG_GROUND_CELL };
 	const auto step = [&](uint a_index, const FluidFieldSim::WindSolver* a_parent, const FluidFieldSim::WindSolver* a_child, float a_deltaTime, uint a_iterations) {
 		auto& level = levels[a_index];
 		FluidFieldSim::StepParams params{
@@ -351,6 +355,10 @@ void FluidFieldGroundFog::Prepass()
 	fogGroundMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FOG_GROUND_CELL)) - groundHalf;
 	fogGroundMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FOG_GROUND_CELL)) - groundHalf;
 	fogReady = groundHeight.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), fogGroundMin, FOG_GROUND_RESOLUTION, FOG_GROUND_CELL);
+	const int32_t fineHalf = static_cast<int32_t>(FOG_FINE_GROUND_RESOLUTION / 2);
+	fogFineGroundMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FOG_FINE_GROUND_CELL)) - fineHalf;
+	fogFineGroundMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FOG_FINE_GROUND_CELL)) - fineHalf;
+	fineGroundReady = fogReady && fineGround.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), fogFineGroundMin, FOG_FINE_GROUND_RESOLUTION, FOG_FINE_GROUND_CELL);
 	globals::profiler->EndPass();
 }
 
@@ -412,7 +420,10 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11Un
 		.groundCellSize = FOG_GROUND_CELL,
 		.patternOffset = { fogPatternOffset[0], fogPatternOffset[1] },
 		.debugMode = 0,
-		.pad = 0.0f
+		.pad = 0.0f,
+		.fineGroundMin = { fogFineGroundMin[0], fogFineGroundMin[1] },
+		.fineGroundRes = fineGroundReady ? FOG_FINE_GROUND_RESOLUTION : 0u,
+		.fineGroundCellSize = FOG_FINE_GROUND_CELL
 	};
 	for (uint i = 0; i < LEVEL_COUNT; i++) {
 		const auto& level = levels[i];
@@ -457,6 +468,8 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11Un
 	ID3D11Buffer* sharedBuffers[2]{ globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, sharedBuffers);
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
+	ID3D11ShaderResourceView* fineSRV = fineGroundReady ? fineGround.GetSRV() : nullptr;
+	context->CSSetShaderResources(10, 1, &fineSRV);
 	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);
@@ -471,7 +484,7 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11Un
 	context->CSSetShader(groundFogCompositeCS.get(), nullptr, 0);
 	context->Dispatch(dispatch.x, dispatch.y, 1);
 
-	ID3D11ShaderResourceView* nullSRVs[10]{};
+	ID3D11ShaderResourceView* nullSRVs[11]{};
 	ID3D11Buffer* nullCB = nullptr;
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
 	context->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
