@@ -163,8 +163,11 @@ namespace FallGround
 	/** Shares of a sheet's vertical motion: a slow swell (one crest per repeat) and a finer, quicker bubbling over it. */
 	static const float Z_SLOW_SHARE = 0.55;
 	static const float Z_FINE_SHARE = 0.3;
-	static const float Z_MICRO_SHARE = 0.18;  ///< and a smaller, quicker one still
-	static const float Z_MOST = 25.0;         ///< world units its vertical motion reaches at most
+	static const float Z_MICRO_SHARE = 0.18;                ///< and a smaller, quicker one still
+	static const float Z_MOST = 25.0;                       ///< world units its vertical motion reaches at most...
+	static const float Z_MOST_VIOLENT = 45.0;               ///< ...and where it thrashes
+	static const float2 VIOLENT_SIZE = float2(20.0, 60.0);  ///< world units of wobble over which the water turns violent...
+	static const float VIOLENT_CHOP = 1.5;                  ///< ...its finer, quicker layers this much stronger (the rate kept: varied, it shears)
 
 	/** D124: a vertex's depth under the water its fall pours from; NO_WATER where none. */
 	float BelowSource(uint a_vertex)
@@ -223,11 +226,18 @@ namespace FallGround
 	}
 
 	/** The vertical bob at (a_across, a_run): the slow swell, the finer bubbling and the smaller one over it. */
-	float BobLayers(float a_across, float a_run)
+	float BobLayers(float a_across, float a_run, float a_violence = 0.0)
 	{
+		const float chop = 1.0 + VIOLENT_CHOP * a_violence;
 		return Z_SLOW_SHARE * WobbleWave(a_across, a_run, 1.0, float2(2.0, 1.0), float2(3.0, 2.0)) +
-		       Z_FINE_SHARE * WobbleWave(a_across * 3.0, a_run, 5.0, float2(5.0, 5.0), float2(7.0, 10.0)) +
-		       Z_MICRO_SHARE * WobbleWave(a_across * 7.0, a_run, 11.0, float2(11.0, 11.0), float2(13.0, 18.0));
+		       chop * Z_FINE_SHARE * WobbleWave(a_across * 3.0, a_run, 5.0, float2(5.0, 5.0), float2(7.0, 10.0)) +
+		       chop * Z_MICRO_SHARE * WobbleWave(a_across * 7.0, a_run, 11.0, float2(11.0, 11.0), float2(13.0, 18.0));
+	}
+
+	/** 0 to 1: how violently a vertex's water thrashes, by its wobble's size (a_up: world up in model space, its length the scale). */
+	float Violence(FallVertex a_vertex, float3 a_up)
+	{
+		return smoothstep(VIOLENT_SIZE.x, VIOLENT_SIZE.y, length(a_vertex.c.xyz) * length(a_up));
 	}
 
 	/** A wobble's vertical part (a_up: world up in model space), and the Z_MOST clamp's scale at a_run. */
@@ -235,8 +245,9 @@ namespace FallGround
 	{
 		const float3 up = normalize(a_up);
 		o_vertical = up * dot(a_vertex.c.xyz, up);
-		const float reach = length(o_vertical) * abs(BobLayers(a_vertex.b.w, a_run));
-		const float most = Z_MOST / length(a_up);  // (a_up's length is the model's scale)
+		const float violence = Violence(a_vertex, a_up);
+		const float reach = length(o_vertical) * abs(BobLayers(a_vertex.b.w, a_run, violence));
+		const float most = lerp(Z_MOST, Z_MOST_VIOLENT, violence) / length(a_up);  // (a_up's length is the model's scale)
 		o_clamp = reach > most ? most / reach : 1.0;
 	}
 
@@ -255,7 +266,7 @@ namespace FallGround
 		float3 vertical;
 		float clampScale;
 		SplitWobble(fallVertex, run, a_up, vertical, clampScale);
-		return fallVertex.b.xyz + (fallVertex.c.xyz - vertical) * Wobble(across, run) + vertical * BobLayers(across, run) * clampScale;
+		return fallVertex.b.xyz + (fallVertex.c.xyz - vertical) * Wobble(across, run) + vertical * BobLayers(across, run, Violence(fallVertex, a_up)) * clampScale;
 	}
 
 	/**

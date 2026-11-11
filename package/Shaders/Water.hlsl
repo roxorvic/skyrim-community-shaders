@@ -1421,14 +1421,16 @@ PS_OUTPUT main(PS_INPUT input)
 	const float fallBubbles = fallBubbleSample.x;
 	// D191: dropped water is never a quiet crest, whatever pool it runs out of
 	const float fallLip = max(FallShading::Lip(input.FallData.y, fallFlow.runTime), fallDropped);
+	// its foam and milk eased in down the drop (cut in at once, the crest's white began on a hard line under the clear river)
+	const float fallFoamLip = fallLip * smoothstep(FallGround::AerationLook.x * 0.5, FallGround::AerationLook.x + FallShading::CREST_FOAM_IN, fallFlow.plunge.z);
 	const float fallBehind = max(SharedData::GetScreenDepth(DepthTex.Load(int3(input.HPosition.xy, 0)).x) - fallDepth, 0.0);
 	const float fallAboveWater = FallShading::AboveWater(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, input.FallFade.z, input.FallFade.y, input.FallData.y);
 	// the foam's holes drawn out along the flow as its grain is; narrowed across, not slowed along, so they keep the water's pace (round holes read as spots)
 	const float2 fallHoleUv = fallFlow.uvA * float2(FallShading::FOAM_STREAK_LENGTH, 1.0);  // (narrowed across: slowing the along slid them against the water)
 	const float fallFoamStretch = fallFlow.stretch;                                         // D182: no shear (FlowFoamPattern wraps the coordinate)
 	// D189: the bake's own foam (strikes, squeezes, rejoins) and the ribbons'
-	const float fallBakeFoam = saturate(fallFlow.foam * FallShading::BAKE_FOAM) * fallLip;
-	const float fallFoamSource = max(fallBakeFoam, fallWhite * FallShading::PLUNGE_WHITE_FOAM * fallLip);
+	const float fallBakeFoam = saturate(fallFlow.foam * FallShading::BAKE_FOAM) * fallFoamLip;
+	const float fallFoamSource = max(fallBakeFoam, fallWhite * FallShading::PLUNGE_WHITE_FOAM * fallFoamLip);
 	// The foam in mounds: billows boiling in place (their slope for its relief), finer lumps rounding its edges
 	float fallBillow, fallLumpEdge;
 	float2 fallBillowSlope;
@@ -1479,7 +1481,7 @@ PS_OUTPUT main(PS_INPUT input)
 		// in the gaps between the dropped water's ribbons it thins (its own gaps fell elsewhere, and the two together covered it all)
 		const float betweenRibbons = lerp(1.0, FallShading::AERATION_BETWEEN_RIBBONS, (1.0 - smoothstep(0.0, 0.5, fallRibbons.x)) * fallDropped * (1.0 - heavy) * (1.0 - smoothstep(FallShading::LOBE_FLAT.x, FallShading::LOBE_FLAT.y, abs(FallUp.z))));  // (curtains only: lobes have no ribbons)
 		const float drive = smoothstep(FallShading::UNIFIED_AERATION_DRIVE.x, FallShading::UNIFIED_AERATION_DRIVE.y, fallFlow.fields.w) * lerp(1.0, FallShading::AERATION_HEAVY_DRIVE, heavy) *
-		                    fallLip * (1.0 - gap) * clump * fallLumpEdge * lerp(fallBreakup, 1.0, heavy) * betweenRibbons;
+		                    fallFoamLip * (1.0 - gap) * clump * fallLumpEdge * lerp(fallBreakup, 1.0, heavy) * betweenRibbons;
 		fallUnifiedAerationDrive = drive;
 		float2 jumpA, jumpB;
 		const float churnWeight = FallShading::FoamChurn(FallGround::Time, jumpA, jumpB);
@@ -1733,7 +1735,7 @@ PS_OUTPUT main(PS_INPUT input)
 		diffuseOutput.refractionColor = lerp(diffuseOutput.refractionColor, fluidFoamLight, white * 0.5);
 		// Milky under the surface by the baked aeration, only where the foam is not, so the two never double up
 		{
-			const float aerMilk = FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallLip);
+			const float aerMilk = FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallFoamLip);
 			const float3 milkColor = lerp(fluidFoamLight, diffuseOutput.refractionDiffuseColor, FallShading::UNIFIED_MILK_HUE);
 			diffuseOutput.refractionDiffuseColor = lerp(diffuseOutput.refractionDiffuseColor, milkColor, aerMilk * FallShading::UNIFIED_MILK);
 			diffuseOutput.refractionColor = lerp(diffuseOutput.refractionColor, milkColor, aerMilk * FallShading::UNIFIED_MILK_VEIL);
@@ -1796,7 +1798,7 @@ PS_OUTPUT main(PS_INPUT input)
 		const float fallsMul = lerp(min(diffuseOutput.refractionMul, clearOpacity), 1.0, fallRibbons.y * FallShading::RIBBON_HAZE_OPACITY);
 		diffuseOutput.refractionMul = lerp(fallRiverMul, fallsMul, fallMotion);
 		// milky water is murkier: less of what lies behind shows through
-		diffuseOutput.refractionMul = lerp(diffuseOutput.refractionMul, 1.0, FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallLip) * FallShading::UNIFIED_MURK);
+		diffuseOutput.refractionMul = lerp(diffuseOutput.refractionMul, 1.0, FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallFoamLip) * FallShading::UNIFIED_MURK);
 	}
 #					endif
 #				endif

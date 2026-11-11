@@ -4122,6 +4122,14 @@ namespace FluidFieldSim
 				const float gy = std::clamp((a_v - bake.uvMin[1]) / std::max(bake.uvSize[1], 1e-6f) * static_cast<float>(h) - 0.5f, 0.0f, static_cast<float>(h - 1));
 				return bake.wake[static_cast<std::size_t>(std::lround(gy)) * w + std::lround(gx)];
 			};
+			const auto fastAt = [&](float a_u, float a_v) {  // 0 to 1 over WOBBLE_FAST_SPEED
+				if (bake.speed.empty())
+					return 0.0f;
+				const float gx = std::clamp((a_u - bake.uvMin[0]) / std::max(bake.uvSize[0], 1e-6f) * static_cast<float>(w) - 0.5f, 0.0f, static_cast<float>(w - 1));
+				const float gy = std::clamp((a_v - bake.uvMin[1]) / std::max(bake.uvSize[1], 1e-6f) * static_cast<float>(h) - 0.5f, 0.0f, static_cast<float>(h - 1));
+				const float t = std::clamp((bake.speed[static_cast<std::size_t>(std::lround(gy)) * w + std::lround(gx)] * 300.0f - WOBBLE_FAST_SPEED[0]) / (WOBBLE_FAST_SPEED[1] - WOBBLE_FAST_SPEED[0]), 0.0f, 1.0f);
+				return t * t * (3.0f - 2.0f * t);
+			};
 			for (uint32_t v = 0; v < counts.vertexCount; v++) {
 				if (open[v] || inRock[v] || normals[v].Length() < 1e-6f)
 					continue;
@@ -4153,18 +4161,24 @@ namespace FluidFieldSim
 					bounce[v] = BOUNCE_MOST * aerated * aerated * (3.0f - 2.0f * aerated) * up * up * (3.0f - 2.0f * up) * fade;
 					wobbleSize[v] *= UNIFIED_WOBBLE;
 				}
+				// fast water thrashes harder, whatever stirs it
+				wobbleSize[v] += WOBBLE_FAST * fastAt(uvs[v][0], uvs[v][1]) * wobbleWeight[v];
 			}
 			// D186: none in a band along the rock, then rising off it by distance along the mesh; then softened ROCK_FIELD_PASSES
 			// times, then held to their slopes
+			std::vector<float> footCalm(counts.vertexCount, 1.0f);
 			for (uint32_t v = 0; v < counts.vertexCount; v++) {
 				const float t = std::clamp((fromRock[v] - ROCK_CONTACT) / ROCK_RAMP, 0.0f, 1.0f);
-				const float ramp = t * t * (3.0f - 2.0f * t);
+				// and none at the pool: bobbing layers crossing its flat surface cut a jagged waterline
+				const float above = vertexClips[base + v][2];
+				const float foot = above >= NO_WATER ? 1.0f : std::clamp(above / FOOT_CALM, 0.0f, 1.0f);
+				const float calm = footCalm[v] = foot * foot * (3.0f - 2.0f * foot);
+				const float ramp = t * t * (3.0f - 2.0f * t) * calm;
 				wobbleSize[v] *= ramp;
 				bounce[v] *= ramp;
 				wobbleWeight[v] *= ramp;
 				// (a unified sheet's swell is its pooling: piled up against the rock, it bulges there rather than dipping into the corner)
-				if (!unified)
-					swellPush[v] *= ramp;
+				swellPush[v] *= unified ? calm : ramp;
 			}
 			// D186: widely (water is smooth however stirred; it deforms by area, not locally): many passes, so it spreads tens of units
 			for (int pass = 0; pass < ROCK_FIELD_PASSES; pass++) {
@@ -4180,6 +4194,12 @@ namespace FluidFieldSim
 					}
 					values->swap(softened);
 				}
+			}
+			// (again: softening spread the motion back down onto the waterline)
+			for (uint32_t v = 0; v < counts.vertexCount; v++) {
+				wobbleSize[v] *= footCalm[v];
+				swellPush[v] *= footCalm[v];
+				bounce[v] *= footCalm[v];
 			}
 			limitSlope(wobbleSize, WOBBLE_SLOPE, WOBBLE_SLOPE_FINE);
 			limitSlope(swellPush, PUSH_SLOPE, PUSH_SLOPE_FINE);

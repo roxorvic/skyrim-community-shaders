@@ -249,7 +249,9 @@ namespace FallShading
 	/** The depth of river (world units) the calm water's tint reads as, whatever lies just behind the sheet. */
 	static const float RIVER_LOOK_DEPTH = 256.0;
 	/** World units fallen over which the crest leaves the river plane's own shading for the falls'. */
-	static const float CREST_RIVER_FALL = 48.0;
+	static const float CREST_RIVER_FALL = 96.0;
+	/** World units fallen past Foam Start Height over which the crest's foam and milk ease in. */
+	static const float CREST_FOAM_IN = 160.0;
 	/** World units fallen past Foam Start Height over which the water counts as wholly dropped. */
 	static const float BAKED_DROP_FULL = 240.0;
 	/**
