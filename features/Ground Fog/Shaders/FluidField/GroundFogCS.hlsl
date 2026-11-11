@@ -1,6 +1,8 @@
 // Fluid Field ground fog (D194): a slab of fog on the ground round the player. Its floor is the ground tiles' (8 units),
 // its depth the fog solver's column (FogDepthCS); D195: two of them where a column has two levels (under an overhang, at a
-// ledge's foot), each sample on the level under it. Within the contact map, fog is cut where something stands in it; past the simulated grid, the far height map with the settled depth. Each
+// ledge's foot), each sample on the level under it. Within the contact map, fog is cut where something stands in it.
+// Fluff: 3D noise carried by the fog's flow and rising slowly breaks the top into clumps; deeper fog billows more, churned
+// fog lifts, and a few wisps stray over the top; past the simulated grid, the far height map with the settled depth. Each
 // half-resolution pixel marches its view ray to the nearest of its four pixels' surfaces, lit by the sun and ambient
 // light, into FogHalf (in-scattered light, transmittance) and FogHalfDistance; the COMPOSITE entry lays that over the scene
 // at full resolution, after opaque lighting and before water and effects.
@@ -42,7 +44,9 @@ Texture2D<float> FarHeight : register(t3);
 Texture2DArray<float4> Bed : register(t4);  // Per level: x height, z kind (2 closed)
 Texture2D<uint> ContactLow : register(t5);  // Lowest and highest point of what stands over each texel (FogContactCS)
 Texture2D<uint> ContactHigh : register(t6);
+Texture3D<float> Noise : register(t7);  // Tiling value noise, NOISE_CELLS lattice cells a side
 SamplerState LinearSampler : register(s0);
+SamplerState WrapSampler : register(s1);
 #ifndef COMPOSITE
 RWTexture2D<float4> FogHalf : register(u0);
 RWTexture2D<float> FogHalfDistance : register(u1);
@@ -66,11 +70,34 @@ static const float FIRST_STEP = 4.0;
 static const float LEVEL_STEP = 24.0;
 /** Cells along the grid's edge over which the simulated fog hands over to the settled fog past it. */
 static const float EDGE_BAND = 24.0;
+/** World units one noise texture tile spans across, and up (clumps flatter than wide). */
+static const float NOISE_SPAN = 320.0;
+static const float NOISE_SPAN_UP = 160.0;
+/** Seconds between restarts of each of the noise's two flow phases, fastest flow carrying it, and its rise. */
+static const float FLOW_PERIOD = 2.0;
+static const float MAX_FLOW = 150.0;
+static const float RISE = 6.0;
+/** How much the top rises and falls with the noise in fog Pool Depth deep (puff by depth). */
+static const float BILLOW = 0.45;
+/** How much the top rises at full churn (LIFT_SPEED). */
+static const float LIFT = 0.6;
+static const float LIFT_SPEED = 120.0;
+/** Share of the fog's height over which it breaks into clumps, and how deep the clumps' gaps go. */
+static const float CLUMPING = 0.7;
+/** Wisps: how far over the top they stray (times the depth), and their density relative to the fog's. */
+static const float WISP_REACH = 0.6;
+static const float WISP_DENSITY = 0.25;
+/** The fluff's furthest reach over the deepest fog: the band rays are clipped to. */
+static const float FLUFF_REACH = 1.0 + BILLOW + LIFT + WISP_REACH;
 /** Share of MaxDistance over which the fog fades out at the end of the rays. */
 static const float DISTANCE_FADE = 0.2;
 static const float TILE_TEXEL = 8.0;
 static const int TILE_SLOTS = 8;
 static const uint TILE_MAY_FORM = 1, TILE_ROCK = 2, TILE_STEEP = 4;
+/** The lower level's flags carry the gap up to the overhang's underside: flags + gap * GAP_SCALE (GroundTiles). */
+static const float GAP_SCALE = 32.0;
+/** Fog under an overhang stays this far under its underside, fading over it. */
+static const float CEILING_MARGIN = 6.0;
 static const float NO_GROUND = -1.0e6;
 /** World units over which a contact cut fades at its top and bottom. */
 static const float CONTACT_SOFTNESS = 4.0;
@@ -131,15 +158,18 @@ float FarGround(float2 xy)
  * Ground under a position at height z: the level under it of the nearest texel, bilinear over the four nearest texels'
  * levels nearest that (those a level away left out: no slope hung across a ledge). forming: their share fog may form on;
  * carries: their share neither rock nor steep (an 8-unit map cannot follow a rock's face: fog drawn on it flickers in
- * and out of the mesh). The far height map where no tile is resident.
+ * and out of the mesh); ceiling: the overhang's underside over the floor under it (very high in the open). The far height
+ * map where no tile is resident.
  */
-float Ground(float3 position, out float forming, out float carries)
+float Ground(float3 position, out float forming, out float carries, out float ceiling)
 {
 	const float2 t = position.xy / TILE_TEXEL - 0.5;
 	const int2 base = int2(floor(t));
 	const float2 f = t - float2(base);
 	const float4 nearestTexel = Texel(int2(round(t)));
 	const float reference = LevelUnder(nearestTexel, position.z).x;
+	const bool underOverhang = nearestTexel.z > NO_GROUND && reference == nearestTexel.z;
+	ceiling = underOverhang ? nearestTexel.z + floor(nearestTexel.w / GAP_SCALE) : 1e30;
 	float height = 0.0, weights = 0.0, form = 0.0, carry = 0.0;
 	[unroll] for (uint k = 0; k < 4; k++)
 	{
@@ -167,21 +197,23 @@ float SettledFar(float2 xy, float ground)
 }
 
 /**
- * Fog depth at a position on ground of the given height: the column (bilinear) of each nearest cell's level whose floor is
- * that ground's (D195; cells a level away left out), handing over to the settled depth at the grid's edge.
+ * The fog over ground of the given height (x depth, yz velocity, w churn): the column (bilinear) of each nearest cell's
+ * level whose floor is that ground's (D195; cells a level away left out), handing over to the settled depth at the grid's
+ * edge.
  */
-float FogDepth(float2 xy, float ground, float forming)
+float4 FogColumn(float2 xy, float ground, float forming)
 {
 	const float2 c = xy / CellSize - 0.5;
 	const float2 logical = c - float2(GridMin);
 	const float fromEdge = min(min(logical.x, logical.y), min(float(Resolution) - 1.0 - logical.x, float(Resolution) - 1.0 - logical.y));
 	const float settled = HasFar != 0 ? SettledFar(xy, ground) * forming : 0.0;
 	if (fromEdge < 0.0)
-		return settled;
+		return float4(settled, 0.0, 0.0, 0.0);
 	const int2 base = int2(floor(c));
 	const float2 f = c - float2(base);
 	const uint mask = Resolution - 1;
-	float depth = 0.0, weights = 0.0;
+	float4 column = 0.0;
+	float weights = 0.0;
 	[unroll] for (uint k = 0; k < 4; k++)
 	{
 		const int2 offset = int2(k & 1, k >> 1);
@@ -191,11 +223,28 @@ float FogDepth(float2 xy, float ground, float forming)
 		const uint level = lower.z != 2.0 && abs(lower.x - ground) < abs(top.x - ground) ? 1 : 0;
 		const float floorHeight = level == 1 ? lower.x : top.x;
 		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (floorHeight - ground < LEVEL_STEP && ground - floorHeight < LEVEL_STEP ? 1.0 : 0.0);
-		depth += Column[uint3(texel, level)].x * w;
+		column += Column[uint3(texel, level)] * w;
 		weights += w;
 	}
-	const float simulated = weights > 1e-4 ? depth / weights : 0.0;
-	return lerp(settled, simulated, saturate(fromEdge / EDGE_BAND));
+	const float4 simulated = weights > 1e-4 ? column / weights : 0.0;
+	const float edge = saturate(fromEdge / EDGE_BAND);
+	return float4(lerp(settled, simulated.x, edge), simulated.yzw * edge);
+}
+
+/** Noise 0 to 1 at a position, carried by the fog's flow: two phases half a period apart, cross-faded so no restart shows. */
+float FlowNoise(float3 position, float2 velocity)
+{
+	const float speed = length(velocity);
+	const float2 flow = velocity * min(1.0, MAX_FLOW / max(speed, 1e-3)) * FLOW_PERIOD;
+	const float time = SharedData::Timer / FLOW_PERIOD;
+	const float phaseA = frac(time), phaseB = frac(time + 0.5);
+	const float3 span = float3(NOISE_SPAN, NOISE_SPAN, NOISE_SPAN_UP);
+	const float3 p = (position - float3(0.0, 0.0, SharedData::Timer * RISE)) / span;
+	const float3 a = p - float3(flow * phaseA, 0.0) / span;
+	const float3 b = p - float3(flow * phaseB, 0.0) / span + 0.37;
+	const float noiseA = Noise.SampleLevel(WrapSampler, a, 0) * 0.65 + Noise.SampleLevel(WrapSampler, a * 2.7 + 0.13, 0) * 0.35;
+	const float noiseB = Noise.SampleLevel(WrapSampler, b, 0) * 0.65 + Noise.SampleLevel(WrapSampler, b * 2.7 + 0.13, 0) * 0.35;
+	return lerp(noiseA, noiseB, abs(phaseA * 2.0 - 1.0));
 }
 
 /** How much of the fog at a position is left by what stands in it (the contact map): 0 inside, 1 clear of it. */
@@ -215,16 +264,29 @@ float Uncut(float3 position)
 float FogAt(float3 position, out float shading)
 {
 	shading = 1.0;
-	float forming, carries;
-	const float ground = Ground(position, forming, carries);
+	float forming, carries, ceiling;
+	const float ground = Ground(position, forming, carries, ceiling);
 	const float height = position.z - ground;
-	if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth)
+	if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth * FLUFF_REACH)
 		return 0.0;
-	const float top = FogDepth(position.xy, ground, forming);
-	if (top <= 0.5 || height > top)
+	const float4 column = FogColumn(position.xy, ground, forming);
+	const float depth = column.x;
+	if (depth <= 0.5 || height > depth * FLUFF_REACH)
 		return 0.0;
-	shading = exp(-SELF_SHADING * Density * (top - height));
-	return Density * carries * (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * Uncut(position);
+	// The top: billowing more where the fog is deep, lifted where it churns
+	const float noise = FlowNoise(position, column.yz);
+	const float puff = saturate(depth / MaxDepth);
+	// Under an overhang, never into its underside
+	const float top = min(depth * (1.0 + BILLOW * puff * (noise * 2.0 - 1.0) + LIFT * saturate(column.w / LIFT_SPEED)), ceiling - CEILING_MARGIN - ground);
+	if (top <= 0.5)
+		return 0.0;
+	// Dense at the bottom, breaking into clumps toward the top; a few wisps stray over it
+	const float up = saturate(height / max(top, 1.0));
+	const float clumps = lerp(1.0, saturate(noise * 2.2 - 0.6), CLUMPING * up);
+	const float body = (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * clumps;
+	const float wisps = WISP_DENSITY * (puff + saturate(column.w / LIFT_SPEED)) * saturate(noise * 4.0 - 2.6) * (1.0 - smoothstep(top, top * (1.0 + WISP_REACH), height));
+	shading = exp(-SELF_SHADING * Density * max(top - height, 0.0));
+	return Density * carries * max(body, wisps) * Uncut(position);
 }
 
 /**
@@ -277,8 +339,8 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	// Clip the ray to the fog band over the ground under the camera and the ray's end
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float3 endPoint = camera + direction * rayLength;
-	float formingA, formingB, carriesA, carriesB;
-	const float bandTop = max(Ground(camera, formingA, carriesA), Ground(endPoint + float3(0.0, 0.0, 1.0), formingB, carriesB)) + MaxDepth;
+	float formingA, formingB, carriesA, carriesB, ceilingA, ceilingB;
+	const float bandTop = max(Ground(camera, formingA, carriesA, ceilingA), Ground(endPoint + float3(0.0, 0.0, 1.0), formingB, carriesB, ceilingB)) + MaxDepth * FLUFF_REACH;
 	if (rayLength <= 0.0 || min(camera.z, endPoint.z) > bandTop)
 		return float4(0.0, 0.0, 0.0, 1.0);
 	float rayStart = 0.0;

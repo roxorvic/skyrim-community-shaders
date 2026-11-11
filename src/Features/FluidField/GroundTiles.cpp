@@ -34,15 +34,22 @@ namespace FluidFieldSim
 		constexpr float TRUNK_FACING = 0.5f;
 		/** @brief Rock standing less than this over the ground is ground (a log's flat base plate, debris lying on the grass). */
 		constexpr float ROCK_RISE = 16.0f;
-		/** @brief A triangle facing down this much is an underside (an overhang's). */
-		constexpr float UNDERSIDE_FACING = -0.3f;
+		/** @brief A triangle facing down this much is an underside (an overhang's; a curved lip's steeper faces too). */
+		constexpr float UNDERSIDE_FACING = -0.1f;
+		/** @brief Texels out to which an underside fills the holes in a curved one (faces too steep to count, texel centres
+		 * between its triangles), where the top stands well over the land. */
+		constexpr int UNDERSIDE_FILL = 3;
 		/** @brief An overhang's underside clears the floor under it by at least this much. */
 		constexpr float OVERHANG_CLEARANCE = 40.0f;
+		/** @brief A gap under an overhang lower than this is solid (roots, a lip resting on the ground): no level there. */
+		constexpr float LEAST_GAP = 24.0f;
+		/** @brief The lower level's flags carry the gap over its floor (to the underside) in their higher bits: flags + gap * GAP_SCALE. */
+		constexpr float GAP_SCALE = 32.0f;
 		/** @brief A slope rising this much per texel on both sides of one is steep (~50 deg); a single step is a ledge, not a slope. */
 		constexpr float STEEP_RISE = 1.2f * GroundTiles::TEXEL;
 
 		/** @brief Bump when the build changes: older cached tiles are ignored. */
-		constexpr uint32_t CACHE_VERSION = 5;
+		constexpr uint32_t CACHE_VERSION = 7;
 		constexpr uint32_t CACHE_MAGIC = 0x31544746;  // "FGT1"
 
 		/** @brief Read budgets on the main thread, ms: in play, and just after a load (the screen is still fading in). */
@@ -695,6 +702,24 @@ namespace FluidFieldSim
 						under[i] = std::max(under[i], z);
 				});
 		}
+		for (int pass = 0; pass < UNDERSIDE_FILL; pass++) {
+			std::vector<float> filled(under);
+			for (int32_t y = 1; y < N - 1; y++) {
+				for (int32_t x = 1; x < N - 1; x++) {
+					const std::size_t i = static_cast<std::size_t>(y) * N + x;
+					const float top = std::max(heights[i], rock[i]);
+					if (under[i] > NO_GROUND || land[i] <= NO_GROUND || top < land[i] + 2.0f * OVERHANG_CLEARANCE)
+						continue;
+					for (int32_t dy = -1; dy <= 1; dy++)
+						for (int32_t dx = -1; dx <= 1; dx++) {
+							const float z = under[static_cast<std::size_t>(y + dy) * N + (x + dx)];
+							if (z > NO_GROUND && z < top - 1.0f && z > land[i] + OVERHANG_CLEARANCE)
+								filled[i] = std::max(filled[i], z);
+						}
+				}
+			}
+			under.swap(filled);
+		}
 		for (std::size_t i = 0; i < under.size(); i++)
 			if (under[i] > NO_GROUND)
 				lower[i] = land[i];
@@ -750,8 +775,11 @@ namespace FluidFieldSim
 				float* out = &o_texels[(static_cast<std::size_t>(y) * TILE_TEXELS + x) * 4];
 				out[0] = heights[i];
 				out[1] = heights[i] > NO_GROUND ? finish(heights, i, flags[i], steepTop[i]) : 0.0f;
-				out[2] = lower[i];
-				out[3] = lower[i] > NO_GROUND ? finish(floors, i, lowerFlags[i], steepLower[i]) : 0.0f;
+				// The gap up to the underside, for the draw's ceiling; a gap too low to hold fog is solid
+				const float gap = under[i] - lower[i];
+				const bool open = lower[i] > NO_GROUND && gap >= LEAST_GAP;
+				out[2] = open ? lower[i] : NO_GROUND;
+				out[3] = open ? finish(floors, i, lowerFlags[i], steepLower[i]) + GAP_SCALE * std::floor(std::min(gap, 4000.0f)) : 0.0f;
 			}
 		}
 	}

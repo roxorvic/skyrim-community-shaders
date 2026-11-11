@@ -156,6 +156,10 @@ private:
 	winrt::com_ptr<ID3D11Buffer> groundFogCB;
 	winrt::com_ptr<ID3D11Buffer> groundDebugCB;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
+	/** @brief Tiling 3D value noise for the fog's clumps (GroundFogCS), built once, and its wrapping sampler. */
+	winrt::com_ptr<ID3D11ShaderResourceView> noiseSRV;
+	winrt::com_ptr<ID3D11SamplerState> wrapSampler;
+	bool EnsureNoise();
 	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution
 	std::unique_ptr<Texture2D> fogHalfDistance;  ///< Distance to each half-resolution texel's surface
 	bool drawFailed = false;

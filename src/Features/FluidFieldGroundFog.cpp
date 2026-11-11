@@ -128,6 +128,8 @@ void FluidFieldGroundFog::Release()
 	groundFogCB = nullptr;
 	groundDebugCB = nullptr;
 	linearSampler = nullptr;
+	noiseSRV = nullptr;
+	wrapSampler = nullptr;
 	fogHalf.reset();
 	fogHalfDistance.reset();
 }
@@ -297,11 +299,11 @@ namespace
 	{
 		ID3D11ShaderResourceView* nullSRVs[10]{};
 		ID3D11UnorderedAccessView* nullUAVs[2]{};
-		ID3D11SamplerState* nullSampler = nullptr;
+		ID3D11SamplerState* nullSamplers[2]{};
 		ID3D11Buffer* nullCB = nullptr;
 		a_context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
 		a_context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
-		a_context->CSSetSamplers(0, 1, &nullSampler);
+		a_context->CSSetSamplers(0, 2, nullSamplers);
 		a_context->CSSetConstantBuffers(0, 1, &nullCB);
 		a_context->CSSetConstantBuffers(12, 1, &nullCB);
 		a_context->CSSetShader(nullptr, nullptr, 0);
@@ -324,9 +326,54 @@ namespace
 	}
 }
 
+bool FluidFieldGroundFog::EnsureNoise()
+{
+	if (noiseSRV && wrapSampler)
+		return true;
+	// Value noise over an 8-cell lattice that wraps, eased between lattice points
+	constexpr uint32_t SIZE = 64, CELLS = 8, PER_CELL = SIZE / CELLS;
+	const auto hash = [](uint32_t a_x, uint32_t a_y, uint32_t a_z) {
+		uint32_t h = (a_x % CELLS) * 374761393u + (a_y % CELLS) * 668265263u + (a_z % CELLS) * 2147483647u;
+		h = (h ^ (h >> 13)) * 1274126177u;
+		return static_cast<float>((h ^ (h >> 16)) & 0xFFFF) / 65535.0f;
+	};
+	const auto ease = [](float t) { return t * t * (3.0f - 2.0f * t); };
+	std::vector<uint8_t> texels(SIZE * SIZE * SIZE);
+	for (uint32_t z = 0; z < SIZE; z++) {
+		for (uint32_t y = 0; y < SIZE; y++) {
+			for (uint32_t x = 0; x < SIZE; x++) {
+				const uint32_t cx = x / PER_CELL, cy = y / PER_CELL, cz = z / PER_CELL;
+				const float fx = ease((x % PER_CELL + 0.5f) / PER_CELL), fy = ease((y % PER_CELL + 0.5f) / PER_CELL), fz = ease((z % PER_CELL + 0.5f) / PER_CELL);
+				const auto plane = [&](uint32_t a_z) {
+					const float south = std::lerp(hash(cx, cy, a_z), hash(cx + 1, cy, a_z), fx);
+					const float north = std::lerp(hash(cx, cy + 1, a_z), hash(cx + 1, cy + 1, a_z), fx);
+					return std::lerp(south, north, fy);
+				};
+				texels[(z * SIZE + y) * SIZE + x] = static_cast<uint8_t>(std::clamp(std::lerp(plane(cz), plane(cz + 1), fz), 0.0f, 1.0f) * 255.0f + 0.5f);
+			}
+		}
+	}
+	const D3D11_TEXTURE3D_DESC desc{ .Width = SIZE, .Height = SIZE, .Depth = SIZE, .MipLevels = 1, .Format = DXGI_FORMAT_R8_UNORM, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+	const D3D11_SUBRESOURCE_DATA data{ .pSysMem = texels.data(), .SysMemPitch = SIZE, .SysMemSlicePitch = SIZE * SIZE };
+	D3D11_SAMPLER_DESC samplerDesc{};
+	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+	auto* device = globals::d3d::device;
+	winrt::com_ptr<ID3D11Texture3D> texture;
+	if (FAILED(device->CreateTexture3D(&desc, &data, texture.put())) || FAILED(device->CreateShaderResourceView(texture.get(), nullptr, noiseSRV.put())) ||
+		FAILED(device->CreateSamplerState(&samplerDesc, wrapSampler.put()))) {
+		noiseSRV = nullptr;
+		wrapSampler = nullptr;
+		return false;
+	}
+	Util::SetResourceName(texture.get(), "FluidField::GroundFogNoise");
+	return true;
+}
+
 void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
 {
-	if (drawFailed || settings.FogDensity <= 0.0f)
+	if (drawFailed || settings.FogDensity <= 0.0f || !EnsureNoise())
 		return;
 	auto* context = globals::d3d::context;
 	if (!groundFogCS) {
@@ -389,10 +436,10 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	ID3D11Buffer* cb = groundFogCB.get();
 	context->CSSetConstantBuffers(0, 1, &cb);
 	BindFrameBuffers(context);
-	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetFarSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV() };
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetFarSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRV.get() };
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
-	ID3D11SamplerState* sampler = linearSampler.get();
-	context->CSSetSamplers(0, 1, &sampler);
+	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get() };
+	context->CSSetSamplers(0, 2, samplers);
 	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);
