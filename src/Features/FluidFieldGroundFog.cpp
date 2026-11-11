@@ -13,6 +13,14 @@
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FluidFieldGroundFog::Settings,
 	Enabled,
+	FogDensity,
+	FogBrightness,
+	GroundThickness,
+	PoolDepth,
+	EaseIn,
+	FogDetail,
+	ContactRadius,
+	Stir,
 	DebugView)
 
 void FluidFieldGroundFog::DrawSettings()
@@ -23,14 +31,38 @@ void FluidFieldGroundFog::DrawSettings()
 	};
 
 	ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.Enabled);
-	tooltip(T(TKEY("enabled_tooltip"), "Fog lying on the ground around you, in banks and clearings. It parts and swirls around moving actors and drifts with the weather's wind."));
-	if (debugFailed)
+	tooltip(T(TKEY("enabled_tooltip"), "Fog lying on the ground around you. It drains downhill, pools in hollows and spills off ledges."));
+	if (solverFailed || drawFailed)
 		ImGui::TextColored(Menu::GetSingleton()->GetTheme().StatusPalette.Error, "%s", T(TKEY("shader_compile_failed"), "Ground Fog shaders failed to compile, so the fog is off. Check CommunityShaders.log."));
 
-	bool debugView = settings.DebugView == 1;
-	if (ImGui::Checkbox(T(TKEY("debug_ground"), "Show Ground Map"), &debugView))
-		settings.DebugView = debugView ? 1 : 0;
-	tooltip(T(TKEY("debug_ground_tooltip"), "Colours every surface by what the fog takes it for: green ground fog may form on, red rock, yellow too steep, cyan water, grey not ground, blue not built yet (the far height map). Striped: still being built."));
+	ImGui::SliderFloat(T(TKEY("fog_density"), "Density"), &settings.FogDensity, 0.0f, 0.2f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fog_density_tooltip"), "How thick the fog is inside its layer."));
+	ImGui::SliderFloat(T(TKEY("fog_brightness"), "Brightness"), &settings.FogBrightness, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fog_brightness_tooltip"), "How brightly the fog is lit by the sky and the sun."));
+	ImGui::SliderFloat(T(TKEY("ground_thickness"), "Ground Thickness"), &settings.GroundThickness, 5.0f, 60.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("ground_thickness_tooltip"), "How deep fog lies on open ground where it forms, in world units."));
+	ImGui::SliderFloat(T(TKEY("pool_depth"), "Pool Depth"), &settings.PoolDepth, 10.0f, 120.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("pool_depth_tooltip"), "How deep fog gathers in hollows, in world units."));
+	ImGui::SliderFloat(T(TKEY("ease_in"), "Ease In"), &settings.EaseIn, 2.0f, 120.0f, "%.0f s", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("ease_in_tooltip"), "How long fog takes to form back where it was parted or drained away."));
+	ImGui::SliderFloat(T(TKEY("fog_stir"), "Stirring"), &settings.Stir, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("fog_stir_tooltip"), "How hard moving actors push the fog aside, piling it in front and leaving a wake."));
+
+	if (ImGui::CollapsingHeader(T(TKEY("quality"), "Quality"))) {
+		ImGui::PushID("QualitySection");
+		static constexpr uint MIN_DETAIL = 0, MAX_DETAIL = 2;
+		ImGui::SliderScalar(T(TKEY("fog_detail"), "Fog Detail"), ImGuiDataType_U32, &settings.FogDetail, &MIN_DETAIL, &MAX_DETAIL, "%u", ImGuiSliderFlags_AlwaysClamp);
+		tooltip(T(TKEY("fog_detail_tooltip"), "0: finest fog, simulated 43 m round you. 1: 58 m. 2: coarsest, 88 m. The cost stays the same; past it the fog lies settled."));
+		ImGui::SliderFloat(T(TKEY("contact_radius"), "Contact Radius"), &settings.ContactRadius, 15.0f, 20.0f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		tooltip(T(TKEY("contact_radius_tooltip"), "How far round you actors' legs cut exact holes in the fog. Farther out they only push it."));
+		bool debugView = settings.DebugView == 1;
+		if (ImGui::Checkbox(T(TKEY("debug_ground"), "Show Ground Map"), &debugView))
+			settings.DebugView = debugView ? 1 : 0;
+		tooltip(T(TKEY("debug_ground_tooltip"), "Colours every surface by what the fog takes it for: green ground fog may form on, red rock, yellow too steep, cyan water, grey not ground, blue not built yet (the far height map). Striped: still being built. Brighter: fog lying there."));
+		if (ImGui::Button(T(TKEY("reset_field"), "Reset Field")))
+			queuedReset = true;
+		ImGui::PopID();
+	}
 	if (IsActive())
 		ImGui::Text(T(TKEY("ground_status"), "Ground: %zu tiles queued, %u provisional, %.3f ms a frame"), ground.GetQueued(), ground.GetProvisional(), groundMs);
 }
@@ -45,6 +77,16 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 		logger::warn("[Fluid Field] Malformed Ground Fog settings, using defaults: {}", e.what());
 		settings = {};
 	}
+	const Settings defaults{};
+	const auto clamp = [](float a_value, float a_min, float a_max, float a_default) { return std::isfinite(a_value) ? std::clamp(a_value, a_min, a_max) : a_default; };
+	settings.FogDensity = clamp(settings.FogDensity, 0.0f, 0.2f, defaults.FogDensity);
+	settings.FogBrightness = clamp(settings.FogBrightness, 0.0f, 2.0f, defaults.FogBrightness);
+	settings.GroundThickness = clamp(settings.GroundThickness, 5.0f, 60.0f, defaults.GroundThickness);
+	settings.PoolDepth = clamp(settings.PoolDepth, 10.0f, 120.0f, defaults.PoolDepth);
+	settings.EaseIn = clamp(settings.EaseIn, 2.0f, 120.0f, defaults.EaseIn);
+	settings.FogDetail = std::min(settings.FogDetail, 2u);
+	settings.ContactRadius = clamp(settings.ContactRadius, 15.0f, 20.0f, defaults.ContactRadius);
+	settings.Stir = clamp(settings.Stir, 0.0f, 3.0f, defaults.Stir);
 	settings.DebugView = std::min(settings.DebugView, 1u);
 }
 
@@ -65,16 +107,80 @@ void FluidFieldGroundFog::PostPostLoad()
 
 void FluidFieldGroundFog::ClearShaderCache()
 {
+	solver.ReleaseShaders();
+	solverFailed = false;
+	groundFogCS = nullptr;
+	groundFogCompositeCS = nullptr;
 	groundDebugCS = nullptr;
-	debugFailed = false;
+	drawFailed = false;
 }
 
 void FluidFieldGroundFog::Release()
 {
 	ground.Release();
+	solver.ReleaseResources();
+	solver.ReleaseShaders();
+	cellSize = 0.0f;
+	fogReady = false;
+	groundFogCS = nullptr;
+	groundFogCompositeCS = nullptr;
 	groundDebugCS = nullptr;
+	groundFogCB = nullptr;
 	groundDebugCB = nullptr;
 	linearSampler = nullptr;
+	fogHalf.reset();
+	fogHalfDistance.reset();
+}
+
+bool FluidFieldGroundFog::EnsureSolver()
+{
+	if (solverFailed)
+		return false;
+	if (!solver.HasResources()) {
+		try {
+			solver.CreateResources(globals::d3d::device, GRID_RESOLUTION, [](ID3D11DeviceChild* object, const char* name) { Util::SetResourceName(object, "%s", name); });
+		} catch (const winrt::hresult_error& e) {
+			logger::error("[Fluid Field] Ground fog could not create its textures: {}", winrt::to_string(e.message()));
+			solverFailed = true;
+			return false;
+		}
+	}
+	if (!solver.HasShaders() && !solver.CompileShaders([](const wchar_t* fileName) {
+			const auto path = std::filesystem::path("Data\\Shaders\\FluidField") / fileName;
+			return reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(path.c_str(), {}, "cs_5_0"));
+		})) {
+		logger::error("[Fluid Field] Ground fog solver shaders failed to compile; the fog stays off");
+		solverFailed = true;
+		return false;
+	}
+	return true;
+}
+
+FluidFieldSim::FogGround FluidFieldGroundFog::MakeGround() const
+{
+	FluidFieldSim::FogGround out;
+	out.tiles = ground.GetSRV();
+	out.farHeight = ground.GetFarSRV();
+	out.tileMin[0] = ground.GetTileMin()[0];
+	out.tileMin[1] = ground.GetTileMin()[1];
+	std::memcpy(out.slots.data(), ground.GetSlots().data(), sizeof(out.slots));
+	const auto& farMap = ground.GetFarMap();
+	for (int i = 0; i < 2; i++) {
+		out.farScale[i] = farMap.scale[i];
+		out.farOffset[i] = farMap.offset[i];
+	}
+	out.farZ[0] = farMap.z0;
+	out.farZ[1] = farMap.z1;
+	return out;
+}
+
+FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
+{
+	FluidFieldSim::FogLayerParams layer;
+	layer.groundThickness = settings.GroundThickness;
+	layer.poolDepth = std::max(settings.PoolDepth, settings.GroundThickness);
+	layer.sourceRate = 1.0f / settings.EaseIn;
+	return layer;
 }
 
 void FluidFieldGroundFog::Prepass()
@@ -90,30 +196,64 @@ void FluidFieldGroundFog::Prepass()
 		return;
 	}
 	released = false;
+	fogReady = false;
 
 	const FluidFieldSim::Field::PrepassScope scope(*this);
 	if (!scope.IsReady() || Util::IsInterior())
 		return;
 
 	// Every load leaves the player somewhere new
-	if (field.ConsumeLoad(seenLoads))
+	if (field.ConsumeLoad(seenLoads)) {
 		ground.Clear();
+		queuedReset = true;
+	}
 
+	auto* context = globals::d3d::context;
+	const auto playerPos = field.GetPlayerPosition();
 	const auto start = std::chrono::steady_clock::now();
 	globals::profiler->BeginPass("FluidField::Fog Ground");
-	const auto playerPos = field.GetPlayerPosition();
-	ground.Update(globals::d3d::device, globals::d3d::context, field.GetLandscape(), field.GetWater(), playerPos.x, playerPos.y, field.GetDeltaTime());
+	ground.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), playerPos.x, playerPos.y, field.GetDeltaTime());
 	globals::profiler->EndPass();
 	const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 	groundMs += (ms - groundMs) * 0.05f;
+
+	const float deltaTime = field.GetDeltaTime();
+	if (!ground.GetSRV() || !(deltaTime > 0.0f) || !EnsureSolver())
+		return;
+
+	// The grid centred on the player, snapped to whole cells; another cell size starts it again
+	const float wantedCell = CELL_SIZES[settings.FogDetail];
+	if (wantedCell != cellSize || queuedReset.exchange(false)) {
+		cellSize = wantedCell;
+		solver.Reset();
+		airSources.Clear();
+	}
+	const int32_t half = static_cast<int32_t>(GRID_RESOLUTION / 2);
+	gridMin[0] = static_cast<int32_t>(std::floor(playerPos.x / cellSize)) - half;
+	gridMin[1] = static_cast<int32_t>(std::floor(playerPos.y / cellSize)) - half;
+	const float step = std::min(deltaTime, 1.0f / 30.0f);
+	const FluidFieldSim::StepParams grid{ .gridMin = { gridMin[0], gridMin[1] }, .cellSize = cellSize, .deltaTime = step };
+
+	// Moving actors push the fog; close by, their legs cut it (the contact map round the player)
+	airSources.Update(playerPos, settings.ContactRadius * UNITS_PER_METRE, cellSize * static_cast<float>(half), step, settings.Stir, SHOVE_SPEED * settings.Stir, FluidFieldSim::FogSolver::MAX_MOVERS);
+	const int32_t contactHalf = static_cast<int32_t>(FluidFieldSim::FogSolver::CONTACT_RESOLUTION / 2);
+	contactMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FluidFieldSim::FogSolver::CONTACT_CELL)) - contactHalf;
+	contactMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FluidFieldSim::FogSolver::CONTACT_CELL)) - contactHalf;
+	const FluidFieldSim::FogMovers movers{ .pushers = airSources.GetPushers(), .contacts = airSources.GetContacts(), .contactMin = { contactMin[0], contactMin[1] } };
+	solver.Step(context, grid, MakeLayer(), MakeGround(), movers, [&](const char* a_pass, auto&& a_run) {
+		globals::profiler->BeginPass(std::format("FluidField::{}", a_pass));
+		a_run();
+		globals::profiler->EndPass();
+	});
+	fogReady = true;
 }
 
 void FluidFieldGroundFog::DrawAfterWorld()
 {
-	if (!IsActive() || settings.DebugView == 0 || !ground.GetSRV() || Util::IsInterior())
+	if (!IsActive() || !fogReady || Util::IsInterior())
 		return;
 	auto* renderer = globals::game::renderer;
-	// The targets the world was just rendered into; not always kMAIN, so the view follows whatever is bound
+	// The targets the world was just rendered into; not always kMAIN, so the fog follows whatever is bound
 	const auto& shadow = globals::game::shadowState->GetRuntimeData();
 	const auto colorIndex = static_cast<uint32_t>(shadow.renderTargets[0]);
 	const auto depthIndex = shadow.depthStencil;
@@ -124,30 +264,162 @@ void FluidFieldGroundFog::DrawAfterWorld()
 	if (!main.UAV || !depth.depthSRV)
 		return;
 
-	// The live depth can only be read once it is no longer bound
+	// The live depth holds the water surfaces; it can only be read once it is no longer bound
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-	DrawDebug(main.UAV, depth.depthSRV);
-	globals::game::shadowState->GetRuntimeData().stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
-}
-
-void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
-{
-	if (debugFailed)
-		return;
-	auto* device = globals::d3d::device;
-	auto* context = globals::d3d::context;
-	if (!groundDebugCS) {
-		groundDebugCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundDebugCS.hlsl", {}, "cs_5_0")));
-		const D3D11_BUFFER_DESC desc{ .ByteWidth = sizeof(GroundDebugConstants), .Usage = D3D11_USAGE_DYNAMIC, .BindFlags = D3D11_BIND_CONSTANT_BUFFER, .CPUAccessFlags = D3D11_CPU_ACCESS_WRITE, .MiscFlags = 0, .StructureByteStride = 0 };
+	if (!linearSampler) {
 		D3D11_SAMPLER_DESC samplerDesc{};
 		samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 		samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
 		samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-		if (!groundDebugCS || (!groundDebugCB && FAILED(device->CreateBuffer(&desc, nullptr, groundDebugCB.put()))) ||
-			(!linearSampler && FAILED(device->CreateSamplerState(&samplerDesc, linearSampler.put())))) {
+		if (FAILED(globals::d3d::device->CreateSamplerState(&samplerDesc, linearSampler.put())))
+			return;
+	}
+	if (settings.DebugView == 1)
+		DrawDebug(main.UAV, depth.depthSRV);
+	else
+		DrawFog(main.texture, main.UAV, depth.depthSRV);
+	globals::game::shadowState->GetRuntimeData().stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+}
+
+namespace
+{
+	/** @brief Binds the camera (b12) and shared data (b5, b6): earlier passes unbind or replace them. */
+	void BindFrameBuffers(ID3D11DeviceContext* a_context)
+	{
+		auto* cameraSnapshot = FluidFieldSim::Field::Get().GetCameraSnapshot();
+		ID3D11Buffer* perFrame = cameraSnapshot ? cameraSnapshot : *globals::game::perFrame;
+		a_context->CSSetConstantBuffers(12, 1, &perFrame);
+		ID3D11Buffer* sharedBuffers[2]{ globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
+		a_context->CSSetConstantBuffers(5, 2, sharedBuffers);
+	}
+
+	void UnbindAll(ID3D11DeviceContext* a_context)
+	{
+		ID3D11ShaderResourceView* nullSRVs[10]{};
+		ID3D11UnorderedAccessView* nullUAVs[2]{};
+		ID3D11SamplerState* nullSampler = nullptr;
+		ID3D11Buffer* nullCB = nullptr;
+		a_context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
+		a_context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+		a_context->CSSetSamplers(0, 1, &nullSampler);
+		a_context->CSSetConstantBuffers(0, 1, &nullCB);
+		a_context->CSSetConstantBuffers(12, 1, &nullCB);
+		a_context->CSSetShader(nullptr, nullptr, 0);
+	}
+
+	template <class T>
+	bool Upload(ID3D11DeviceContext* a_context, winrt::com_ptr<ID3D11Buffer>& a_buffer, const T& a_data)
+	{
+		if (!a_buffer) {
+			const D3D11_BUFFER_DESC desc{ .ByteWidth = sizeof(T), .Usage = D3D11_USAGE_DYNAMIC, .BindFlags = D3D11_BIND_CONSTANT_BUFFER, .CPUAccessFlags = D3D11_CPU_ACCESS_WRITE, .MiscFlags = 0, .StructureByteStride = 0 };
+			if (FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, a_buffer.put())))
+				return false;
+		}
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (FAILED(a_context->Map(a_buffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+			return false;
+		std::memcpy(mapped.pData, &a_data, sizeof(T));
+		a_context->Unmap(a_buffer.get(), 0);
+		return true;
+	}
+}
+
+void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
+{
+	if (drawFailed || settings.FogDensity <= 0.0f)
+		return;
+	auto* context = globals::d3d::context;
+	if (!groundFogCS) {
+		groundFogCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", {}, "cs_5_0")));
+		groundFogCompositeCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "COMPOSITE", "" } }, "cs_5_0")));
+		if (!groundFogCS || !groundFogCompositeCS) {
+			logger::error("[Fluid Field] Ground fog shader failed to compile; the ground fog stays off");
+			groundFogCS = nullptr;
+			groundFogCompositeCS = nullptr;
+			drawFailed = true;
+			return;
+		}
+	}
+
+	const auto& farMap = ground.GetFarMap();
+	GroundFogConstants constants{
+		.gridMin = { gridMin[0], gridMin[1] },
+		.resolution = GRID_RESOLUTION,
+		.cellSize = cellSize,
+		.density = settings.FogDensity,
+		.stepCount = STEP_COUNT,
+		.maxDistance = 0.75f * cellSize * static_cast<float>(GRID_RESOLUTION),
+		.maxDepth = std::max(settings.PoolDepth, settings.GroundThickness),
+		.albedo = { 0.9f * settings.FogBrightness, 0.92f * settings.FogBrightness, 0.95f * settings.FogBrightness },
+		.farDepth = settings.GroundThickness,
+		.slotTiles = {},
+		.tileMin = { ground.GetTileMin()[0], ground.GetTileMin()[1] },
+		.farScale = { farMap.scale[0], farMap.scale[1] },
+		.farOffset = { farMap.offset[0], farMap.offset[1] },
+		.farZ = { farMap.z0, farMap.z1 },
+		.hasFar = ground.GetFarSRV() ? 1u : 0u,
+		.hollowGain = MakeLayer().hollowGain,
+		.farPoolDepth = std::max(settings.PoolDepth, settings.GroundThickness),
+		.contactCell = FluidFieldSim::FogSolver::CONTACT_CELL,
+		.contactMin = { contactMin[0], contactMin[1] },
+		.contactResolution = FluidFieldSim::FogSolver::CONTACT_RESOLUTION,
+		.pad = 0.0f
+	};
+	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
+	if (!Upload(context, groundFogCB, constants))
+		return;
+
+	// Marched at half resolution (the nearest of each four pixels' surfaces), composited at full
+	D3D11_TEXTURE2D_DESC mainDesc{};
+	a_mainTexture->GetDesc(&mainDesc);
+	const uint32_t halfWidth = (mainDesc.Width + 1) / 2, halfHeight = (mainDesc.Height + 1) / 2;
+	if (!fogHalf || fogHalf->desc.Width != halfWidth || fogHalf->desc.Height != halfHeight) {
+		const auto create = [&](DXGI_FORMAT a_format, const char* a_name) {
+			D3D11_TEXTURE2D_DESC desc{ .Width = halfWidth, .Height = halfHeight, .MipLevels = 1, .ArraySize = 1, .Format = a_format, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, .CPUAccessFlags = 0, .MiscFlags = 0 };
+			auto texture = std::make_unique<Texture2D>(desc, a_name);
+			texture->CreateSRV({ .Format = a_format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 } });
+			texture->CreateUAV({ .Format = a_format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D, .Texture2D = { .MipSlice = 0 } });
+			return texture;
+		};
+		fogHalf = create(DXGI_FORMAT_R16G16B16A16_FLOAT, "FluidField::GroundFogHalf");
+		fogHalfDistance = create(DXGI_FORMAT_R32_FLOAT, "FluidField::GroundFogHalfDistance");
+	}
+
+	globals::profiler->BeginPass("FluidField::Ground Fog");
+	ID3D11Buffer* cb = groundFogCB.get();
+	context->CSSetConstantBuffers(0, 1, &cb);
+	BindFrameBuffers(context);
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetFarSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV() };
+	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
+	ID3D11SamplerState* sampler = linearSampler.get();
+	context->CSSetSamplers(0, 1, &sampler);
+	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
+	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
+	context->CSSetShader(groundFogCS.get(), nullptr, 0);
+	const auto dispatch = Util::GetScreenDispatchCount(true);
+	context->Dispatch((dispatch.x + 1) / 2, (dispatch.y + 1) / 2, 1);
+
+	ID3D11UnorderedAccessView* nullUAVs[2]{};
+	context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+	ID3D11ShaderResourceView* halfSRVs[] = { fogHalf->srv.get(), fogHalfDistance->srv.get() };
+	context->CSSetShaderResources(8, 2, halfSRVs);
+	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
+	context->CSSetShader(groundFogCompositeCS.get(), nullptr, 0);
+	context->Dispatch(dispatch.x, dispatch.y, 1);
+	UnbindAll(context);
+	globals::profiler->EndPass();
+}
+
+void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
+{
+	if (drawFailed)
+		return;
+	auto* context = globals::d3d::context;
+	if (!groundDebugCS) {
+		groundDebugCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundDebugCS.hlsl", {}, "cs_5_0")));
+		if (!groundDebugCS) {
 			logger::error("[Fluid Field] Ground fog debug shader failed to compile");
-			groundDebugCS = nullptr;
-			debugFailed = true;
+			drawFailed = true;
 			return;
 		}
 	}
@@ -164,39 +436,26 @@ void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11Sha
 	constants.farZ[0] = farMap.z0;
 	constants.farZ[1] = farMap.z1;
 	constants.hasFar = ground.GetFarSRV() ? 1 : 0;
-	D3D11_MAPPED_SUBRESOURCE mapped{};
-	if (FAILED(context->Map(groundDebugCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+	constants.resolution = GRID_RESOLUTION;
+	constants.cellSize = cellSize;
+	constants.poolDepth = std::max(settings.PoolDepth, settings.GroundThickness);
+	constants.gridMin[0] = gridMin[0];
+	constants.gridMin[1] = gridMin[1];
+	if (!Upload(context, groundDebugCB, constants))
 		return;
-	std::memcpy(mapped.pData, &constants, sizeof(constants));
-	context->Unmap(groundDebugCB.get(), 0);
 
 	globals::profiler->BeginPass("FluidField::Fog Debug");
 	ID3D11Buffer* cb = groundDebugCB.get();
 	context->CSSetConstantBuffers(0, 1, &cb);
-	// The camera (b12) and shared data (b5): earlier passes unbind or replace them
-	auto* cameraSnapshot = FluidFieldSim::Field::Get().GetCameraSnapshot();
-	ID3D11Buffer* perFrame = cameraSnapshot ? cameraSnapshot : *globals::game::perFrame;
-	context->CSSetConstantBuffers(12, 1, &perFrame);
-	ID3D11Buffer* sharedBuffers[2]{ globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
-	context->CSSetConstantBuffers(5, 2, sharedBuffers);
-	ID3D11ShaderResourceView* srvs[3] = { a_depth, ground.GetSRV(), ground.GetFarSRV() };
-	context->CSSetShaderResources(0, 3, srvs);
+	BindFrameBuffers(context);
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), ground.GetFarSRV(), solver.GetColumnSRV() };
+	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	ID3D11SamplerState* sampler = linearSampler.get();
 	context->CSSetSamplers(0, 1, &sampler);
 	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
 	context->CSSetShader(groundDebugCS.get(), nullptr, 0);
 	const auto dispatch = Util::GetScreenDispatchCount(true);
 	context->Dispatch(dispatch.x, dispatch.y, 1);
-
-	ID3D11ShaderResourceView* nullSRVs[3]{};
-	ID3D11UnorderedAccessView* nullUAV = nullptr;
-	ID3D11SamplerState* nullSampler = nullptr;
-	ID3D11Buffer* nullCB = nullptr;
-	context->CSSetShaderResources(0, 3, nullSRVs);
-	context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
-	context->CSSetSamplers(0, 1, &nullSampler);
-	context->CSSetConstantBuffers(0, 1, &nullCB);
-	context->CSSetConstantBuffers(12, 1, &nullCB);
-	context->CSSetShader(nullptr, nullptr, 0);
+	UnbindAll(context);
 	globals::profiler->EndPass();
 }

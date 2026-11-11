@@ -4405,3 +4405,16 @@ Entry format:
   grid for near detail (seams, hand-offs, wake/idle); runtime re-rasterising of the ground (2.2 ms main thread).
 - Decided by: @Victor ("simplify it as much as possible ... as a whole, simple and elegant")
 - References: D21, D193; FluidNinja "Water on Landscapes" (mass buffer, cached initial state)
+
+## D195: Ground fog v3: two levels per column
+
+- Date: 2026-11-11
+- Decision: D194's "one level per column" is replaced by up to two: the ground tiles keep the top surface and, under an
+  overhang, the floor below it; the solver carries a fog depth for each. A level flows into the neighbouring cell's level
+  whose floor is nearest at or under its own (top to top, floor to floor), so fog on a ledge pours onto the floor at its
+  brink and fog under it never reaches the top. Movers push the level they stand in; contact cuts are by height. A cell
+  straddling a step gets the lower side as its second level, so ledge feet carry fog.
+- Alternatives rejected: one level (no fog under overhangs: seen at Riverwood on 2026-11-11); a static settled slab
+  under overhangs (no flow, fakes it); v2's second layer on the air sim (leaked, broke the look).
+- Decided by: @Victor ("a full vertically enabled fog layer that can exist on two Z coordinates for the same X,Y")
+- References: D194; fog-v3.md 3.1, 3.2, Open

@@ -1,5 +1,5 @@
-# Fluid Field solver referee: runs the real WindSolver and HLSL on a WARP (software)
-# D3D11 device and compares solver steps against a CPU reference.
+# Fluid Field fog solver referee: runs the real FogSolver and HLSL on a WARP (software)
+# D3D11 device over made-up ground and checks the fog layer's rules.
 #
 # Standalone on purpose, so it needs no vcpkg and stays out of the plugin build:
 #   cmake -S tests/FluidField -B build/FluidFieldTest
@@ -13,11 +13,14 @@ set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_executable(
     FluidFieldSolverTest
     SolverTest.cpp
-    ${REPO_ROOT}/src/Features/FluidField/WindSolver.cpp
+    ${REPO_ROOT}/src/Features/FluidField/FogSolver.cpp
 )
 target_compile_features(FluidFieldSolverTest PRIVATE cxx_std_23)
 target_compile_options(FluidFieldSolverTest PRIVATE /W4 /permissive- /EHsc)
-target_include_directories(FluidFieldSolverTest PRIVATE ${REPO_ROOT}/src/Features)
+target_include_directories(
+    FluidFieldSolverTest
+    PRIVATE ${REPO_ROOT}/src/Features
+)
 target_compile_definitions(
     FluidFieldSolverTest
     PRIVATE

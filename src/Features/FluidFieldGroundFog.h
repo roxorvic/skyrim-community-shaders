@@ -1,13 +1,19 @@
 #pragma once
 
+#include "Buffer.h"
 #include "Feature.h"
+#include "FluidField/AirSources.h"
+#include "FluidField/FogSolver.h"
 #include "FluidField/GroundTiles.h"
 
 /**
  * @brief Ground Fog (D194): a thin heavy fog layer lying on a baked ground round the player, drawn as a volume.
  *
  * The ground comes in three tiers (GroundTiles): mesh tiles near the player, built on a worker and cached on disk, the
- * loaded landscape while they build, and the worldspace's height map far out. Runs only while this feature is on.
+ * loaded landscape while they build, and the worldspace's height map far out. The fog flows over it (FogSolver): it forms
+ * where it may, drains downhill, pools in hollows and spills off ledges but never climbs them; D195: on two levels where
+ * the ground has two (under overhangs). Moving actors push it; close by, their legs cut it exactly (the contact map). Runs
+ * only while this feature is on.
  */
 struct FluidFieldGroundFog : Feature
 {
@@ -20,14 +26,27 @@ struct FluidFieldGroundFog : Feature
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { T("feature.fluid_field_ground_fog.description", "Low fog lying on the ground around the player, in banks and clearings."),
-			{ T("feature.fluid_field_ground_fog.key_feature_1", "Parts and swirls around moving actors, then settles back"),
-				T("feature.fluid_field_ground_fog.key_feature_2", "Drifts with the weather's wind") } };
+			{ T("feature.fluid_field_ground_fog.key_feature_1", "Drains downhill and pools in hollows"),
+				T("feature.fluid_field_ground_fog.key_feature_2", "Spills off ledges and flows round rocks"),
+				T("feature.fluid_field_ground_fog.key_feature_3", "Parted by moving actors, cut where their legs pass") } };
 	}
+
+	/** @brief Fog Detail's cell sizes, world units: the grid's reach changes, its cost does not. */
+	static constexpr std::array<float, 3> CELL_SIZES = { 12.0f, 16.0f, 24.0f };
+	static constexpr uint32_t GRID_RESOLUTION = 512;
 
 	struct Settings
 	{
 		bool Enabled = false;
-		uint DebugView = 0;  ///< 1 colours every surface by what the fog's ground takes it for
+		float FogDensity = 0.04f;       ///< Extinction per world unit inside the fog
+		float FogBrightness = 0.15f;    ///< How brightly the fog is lit, as a fraction of the light around it
+		float GroundThickness = 20.0f;  ///< Fog depth on open ground where it forms, world units
+		float PoolDepth = 40.0f;        ///< Deepest fog in hollows, world units
+		float EaseIn = 20.0f;           ///< Seconds for fog to form back (about two thirds of the way)
+		uint FogDetail = 1;             ///< CELL_SIZES index
+		float ContactRadius = 18.0f;    ///< Metres round the player within which legs cut the fog exactly
+		float Stir = 1.0f;              ///< How hard moving actors push the fog
+		uint DebugView = 0;             ///< 1 colours every surface by what the fog's ground takes it for, brighter where fog lies
 	};
 
 	Settings settings;
@@ -45,7 +64,7 @@ struct FluidFieldGroundFog : Feature
 	/** @brief Registers the shared loading-screen listener. */
 	virtual void PostPostLoad() override;
 
-	/** @brief Brings the ground up to date. */
+	/** @brief Brings the ground up to date and steps the fog. */
 	virtual void Prepass() override;
 
 	/** @brief Drops the shaders so they recompile. */
@@ -54,7 +73,7 @@ struct FluidFieldGroundFog : Feature
 	/** @brief Loaded and enabled. */
 	bool IsActive() const { return loaded && settings.Enabled; }
 
-	/** @brief D21: draws over the finished world, before first person, TAA and tonemapping. */
+	/** @brief D21: draws the fog over the finished world, before first person, TAA and tonemapping. */
 	void DrawAfterWorld();
 
 private:
@@ -62,8 +81,43 @@ private:
 	bool released = true;
 	/** @brief Loading screens this feature has reset for (Field::ConsumeLoad). */
 	uint32_t seenLoads = UINT32_MAX;
+	/** @brief Creates the solver's resources and shaders; false if it cannot run. */
+	bool EnsureSolver();
+	FluidFieldSim::FogGround MakeGround() const;
+	FluidFieldSim::FogLayerParams MakeLayer() const;
 
+	void DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
 	void DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
+
+	/** @brief Samples along each pixel's ray. */
+	static constexpr uint32_t STEP_COUNT = 24;
+
+	/** @brief Matches GroundFogCB in GroundFogCS.hlsl. */
+	struct alignas(16) GroundFogConstants
+	{
+		int32_t gridMin[2];
+		uint32_t resolution;
+		float cellSize;
+		float density;
+		uint32_t stepCount;
+		float maxDistance;
+		float maxDepth;
+		float albedo[3];
+		float farDepth;
+		FluidFieldSim::GroundTiles::SlotTile slotTiles[FluidFieldSim::GroundTiles::SLOTS * FluidFieldSim::GroundTiles::SLOTS];
+		int32_t tileMin[2];
+		float farScale[2];
+		float farOffset[2];
+		float farZ[2];
+		uint32_t hasFar;
+		float hollowGain;
+		float farPoolDepth;
+		float contactCell;
+		int32_t contactMin[2];
+		uint32_t contactResolution;
+		float pad;
+	};
+	static_assert(sizeof(GroundFogConstants) == 48 + 64 * 16 + 64);
 
 	/** @brief Matches GroundDebugCB in GroundDebugCS.hlsl. */
 	struct alignas(16) GroundDebugConstants
@@ -74,15 +128,37 @@ private:
 		float farOffset[2];
 		float farZ[2];
 		uint32_t hasFar;
-		float pad[3];
+		uint32_t resolution;
+		float cellSize;
+		float poolDepth;
+		int32_t gridMin[2];
+		float pad[2];
 	};
-	static_assert(sizeof(GroundDebugConstants) == 64 * 16 + 48);
+	static_assert(sizeof(GroundDebugConstants) == 64 * 16 + 64);
 
 	FluidFieldSim::GroundTiles ground;
+	FluidFieldSim::FogSolver solver;
+	FluidFieldSim::AirSources airSources;
+	int32_t contactMin[2]{};  ///< The contact map's placement this frame
+	/** @brief World units a metre, for Contact Radius. */
+	static constexpr float UNITS_PER_METRE = 70.0f;
+	/** @brief World units per second a running actor shoves the fog aside, at Stir 1. */
+	static constexpr float SHOVE_SPEED = 150.0f;
+	int32_t gridMin[2]{};
+	float cellSize = 0.0f;  ///< The grid's cell size it was last stepped with; a change resets it
+	bool fogReady = false;  ///< Stepped this frame
+	bool solverFailed = false;
 	/** @brief Main-thread milliseconds of the ground update, smoothed (the UI shows it). */
 	float groundMs = 0.0f;
+	winrt::com_ptr<ID3D11ComputeShader> groundFogCS;
+	winrt::com_ptr<ID3D11ComputeShader> groundFogCompositeCS;  ///< Lays the half-resolution fog over the scene
 	winrt::com_ptr<ID3D11ComputeShader> groundDebugCS;
+	winrt::com_ptr<ID3D11Buffer> groundFogCB;
 	winrt::com_ptr<ID3D11Buffer> groundDebugCB;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
-	bool debugFailed = false;
+	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution
+	std::unique_ptr<Texture2D> fogHalfDistance;  ///< Distance to each half-resolution texel's surface
+	bool drawFailed = false;
+	/** @brief Set by the Reset button on the UI thread, consumed on the render thread. */
+	std::atomic<bool> queuedReset = true;
 };

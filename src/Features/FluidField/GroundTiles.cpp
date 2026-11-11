@@ -34,11 +34,15 @@ namespace FluidFieldSim
 		constexpr float TRUNK_FACING = 0.5f;
 		/** @brief Rock standing less than this over the ground is ground (a log's flat base plate, debris lying on the grass). */
 		constexpr float ROCK_RISE = 16.0f;
+		/** @brief A triangle facing down this much is an underside (an overhang's). */
+		constexpr float UNDERSIDE_FACING = -0.3f;
+		/** @brief An overhang's underside clears the floor under it by at least this much. */
+		constexpr float OVERHANG_CLEARANCE = 40.0f;
 		/** @brief A slope rising this much per texel on both sides of one is steep (~50 deg); a single step is a ledge, not a slope. */
 		constexpr float STEEP_RISE = 1.2f * GroundTiles::TEXEL;
 
 		/** @brief Bump when the build changes: older cached tiles are ignored. */
-		constexpr uint32_t CACHE_VERSION = 3;
+		constexpr uint32_t CACHE_VERSION = 5;
 		constexpr uint32_t CACHE_MAGIC = 0x31544746;  // "FGT1"
 
 		/** @brief Read budgets on the main thread, ms: in play, and just after a load (the screen is still fading in). */
@@ -289,17 +293,18 @@ namespace FluidFieldSim
 						continue;
 					triangle.kind = Kind::Wall;
 				} else if (modelClass == ModelClass::Walls)
-					triangle.kind = Kind::Wall;
+					// A rock overhang's underside too: the floor under it is a second level (MountainTrimSlab ledges, Riverwood)
+					triangle.kind = facing <= UNDERSIDE_FACING ? Kind::Underside : Kind::Wall;
 				else if (facing >= (modelClass == ModelClass::Terrain ? TERRAIN_GROUND_FACING : GROUND_FACING)) {
 					// Ground only near the landscape: a roof or a canopy is not
 					if (modelClass != ModelClass::Terrain && overLand && cz > landHeight + GROUND_WINDOW)
 						continue;
 					triangle.kind = Kind::Ground;
 					triangle.steep = facing < GROUND_FACING;
-				} else if (facing > 0.0f)
+				} else if (facing > UNDERSIDE_FACING)
 					triangle.kind = Kind::Wall;
 				else
-					continue;  // Undersides: one level per column
+					triangle.kind = Kind::Underside;
 				const float minX = std::min({ triangle.a[0], triangle.b[0], triangle.c[0] }), maxX = std::max({ triangle.a[0], triangle.b[0], triangle.c[0] });
 				const float minY = std::min({ triangle.a[1], triangle.b[1], triangle.c[1] }), maxY = std::max({ triangle.a[1], triangle.b[1], triangle.c[1] });
 				bounds.min[0] = std::min(bounds.min[0], minX);
@@ -419,7 +424,7 @@ namespace FluidFieldSim
 		if (!worker.joinable())
 			worker = std::jthread([this](std::stop_token a_stop) { Run(a_stop); });
 		if (!texture) {
-			const D3D11_TEXTURE2D_DESC desc{ .Width = RESIDENT_TEXELS, .Height = RESIDENT_TEXELS, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32G32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+			const D3D11_TEXTURE2D_DESC desc{ .Width = RESIDENT_TEXELS, .Height = RESIDENT_TEXELS, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
 			if (FAILED(a_device->CreateTexture2D(&desc, nullptr, texture.put())) || FAILED(a_device->CreateShaderResourceView(texture.get(), nullptr, srv.put()))) {
 				texture = nullptr;
 				srv = nullptr;
@@ -508,7 +513,7 @@ namespace FluidFieldSim
 			}
 			const auto originX = static_cast<UINT>((result.x & (SLOTS - 1)) * TILE_TEXELS), originY = static_cast<UINT>((result.y & (SLOTS - 1)) * TILE_TEXELS);
 			const D3D11_BOX box{ .left = originX, .top = originY, .front = 0, .right = originX + TILE_TEXELS, .bottom = originY + TILE_TEXELS, .back = 1 };
-			a_context->UpdateSubresource(texture.get(), 0, &box, result.texels.data(), TILE_TEXELS * 2 * sizeof(float), 0);
+			a_context->UpdateSubresource(texture.get(), 0, &box, result.texels.data(), TILE_TEXELS * 4 * sizeof(float), 0);
 			slots[slot - state.data()] = { result.x, result.y, 1, 0 };
 			slot->built = true;
 			slot->final = result.settled;
@@ -593,7 +598,7 @@ namespace FluidFieldSim
 				path = workerCacheDir / std::format("{}.{}.bin", job->x, job->y);
 			}
 			Result result{ .x = job->x, .y = job->y, .miss = false, .settled = job->settled || job->loadOnly };
-			result.texels.resize(static_cast<std::size_t>(TILE_TEXELS) * TILE_TEXELS * 2);
+			result.texels.resize(static_cast<std::size_t>(TILE_TEXELS) * TILE_TEXELS * 4);
 			if (job->loadOnly) {
 				std::ifstream file(path, std::ios::binary);
 				uint32_t header[2]{};
@@ -625,86 +630,128 @@ namespace FluidFieldSim
 		// One texel of margin round the tile, so steepness at its edge sees its neighbours
 		constexpr int32_t N = TILE_TEXELS + 2;
 		const float originX = a_job.x * TILE_UNITS - TEXEL, originY = a_job.y * TILE_UNITS - TEXEL;
-		std::vector<float> heights(N * N, NO_GROUND), rock(N * N, NO_GROUND);
-		std::vector<uint8_t> flags(N * N, 0), steepTop(N * N, 0);
+		// Per texel: the top surface; the landscape (or water) under everything; the highest underside under the top, and the
+		// floor under that (D195)
+		std::vector<float> heights(N * N, NO_GROUND), rock(N * N, NO_GROUND), land(N * N, NO_GROUND), under(N * N, NO_GROUND), lower(N * N, NO_GROUND), lowerRock(N * N, NO_GROUND);
+		std::vector<uint8_t> flags(N * N, 0), steepTop(N * N, 0), lowerFlags(N * N, 0), steepLower(N * N, 0);
 		for (int32_t y = 0; y < N; y++) {
 			for (int32_t x = 0; x < N; x++) {
 				const float px = originX + (x + 0.5f) * TEXEL, py = originY + (y + 0.5f) * TEXEL;
-				float land = 0.0f;
-				if (!a_job.landscape.SampleHeight(px, py, land))
+				float height = 0.0f;
+				if (!a_job.landscape.SampleHeight(px, py, height))
 					continue;
 				const std::size_t i = static_cast<std::size_t>(y) * N + x;
-				heights[i] = land;
 				// Water over the land: its surface, no fog for now
 				for (const auto& plane : a_job.water) {
-					if (px >= plane.minX && px <= plane.maxX && py >= plane.minY && py <= plane.maxY && plane.height > heights[i]) {
-						heights[i] = plane.height;
+					if (px >= plane.minX && px <= plane.maxX && py >= plane.minY && py <= plane.maxY && plane.height > height) {
+						height = plane.height;
 						flags[i] = WATER;
 					}
 				}
+				heights[i] = land[i] = height;
+				lowerFlags[i] = flags[i];
 			}
 		}
 		// Every texel centre inside a triangle, with the triangle's height there
-		for (const auto& triangle : a_job.triangles) {
-			const float area = Area2(triangle.a, triangle.b, triangle.c);
+		const auto cover = [&](const GroundMeshes::Triangle& a_triangle, auto&& a_texel) {
+			const float area = Area2(a_triangle.a, a_triangle.b, a_triangle.c);
 			if (std::abs(area) < 1e-4f)
-				continue;
-			const float minX = std::min({ triangle.a[0], triangle.b[0], triangle.c[0] }), maxX = std::max({ triangle.a[0], triangle.b[0], triangle.c[0] });
-			const float minY = std::min({ triangle.a[1], triangle.b[1], triangle.c[1] }), maxY = std::max({ triangle.a[1], triangle.b[1], triangle.c[1] });
+				return;
+			const float minX = std::min({ a_triangle.a[0], a_triangle.b[0], a_triangle.c[0] }), maxX = std::max({ a_triangle.a[0], a_triangle.b[0], a_triangle.c[0] });
+			const float minY = std::min({ a_triangle.a[1], a_triangle.b[1], a_triangle.c[1] }), maxY = std::max({ a_triangle.a[1], a_triangle.b[1], a_triangle.c[1] });
 			const int32_t x0 = std::max(0, static_cast<int32_t>(std::ceil((minX - originX) / TEXEL - 0.5f))), x1 = std::min(N - 1, static_cast<int32_t>(std::floor((maxX - originX) / TEXEL - 0.5f)));
 			const int32_t y0 = std::max(0, static_cast<int32_t>(std::ceil((minY - originY) / TEXEL - 0.5f))), y1 = std::min(N - 1, static_cast<int32_t>(std::floor((maxY - originY) / TEXEL - 0.5f)));
 			for (int32_t y = y0; y <= y1; y++) {
 				for (int32_t x = x0; x <= x1; x++) {
 					const float p[2] = { originX + (x + 0.5f) * TEXEL, originY + (y + 0.5f) * TEXEL };
-					const float wa = Area2(triangle.b, triangle.c, p) / area;
-					const float wb = Area2(triangle.c, triangle.a, p) / area;
+					const float wa = Area2(a_triangle.b, a_triangle.c, p) / area;
+					const float wb = Area2(a_triangle.c, a_triangle.a, p) / area;
 					const float wc = 1.0f - wa - wb;
-					if (wa < 0.0f || wb < 0.0f || wc < 0.0f)
-						continue;
 					const std::size_t i = static_cast<std::size_t>(y) * N + x;
-					if (heights[i] <= NO_GROUND)
-						continue;
-					const float z = wa * triangle.a[2] + wb * triangle.b[2] + wc * triangle.c[2];
-					if (triangle.kind == GroundMeshes::Kind::Wall)
-						rock[i] = std::max(rock[i], z);
-					else if (z > heights[i]) {
-						heights[i] = z;
-						steepTop[i] = triangle.steep;
-						flags[i] &= ~WATER;
-					}
+					if (wa >= 0.0f && wb >= 0.0f && wc >= 0.0f && land[i] > NO_GROUND)
+						a_texel(i, wa * a_triangle.a[2] + wb * a_triangle.b[2] + wc * a_triangle.c[2]);
 				}
 			}
+		};
+		// The top: the highest ground, and the highest rock
+		for (const auto& triangle : a_job.triangles) {
+			if (triangle.kind == GroundMeshes::Kind::Underside)
+				continue;
+			cover(triangle, [&](std::size_t i, float z) {
+				if (triangle.kind == GroundMeshes::Kind::Wall)
+					rock[i] = std::max(rock[i], z);
+				else if (z > heights[i]) {
+					heights[i] = z;
+					steepTop[i] = triangle.steep;
+					flags[i] &= ~WATER;
+				}
+			});
 		}
-		// Rock standing over the ground is the column's top
+		// An overhang: the highest underside under the top, clear of the land; then the highest surface well under it
+		for (const auto& triangle : a_job.triangles) {
+			if (triangle.kind == GroundMeshes::Kind::Underside)
+				cover(triangle, [&](std::size_t i, float z) {
+					if (z < std::max(heights[i], rock[i]) - 1.0f && z > land[i] + OVERHANG_CLEARANCE)
+						under[i] = std::max(under[i], z);
+				});
+		}
+		for (std::size_t i = 0; i < under.size(); i++)
+			if (under[i] > NO_GROUND)
+				lower[i] = land[i];
+		for (const auto& triangle : a_job.triangles) {
+			if (triangle.kind == GroundMeshes::Kind::Underside)
+				continue;
+			cover(triangle, [&](std::size_t i, float z) {
+				if (under[i] <= NO_GROUND || z > under[i] - OVERHANG_CLEARANCE)
+					return;
+				if (triangle.kind == GroundMeshes::Kind::Wall)
+					lowerRock[i] = std::max(lowerRock[i], z);
+				else if (z > lower[i]) {
+					lower[i] = z;
+					steepLower[i] = triangle.steep;
+					lowerFlags[i] &= ~WATER;
+				}
+			});
+		}
+		// Rock standing over the ground is the level's top
 		for (std::size_t i = 0; i < heights.size(); i++) {
 			if (heights[i] > NO_GROUND && rock[i] > heights[i] + ROCK_RISE) {
 				heights[i] = rock[i];
 				flags[i] = ROCK;
 			}
+			if (lower[i] > NO_GROUND && lowerRock[i] > lower[i] + ROCK_RISE) {
+				lower[i] = lowerRock[i];
+				lowerFlags[i] = ROCK;
+			}
 		}
+		// Steep: rising on both sides along an axis (a slope, not a ledge's single step), or a steep landscape mesh face
+		const auto finish = [&](const std::vector<float>& a_heights, std::size_t i, uint32_t a_flag, bool a_steepFace) {
+			for (const std::size_t step : { std::size_t{ 1 }, static_cast<std::size_t>(N) }) {
+				const float before = a_heights[i] - a_heights[i - step], after = a_heights[i + step] - a_heights[i];
+				if (a_heights[i - step] > NO_GROUND && a_heights[i + step] > NO_GROUND && before * after > 0.0f && std::min(std::abs(before), std::abs(after)) > STEEP_RISE)
+					a_flag |= STEEP;
+			}
+			if (a_steepFace && !(a_flag & ROCK))
+				a_flag |= STEEP;
+			if (!(a_flag & (ROCK | STEEP | WATER)))
+				a_flag |= FOG_MAY_FORM;
+			if (!a_job.settled)
+				a_flag |= PROVISIONAL;
+			return static_cast<float>(a_flag);
+		};
+		// The floors' slopes against their neighbours' floors, or their tops where those have none
+		std::vector<float> floors(lower);
+		for (std::size_t i = 0; i < floors.size(); i++)
+			if (floors[i] <= NO_GROUND)
+				floors[i] = heights[i];
 		for (int32_t y = 0; y < static_cast<int32_t>(TILE_TEXELS); y++) {
 			for (int32_t x = 0; x < static_cast<int32_t>(TILE_TEXELS); x++) {
 				const std::size_t i = static_cast<std::size_t>(y + 1) * N + (x + 1);
-				float* out = &o_texels[(static_cast<std::size_t>(y) * TILE_TEXELS + x) * 2];
+				float* out = &o_texels[(static_cast<std::size_t>(y) * TILE_TEXELS + x) * 4];
 				out[0] = heights[i];
-				if (heights[i] <= NO_GROUND) {
-					out[1] = 0.0f;
-					continue;
-				}
-				// Steep: rising on both sides along an axis (a slope, not a ledge's single step), or a steep landscape mesh face
-				uint32_t flag = flags[i];
-				for (const std::size_t step : { std::size_t{ 1 }, static_cast<std::size_t>(N) }) {
-					const float before = heights[i] - heights[i - step], after = heights[i + step] - heights[i];
-					if (heights[i - step] > NO_GROUND && heights[i + step] > NO_GROUND && before * after > 0.0f && std::min(std::abs(before), std::abs(after)) > STEEP_RISE)
-						flag |= STEEP;
-				}
-				if (steepTop[i] && !(flag & ROCK))
-					flag |= STEEP;
-				if (!(flag & (ROCK | STEEP | WATER)))
-					flag |= FOG_MAY_FORM;
-				if (!a_job.settled)
-					flag |= PROVISIONAL;
-				out[1] = static_cast<float>(flag);
+				out[1] = heights[i] > NO_GROUND ? finish(heights, i, flags[i], steepTop[i]) : 0.0f;
+				out[2] = lower[i];
+				out[3] = lower[i] > NO_GROUND ? finish(floors, i, lowerFlags[i], steepLower[i]) : 0.0f;
 			}
 		}
 	}

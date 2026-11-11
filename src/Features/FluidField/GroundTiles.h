@@ -38,7 +38,8 @@ namespace FluidFieldSim
 		enum class Kind : uint8_t
 		{
 			Ground,
-			Wall
+			Wall,
+			Underside  ///< An overhang's: the floor under it is a second level (D195)
 		};
 
 		struct Triangle
@@ -105,7 +106,7 @@ namespace FluidFieldSim
 	/**
 	 * @brief D194: the ground the fog lies on, in three tiers. Near: tiles of 1,024 world units (128² texels of 8 u) built from
 	 * the landscape and GroundMeshes on a worker thread, cached on disk once settled, kept in one toroidal texture round the
-	 * player (height, flags). Far: the worldspace's Terrain Shadows height map. Between, a tile not yet built is unknown
+	 * player (height and flags of the top surface and of the floor under an overhang, D195). Far: the worldspace's Terrain Shadows height map. Between, a tile not yet built is unknown
 	 * (consumers fall back to the far map). Main thread: copies inputs, uploads finished tiles.
 	 */
 	class GroundTiles
@@ -182,7 +183,7 @@ namespace FluidFieldSim
 			int32_t x, y;
 			bool miss;                  ///< loadOnly found nothing on disk
 			bool settled;               ///< From the cache, or built settled
-			std::vector<float> texels;  ///< TILE_TEXELS² (height, flags)
+			std::vector<float> texels;  ///< TILE_TEXELS² (top height, flags, lower height, flags)
 		};
 		/** @brief A resident slot's state on the main thread. */
 		struct Slot

@@ -23,7 +23,8 @@ fog only flows from a higher fog surface to a lower one: ledges, pooling and dra
     - rocks, logs, trees, stumps and mountains are rock/log;
     - everything else goes by facing: up within 300 u of the landscape is ground, except `Landscape\` meshes which count at
       any height; steep is flagged.
-- **Overhang undersides:** dropped. Take the top surface, since there's one level per column.
+- **Overhangs (D195):** two levels per column: the top surface and, under an overhang, the floor below it (height and
+  flags for each).
 
 **Building:**
 
@@ -254,7 +255,7 @@ test spot each time.
 - **Pipe model look:** if wakes look too smooth even with confinement, switch the solver to full shallow-water equations
   (same state plus advection).
 - **Brink spill:** it stays. Revisit only if it's hard to make look good.
-- **Overhangs:** one level per column, as accepted. Revisit only if Victor finds a spot where it matters.
+- **Overhangs:** two levels per column (D195), replacing one.
 - **Interiors and dungeons:** no landscape or world height map. Ground from the mesh tiles alone (fog-v2 section 4 has the
   dungeon list).
 - **Water:** still water counts as ground at its surface, with a strong source; fast water gets strong evaporation. That

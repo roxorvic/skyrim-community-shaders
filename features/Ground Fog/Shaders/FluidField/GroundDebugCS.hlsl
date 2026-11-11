@@ -1,6 +1,8 @@
-// Fluid Field ground fog debug view (D194): every surface coloured by what the fog's ground takes it for. Green: fog may
+// Fluid Field ground fog debug view (D194): every surface coloured by what the fog's ground takes it for (D195: the floor
+// under an overhang for surfaces below its top). Green: fog may
 // form; red: rock or log; yellow: steep; cyan: water; grey: a surface under the ground's height (a wall's side); magenta: over it (a surface the map missed); blue: no tile
-// yet (the far height map there, darker past it). Provisional tiles (their area not settled yet) are striped.
+// yet (the far height map there, darker past it). Provisional tiles (their area not settled yet) are striped. Brighter: fog
+// lying there, white at Pool Depth.
 
 #include "Common/FrameBuffer.hlsli"
 #include "Common/SharedData.hlsli"
@@ -13,12 +15,17 @@ cbuffer GroundDebugCB : register(b0)
 	float2 FarOffset;
 	float2 FarZ;
 	uint HasFar;
-	float3 Pad;
+	uint Resolution;  // The fog grid: cells per side, world units a cell, Pool Depth, world cell of logical texel (0, 0)
+	float CellSize;
+	float PoolDepth;
+	int2 GridMin;
+	float2 Pad;
 };
 
 Texture2D<float> DepthTexture : register(t0);
-Texture2D<float2> GroundTiles : register(t1);  // x height, y flags (GroundTiles::Flag)
+Texture2D<float4> GroundTiles : register(t1);  // x top height, y flags (GroundTiles::Flag), z lower height, w flags
 Texture2D<float> FarHeight : register(t2);
+Texture2DArray<float4> Column : register(t3);  // Per level: x fog depth, toroidal
 SamplerState LinearSampler : register(s0);
 RWTexture2D<float4> MainRW : register(u0);
 
@@ -34,7 +41,10 @@ float3 GroundColour(float3 world, uint2 pixel)
 	const int2 texel = int2(floor(world.xy / TEXEL));
 	const int2 tile = texel >> 7;
 	const int4 slot = SlotTiles[(tile.y & (SLOTS - 1)) * SLOTS + (tile.x & (SLOTS - 1))];
-	const float2 g = GroundTiles.Load(int3(texel & (SLOTS * TILE_TEXELS - 1), 0));
+	// The level under the surface: the floor under an overhang where it lies below the top (D195)
+	const float4 both = GroundTiles.Load(int3(texel & (SLOTS * TILE_TEXELS - 1), 0));
+	const uint level = both.z > -1e6 && world.z < both.x - ON_GROUND ? 1 : 0;
+	const float2 g = level == 1 ? both.zw : both.xy;
 	const uint flags = uint(g.y);
 	// Off the ground: grey under the map's height, magenta over it (a surface the map missed)
 	float3 colour = world.z > g.x + ON_GROUND ? float3(0.85, 0.1, 0.85) : float3(0.45, 0.45, 0.45);
@@ -48,6 +58,10 @@ float3 GroundColour(float3 world, uint2 pixel)
 	else if (abs(world.z - g.x) < ON_GROUND)
 		colour = (flags & WATER) ? float3(0.1, 0.8, 0.9) : (flags & STEEP) ? float3(0.95, 0.85, 0.1) :
 		                                                                     float3(0.2, 0.8, 0.2);
+	// Brighter where fog lies, up to white at Pool Depth
+	const int2 cell = int2(floor(world.xy / CellSize));
+	if (all(cell >= GridMin) && all(cell < GridMin + int(Resolution)))
+		colour = lerp(colour, 1.0, 0.8 * saturate(Column[uint3(uint2(cell) & (Resolution - 1), level)].x / PoolDepth));
 	if ((flags & PROVISIONAL) && ((pixel.x + pixel.y) / 6) % 2 == 0)
 		colour *= 0.4;
 	return colour;

@@ -2,7 +2,7 @@
 
 // Free of plugin headers (no PCH, globals or CommonLib) so tests/FluidField can run the solver on a WARP device.
 
-#include "WindSolver.h"
+#include "SolverCommon.h"
 
 #include <d3d11.h>
 #include <winrt/base.h>
@@ -80,8 +80,8 @@ namespace FluidFieldSim
 		static constexpr std::uint32_t MAX_FALL_CURRENTS = 32;
 		static constexpr float NO_WATER = -1.0e8f;  ///< Map surface value meaning "no vanilla water here"
 
-		using NameFn = WindSolver::NameFn;
-		using CompileFn = WindSolver::CompileFn;
+		using NameFn = FluidFieldSim::NameFn;
+		using CompileFn = FluidFieldSim::CompileFn;
 
 		/** @brief Creates the state, output, map and obstacle textures. Releases any previous ones first. */
 		void CreateResources(ID3D11Device* device, std::uint32_t resolution, std::uint32_t mapResolution, std::uint32_t obstacleResolution, const NameFn& name);
