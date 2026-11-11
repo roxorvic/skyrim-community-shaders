@@ -593,8 +593,7 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 		.cellSize = a_cellSize,
 		.deltaTime = a_deltaTime / static_cast<float>(substeps),
 		.velocityDecay = 1.0f,
-		.jacobiIterations = 0,
-		.emitters = {}
+		.jacobiIterations = 0
 	};
 	const auto wrap = [&](const char* passName, auto&& runPass) {
 		globals::profiler->BeginPass(std::format("FluidFieldShallowWater::{}{}", a_near ? "" : "Far ", passName));

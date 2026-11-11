@@ -20,8 +20,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FogThickness,
 	FogStir,
 	FogRefillSeconds,
-	GridResolution,
-	GridSize,
+	SimLevels,
+	FineRadius,
+	FarUpdateRate,
 	JacobiIterations,
 	WindDamping)
 
@@ -54,21 +55,19 @@ void FluidFieldGroundFog::DrawSettings()
 	if (ImGui::CollapsingHeader(T(TKEY("quality"), "Quality"))) {
 		ImGui::PushID("QualitySection");
 		ImGui::SeparatorText(T(TKEY("wind"), "Wind and Fog Grid"));
-		const auto resolutionLabel = std::format("{0} x {0}", settings.GridResolution);
-		if (ImGui::BeginCombo(T(TKEY("grid_resolution"), "Resolution"), resolutionLabel.c_str())) {
-			for (const uint resolution : FluidFieldSim::Field::GRID_RESOLUTIONS) {
-				const auto label = std::format("{0} x {0}", resolution);
-				if (ImGui::Selectable(label.c_str(), resolution == settings.GridResolution)) {
-					settings.GridResolution = resolution;
-					resourceCreateFailed = false;
-				}
-			}
-			ImGui::EndCombo();
+		static constexpr uint MIN_LEVELS = 1, MAX_LEVELS = LEVEL_COUNT;
+		ImGui::SliderScalar(T(TKEY("sim_levels"), "Levels"), ImGuiDataType_U32, &settings.SimLevels, &MIN_LEVELS, &MAX_LEVELS, "%u", ImGuiSliderFlags_AlwaysClamp);
+		tooltip(T(TKEY("sim_levels_tooltip"), "1: one medium grid around you. 2: plus a fine grid close by, where actors move by their skeleton, only while something moves in it. 3: plus a far, coarse grid round both."));
+		if (settings.SimLevels >= 2) {
+			ImGui::SliderFloat(T(TKEY("fine_radius"), "Fine Radius"), &settings.FineRadius, MIN_FINE_RADIUS, MAX_FINE_RADIUS, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+			tooltip(T(TKEY("fine_radius_tooltip"), "How far around you the fine grid reaches, in game units. Its cost stays the same: farther means coarser detail. Changing it clears the fine grid."));
+			ImGui::Text(T(TKEY("cell_size"), "Fine cell size: %.1f units"), GetCellSize(0));
 		}
-		tooltip(T(TKEY("grid_resolution_tooltip"), "Texels per side. Higher values show finer detail and cost more GPU time. Changing it clears the field."));
-		ImGui::SliderFloat(T(TKEY("grid_size"), "Size"), &settings.GridSize, FluidFieldSim::Field::MIN_GRID_SIZE, FluidFieldSim::Field::MAX_GRID_SIZE, "%.0f", ImGuiSliderFlags_AlwaysClamp);
-		tooltip(T(TKEY("grid_size_tooltip"), "Width of the area simulated around the player, in game units. Changing it clears the field."));
-		ImGui::Text(T(TKEY("cell_size"), "Cell size: %.1f units"), GetCellSize());
+		if (settings.SimLevels >= 3) {
+			static constexpr uint MIN_RATE = 1, MAX_RATE = 4;
+			ImGui::SliderScalar(T(TKEY("far_update_rate"), "Far Update Rate"), ImGuiDataType_U32, &settings.FarUpdateRate, &MIN_RATE, &MAX_RATE, "every %u frames", ImGuiSliderFlags_AlwaysClamp);
+			tooltip(T(TKEY("far_update_rate_tooltip"), "How often the far grid steps. Distant fog moves slowly, so every few frames saves GPU time without showing."));
+		}
 		ImGui::SliderScalar(T(TKEY("jacobi_iterations"), "Pressure Iterations"), ImGuiDataType_U32, &settings.JacobiIterations, &MIN_JACOBI_ITERATIONS, &MAX_JACOBI_ITERATIONS, "%u", ImGuiSliderFlags_AlwaysClamp);
 		tooltip(T(TKEY("jacobi_iterations_tooltip"), "More iterations make the wind swirl more accurately and cost more GPU time."));
 		ImGui::SliderFloat(T(TKEY("wind_damping"), "Wind Damping"), &settings.WindDamping, 0.0f, 5.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -83,13 +82,11 @@ void FluidFieldGroundFog::DrawSettings()
 
 FluidFieldGroundFog::Settings FluidFieldGroundFog::Sanitize(Settings a_settings)
 {
-	using FluidFieldSim::Field;
 	const Settings defaults{};
 
-	if (std::ranges::find(Field::GRID_RESOLUTIONS, a_settings.GridResolution) == Field::GRID_RESOLUTIONS.end())
-		a_settings.GridResolution = defaults.GridResolution;
-
-	a_settings.GridSize = std::isfinite(a_settings.GridSize) ? std::clamp(a_settings.GridSize, Field::MIN_GRID_SIZE, Field::MAX_GRID_SIZE) : defaults.GridSize;
+	a_settings.SimLevels = std::clamp(a_settings.SimLevels, 1u, LEVEL_COUNT);
+	a_settings.FineRadius = std::isfinite(a_settings.FineRadius) ? std::clamp(a_settings.FineRadius, MIN_FINE_RADIUS, MAX_FINE_RADIUS) : defaults.FineRadius;
+	a_settings.FarUpdateRate = std::clamp(a_settings.FarUpdateRate, 1u, 4u);
 	a_settings.JacobiIterations = std::clamp(a_settings.JacobiIterations, MIN_JACOBI_ITERATIONS, MAX_JACOBI_ITERATIONS);
 	a_settings.WindDamping = std::isfinite(a_settings.WindDamping) ? std::clamp(a_settings.WindDamping, 0.0f, 5.0f) : defaults.WindDamping;
 	a_settings.FogDensity = std::isfinite(a_settings.FogDensity) ? std::clamp(a_settings.FogDensity, 0.0f, 0.2f) : defaults.FogDensity;
@@ -128,7 +125,8 @@ void FluidFieldGroundFog::PostPostLoad()
 
 void FluidFieldGroundFog::ClearShaderCache()
 {
-	solver.ReleaseShaders();
+	for (auto& level : levels)
+		level.solver.ReleaseShaders();
 	shaderCompileFailed = false;
 	groundFogCS = nullptr;
 	groundFogFailed = false;
@@ -139,14 +137,17 @@ bool FluidFieldGroundFog::EnsureSolver()
 	if (shaderCompileFailed || resourceCreateFailed)
 		return false;
 
-	if (solver.GetResolution() != settings.GridResolution) {
+	static constexpr const char* LABELS[LEVEL_COUNT] = { "Fine", "Medium", "Far" };
+	for (uint i = 0; i < LEVEL_COUNT; i++) {
+		auto& solver = levels[i].solver;
+		if (solver.GetResolution() == LEVEL_RESOLUTION)
+			continue;
 		try {
-			solver.CreateResources(globals::d3d::device, settings.GridResolution, [](ID3D11DeviceChild* object, const char* name) {
-				Util::SetResourceName(object, "%s", name);
-			});
+			solver.CreateResources(globals::d3d::device, LEVEL_RESOLUTION, [](ID3D11DeviceChild* object, const char* name) { Util::SetResourceName(object, "%s", name); }, LABELS[i]);
 		} catch (const winrt::hresult_error& e) {
 			logger::error("[Fluid Field] Failed to create GPU resources: {}", winrt::to_string(e.message()));
-			solver.ReleaseResources();
+			for (auto& level : levels)
+				level.solver.ReleaseResources();
 			resourceCreateFailed = true;
 			return false;
 		}
@@ -154,14 +155,17 @@ bool FluidFieldGroundFog::EnsureSolver()
 		queuedReset = true;
 	}
 
-	if (!solver.HasShaders()) {
-		const bool compiled = solver.CompileShaders([](const wchar_t* fileName) {
+	for (auto& level : levels) {
+		if (level.solver.HasShaders())
+			continue;
+		const bool compiled = level.solver.CompileShaders([](const wchar_t* fileName) {
 			const auto path = std::filesystem::path("Data\\Shaders\\FluidField") / fileName;
 			return reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(path.c_str(), {}, "cs_5_0"));
 		});
 		if (!compiled) {
 			logger::error("[Fluid Field] Compute shaders failed to compile; the simulation stays off");
-			solver.ReleaseShaders();
+			for (auto& other : levels)
+				other.solver.ReleaseShaders();
 			shaderCompileFailed = true;
 			return false;
 		}
@@ -172,9 +176,13 @@ bool FluidFieldGroundFog::EnsureSolver()
 
 void FluidFieldGroundFog::Release()
 {
-	solver.ReleaseResources();
-	solver.ReleaseShaders();
-	lastCellSize = 0.0f;
+	for (auto& level : levels) {
+		level.solver.ReleaseResources();
+		level.solver.ReleaseShaders();
+		level.cellSize = 0.0f;
+		level.weight = 0.0f;
+		level.running = false;
+	}
 	groundHeight.Release();
 	groundFogCS = nullptr;
 	groundFogCB = nullptr;
@@ -208,43 +216,68 @@ void FluidFieldGroundFog::Prepass()
 
 	auto context = globals::d3d::context;
 
-	const float cellSize = GetCellSize();
-	if (cellSize != lastCellSize) {
-		// Grid coordinates are in cells, so content from another cell size is meaningless
-		queuedReset = true;
-		lastCellSize = cellSize;
-	}
-
 	if (queuedReset.exchange(false)) {
 		ZoneScopedN("FluidField - Reset");
 		TracyD3D11Zone(globals::state->tracyCtx, "FluidField - Reset");
 		globals::profiler->BeginPass("FluidField::Reset");
-		solver.Reset(context);
+		for (auto& level : levels)
+			level.solver.Reset(context);
 		airSources.Clear();
+		fineIdle = 1e9f;
 		globals::profiler->EndPass();
 	}
 
 	const float deltaTime = field.GetDeltaTime();
 	if (!(deltaTime > 0.0f))
 		return;
+	frameCounter++;
 
-	// Centre the grid on the player, snapped to whole cells so texels never resample
+	// Each level centred on the player, snapped to whole cells so texels never resample; grid coordinates are in cells, so
+	// content from another cell size is meaningless
 	const auto playerPos = field.GetPlayerPosition();
-	const int32_t halfRes = static_cast<int32_t>(settings.GridResolution / 2);
-	const int32_t gridMin[2] = {
-		static_cast<int32_t>(std::floor(playerPos.x / cellSize)) - halfRes,
-		static_cast<int32_t>(std::floor(playerPos.y / cellSize)) - halfRes
-	};
+	const int32_t halfRes = static_cast<int32_t>(LEVEL_RESOLUTION / 2);
+	float outerReach = 0.0f;
+	for (uint i = 0; i < LEVEL_COUNT; i++) {
+		auto& level = levels[i];
+		const float cellSize = GetCellSize(i);
+		if (cellSize != level.cellSize) {
+			level.solver.Reset(context);
+			level.cellSize = cellSize;
+		}
+		level.gridMin[0] = static_cast<int32_t>(std::floor(playerPos.x / cellSize)) - halfRes;
+		level.gridMin[1] = static_cast<int32_t>(std::floor(playerPos.y / cellSize)) - halfRes;
+		if (UsesLevel(i))
+			outerReach = std::max(outerReach, cellSize * static_cast<float>(halfRes));
+	}
 
-	// Moving actors push the air (D21), one slot short of the most
-	const std::vector<FluidFieldSim::Emitter>& windEmitters = airSources.Update(playerPos, gridMin, cellSize, settings.GridResolution, deltaTime, settings.FogStir,
-		FluidFieldSim::WindSolver::MAX_EMITTERS - 1);
+	// Moving actors push the air (D21); by their skeleton only inside the fine level, short of its edge band
+	const float fineReach = UsesLevel(0) ? GetCellSize(0) * static_cast<float>(halfRes - static_cast<int32_t>(FluidFieldSim::WindSolver::EDGE_BAND)) : 0.0f;
+	const std::vector<FluidFieldSim::Mover>& movers = airSources.Update(playerPos, fineReach, outerReach, deltaTime, settings.FogStir, SHOVE_SPEED * settings.FogStir,
+		FluidFieldSim::WindSolver::MAX_MOVERS);
+
+	// The fine level runs only while something moves in it (and while it fades out after); restarted, it starts from the
+	// medium level's state
+	fineIdle = airSources.MovedNearby() ? 0.0f : fineIdle + deltaTime;
+	auto& fine = levels[0];
+	const bool fineWanted = UsesLevel(0) && fineIdle < FINE_IDLE_SECONDS;
+	fine.weight = fineWanted ? std::min(fine.weight + deltaTime / FINE_FADE_IN_SECONDS, 1.0f) : std::max(fine.weight - deltaTime / FINE_FADE_OUT_SECONDS, 0.0f);
+	const bool fineRuns = UsesLevel(0) && (fineWanted || fine.weight > 0.0f);
+	if (fineRuns && !fine.running)
+		fine.solver.Reset(context);
+	fine.running = fineRuns;
+	if (!fineRuns)
+		fine.weight = 0.0f;
+	auto& medium = levels[1];
+	medium.running = true;
+	medium.weight = 1.0f;
+	auto& farLevel = levels[2];
+	farLevel.running = UsesLevel(2);
+	farLevel.weight = farLevel.running ? 1.0f : 0.0f;
 
 	// The fog: carried by the wind and the weather's own wind, refilling behind actors
 	fogParams = {};
 	fogParams.refillRate = 1.0f / settings.FogRefillSeconds;
 	fogParams.stirRate *= settings.FogStir;
-	fogParams.displaceSpeed *= settings.FogStir;
 	fogPatternOffset[0] += fogParams.drift[0] * deltaTime;
 	fogPatternOffset[1] += fogParams.drift[1] * deltaTime;
 	fogParams.patternOffset[0] = fogPatternOffset[0];
@@ -257,30 +290,51 @@ void FluidFieldGroundFog::Prepass()
 		fogParams.drift[1] = -std::cos(heading) * speed;
 	}
 
-	FluidFieldSim::StepParams params{
-		.gridMin = { gridMin[0], gridMin[1] },
-		.cellSize = cellSize,
-		.deltaTime = deltaTime,
-		.velocityDecay = std::exp(-settings.WindDamping * deltaTime),
-		.jacobiIterations = settings.JacobiIterations,
-		.emitters = windEmitters,
-		.fog = &fogParams
-	};
-
-	{
+	// Coarse to fine (each takes its edges from the one round it), then each absorbs the finer one
+	const auto step = [&](uint a_index, const FluidFieldSim::WindSolver* a_parent, const FluidFieldSim::WindSolver* a_child, float a_deltaTime, uint a_iterations) {
+		auto& level = levels[a_index];
+		FluidFieldSim::StepParams params{
+			.gridMin = { level.gridMin[0], level.gridMin[1] },
+			.cellSize = level.cellSize,
+			.deltaTime = a_deltaTime,
+			.velocityDecay = std::exp(-settings.WindDamping * a_deltaTime),
+			.jacobiIterations = std::max(a_iterations, 1u),
+			.movers = movers,
+			.fog = &fogParams,
+			.parent = a_parent,
+			.child = a_child
+		};
+		static constexpr const char* NAMES[LEVEL_COUNT] = { "Fine", "Medium", "Far" };
 		ZoneScopedN("FluidField - Wind Step");
 		TracyD3D11Zone(globals::state->tracyCtx, "FluidField - Wind Step");
-		solver.Step(context, params, [&](const char* passName, auto&& runPass) {
+		level.solver.Step(context, params, [&](const char* passName, auto&& runPass) {
 #ifdef TRACY_ENABLE
 			ZoneTransientN(fluidFieldPassZone, passName, true);
 			TracyD3D11ZoneTransientS(globals::state->tracyCtx, fluidFieldPassGpuZone, passName, 0, globals::state->tracyCtx != nullptr);
 #endif
 			// The built-in profiler cannot nest passes, so each solver pass is timed on its own
-			globals::profiler->BeginPass(std::format("FluidField::{}", passName));
+			globals::profiler->BeginPass(std::format("FluidField::{} {}", NAMES[a_index], passName));
 			runPass();
 			globals::profiler->EndPass();
 		});
+	};
+	const auto* fineChild = fine.running ? &fine.solver : nullptr;
+	if (farLevel.running) {
+		farLevel.pendingTime += deltaTime;
+		if (frameCounter % settings.FarUpdateRate == 0) {
+			step(2, nullptr, &medium.solver, std::min(farLevel.pendingTime, 0.25f), settings.JacobiIterations / 2);
+			farLevel.pendingTime = 0.0f;
+		}
 	}
+	step(1, farLevel.running ? &farLevel.solver : nullptr, fineChild, deltaTime, settings.JacobiIterations * 3 / 4);
+	if (fine.running)
+		step(0, &medium.solver, nullptr, deltaTime, settings.JacobiIterations);
+	globals::profiler->BeginPass("FluidField::Absorb");
+	if (fine.running)
+		medium.solver.Absorb(context, fine.solver);
+	if (farLevel.running)
+		farLevel.solver.Absorb(context, medium.solver);
+	globals::profiler->EndPass();
 
 	// The ground the fog lies on, wider than the simulated area
 	fogReady = false;
@@ -290,8 +344,6 @@ void FluidFieldGroundFog::Prepass()
 	fogGroundMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FOG_GROUND_CELL)) - groundHalf;
 	fogReady = groundHeight.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), fogGroundMin, FOG_GROUND_RESOLUTION, FOG_GROUND_CELL);
 	globals::profiler->EndPass();
-	fogGridMin[0] = gridMin[0];
-	fogGridMin[1] = gridMin[1];
 }
 
 void FluidFieldGroundFog::DrawAfterWorld()
@@ -320,7 +372,7 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 {
 	if (!IsActive() || !fogReady || settings.FogDensity <= 0.0f || !a_main || !a_depth || groundFogFailed)
 		return;
-	if (Util::IsInterior() || !solver.HasResources() || !groundHeight.GetSRV())
+	if (Util::IsInterior() || !levels[1].solver.HasResources() || !groundHeight.GetSRV())
 		return;
 
 	auto* context = globals::d3d::context;
@@ -336,11 +388,9 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 		Util::SetResourceName(groundFogCB.get(), "FluidField::GroundFogConstants");
 	}
 
-	const float cellSize = GetCellSize();
-	const GroundFogConstants constants{
-		.gridMin = { fogGridMin[0], fogGridMin[1] },
-		.gridRes = settings.GridResolution,
-		.cellSize = cellSize,
+	GroundFogConstants constants{
+		.levelGridMin = {},
+		.levelInfo = {},
 		.density = settings.FogDensity,
 		.thickness = settings.FogThickness,
 		.maxHeight = groundHeight.GetMaxHeight(),
@@ -354,6 +404,15 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 		.debugMode = 0,
 		.pad = 0.0f
 	};
+	for (uint i = 0; i < LEVEL_COUNT; i++) {
+		const auto& level = levels[i];
+		const bool shown = level.weight > 0.0f && level.solver.HasResources();
+		constants.levelGridMin[i][0] = level.gridMin[0];
+		constants.levelGridMin[i][1] = level.gridMin[1];
+		constants.levelInfo[i][0] = std::max(level.cellSize, 1.0f);
+		constants.levelInfo[i][1] = shown ? level.weight : 0.0f;
+		constants.levelInfo[i][2] = static_cast<float>(LEVEL_RESOLUTION);
+	}
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(context->Map(groundFogCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
 		return;
@@ -362,7 +421,8 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 
 	globals::profiler->BeginPass("FluidField::Ground Fog");
 	ID3D11Buffer* cb = groundFogCB.get();
-	ID3D11ShaderResourceView* srvs[] = { a_depth, solver.GetFogSRV(), groundHeight.GetSRV(), solver.GetVelocitySRV() };
+	ID3D11ShaderResourceView* srvs[] = { a_depth, groundHeight.GetSRV(), levels[0].solver.GetFogSRV(), levels[1].solver.GetFogSRV(), levels[2].solver.GetFogSRV(),
+		levels[0].solver.GetVelocitySRV(), levels[1].solver.GetVelocitySRV(), levels[2].solver.GetVelocitySRV() };
 	context->CSSetConstantBuffers(0, 1, &cb);
 	// Bind the camera (b12) and shared/feature data (b5, b6) explicitly: earlier passes unbind or replace them
 	auto* cameraSnapshot = FluidFieldSim::Field::Get().GetCameraSnapshot();
@@ -370,16 +430,16 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 	context->CSSetConstantBuffers(12, 1, &perFrame);
 	ID3D11Buffer* sharedBuffers[2]{ globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, sharedBuffers);
-	context->CSSetShaderResources(0, 4, srvs);
+	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);
 	const auto dispatch = Util::GetScreenDispatchCount(true);
 	context->Dispatch(dispatch.x, dispatch.y, 1);
 
-	ID3D11ShaderResourceView* nullSRVs[4]{};
+	ID3D11ShaderResourceView* nullSRVs[std::size(srvs)]{};
 	ID3D11UnorderedAccessView* nullUAV = nullptr;
 	ID3D11Buffer* nullCB = nullptr;
-	context->CSSetShaderResources(0, 4, nullSRVs);
+	context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
 	context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
 	context->CSSetConstantBuffers(0, 1, &nullCB);
 	context->CSSetConstantBuffers(12, 1, &nullCB);

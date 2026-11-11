@@ -1,5 +1,5 @@
-// Fluid Field ground fog (D21): fog lying on the terrain around the player. Amount comes from the fog layer (FogCS),
-// shape from the ground height: a dense layer with a soft top, taller where there is more fog. Each pixel marches its
+// Fluid Field ground fog (D21): fog lying on the terrain around the player. Amount comes from the fog layers (FogCS) of
+// the levels (D193), finest first where it runs, shape from the ground height: a dense layer with a soft top, taller where there is more fog. Each pixel marches its
 // view ray to the scene depth, after opaque lighting and before water and effects, lit by the sun and ambient light.
 
 #include "Common/FrameBuffer.hlsli"
@@ -10,9 +10,8 @@
 
 cbuffer GroundFogCB : register(b0)
 {
-	int2 GridMin;          // World cell of the field's logical texel (0, 0)
-	uint GridRes;          // Texels per side, a power of two
-	float CellSize;        // World units per texel
+	int4 LevelGridMin[3];  // Per level, fine to far: world cell of its logical texel (0, 0) in xy
+	float4 LevelInfo[3];   // Per level: x world units per texel, y share of the drawn fog (0: not shown), z texels per side
 	float Density;         // Extinction per world unit at the ground where the field is 1
 	float Thickness;       // Height of the layer's top above the ground where the field is 1
 	float MaxHeight;       // Highest ground in the grid, world units
@@ -28,9 +27,13 @@ cbuffer GroundFogCB : register(b0)
 };
 
 Texture2D<float> DepthTexture : register(t0);
-Texture2D<float> FogField : register(t1);
-Texture2D<float> GroundHeight : register(t2);
-Texture2D<float2> Wind : register(t3);
+Texture2D<float> GroundHeight : register(t1);
+Texture2D<float> FogFine : register(t2);
+Texture2D<float> FogMedium : register(t3);
+Texture2D<float> FogFar : register(t4);
+Texture2D<float2> WindFine : register(t5);
+Texture2D<float2> WindMedium : register(t6);
+Texture2D<float2> WindFar : register(t7);
 RWTexture2D<float4> MainRW : register(u0);
 
 /** Fraction of the simulated area's width over which it hands over to the resting fog. */
@@ -102,35 +105,67 @@ float SampleGround(float2 worldXY, out float areaFade)
 	return any(g < NO_GROUND) ? NO_GROUND * 10.0 : lerp(lerp(g.x, g.y, t.x), lerp(g.z, g.w, t.x), t.y);
 }
 
-/** Fog amount at a world position: simulated inside the grid, resting pattern beyond, blended near the edge. */
-float SampleFog(float2 worldXY)
+/** A level's bilinear sample position: its logical texel (c, t) and its share there (0 outside it, fading at its edge). */
+float LevelPlace(uint level, float2 worldXY, out int2 c, out float2 t)
 {
-	const float resting = FogPattern::Resting(worldXY, PatternOffset);
-	const float2 cellPosition = worldXY / CellSize - 0.5;
-	const float2 logical = cellPosition - float2(GridMin);
-	const float fromEdge = min(min(logical.x, logical.y), min(GridRes - 1 - logical.x, GridRes - 1 - logical.y));
-	if (fromEdge <= 0.0)
-		return resting;
-	const int2 c = int2(floor(cellPosition));
-	const float2 t = cellPosition - float2(c);
-	const int mask = int(GridRes) - 1;
-	const float simulated = lerp(lerp(FogField.Load(int3(c & mask, 0)), FogField.Load(int3((c + int2(1, 0)) & mask, 0)), t.x),
-		lerp(FogField.Load(int3((c + int2(0, 1)) & mask, 0)), FogField.Load(int3((c + int2(1, 1)) & mask, 0)), t.x), t.y);
-	return lerp(resting, simulated, smoothstep(0.0, 1.0, fromEdge / (EDGE_FADE * GridRes)));
+	const float cellSize = LevelInfo[level].x;
+	const float res = LevelInfo[level].z;
+	const float2 cellPosition = worldXY / cellSize - 0.5;
+	c = int2(floor(cellPosition));
+	t = cellPosition - float2(c);
+	const float2 logical = cellPosition - float2(LevelGridMin[level].xy);
+	const float fromEdge = min(min(logical.x, logical.y), min(res - 1.0 - logical.x, res - 1.0 - logical.y));
+	return fromEdge <= 0.0 ? 0.0 : LevelInfo[level].y * smoothstep(0.0, 1.0, fromEdge / (EDGE_FADE * res));
 }
 
-/** The wind at an absolute world position, bilinear; zero outside the grid. */
+float SampleLevel(Texture2D<float> tex, uint level, int2 c, float2 t)
+{
+	const int mask = int(LevelInfo[level].z) - 1;
+	return lerp(lerp(tex.Load(int3(c & mask, 0)), tex.Load(int3((c + int2(1, 0)) & mask, 0)), t.x),
+		lerp(tex.Load(int3((c + int2(0, 1)) & mask, 0)), tex.Load(int3((c + int2(1, 1)) & mask, 0)), t.x), t.y);
+}
+
+float2 SampleLevel(Texture2D<float2> tex, uint level, int2 c, float2 t)
+{
+	const int mask = int(LevelInfo[level].z) - 1;
+	return lerp(lerp(tex.Load(int3(c & mask, 0)), tex.Load(int3((c + int2(1, 0)) & mask, 0)), t.x),
+		lerp(tex.Load(int3((c + int2(0, 1)) & mask, 0)), tex.Load(int3((c + int2(1, 1)) & mask, 0)), t.x), t.y);
+}
+
+/** Fog amount at a world position: the resting pattern, overlaid far to fine by each level that covers it. */
+float SampleFog(float2 worldXY)
+{
+	float fog = FogPattern::Resting(worldXY, PatternOffset);
+	int2 c;
+	float2 t;
+	float share = LevelPlace(2, worldXY, c, t);
+	if (share > 0.0)
+		fog = lerp(fog, SampleLevel(FogFar, 2, c, t), share);
+	share = LevelPlace(1, worldXY, c, t);
+	if (share > 0.0)
+		fog = lerp(fog, SampleLevel(FogMedium, 1, c, t), share);
+	share = LevelPlace(0, worldXY, c, t);
+	if (share > 0.0)
+		fog = lerp(fog, SampleLevel(FogFine, 0, c, t), share);
+	return fog;
+}
+
+/** The wind at a world position, as SampleFog; still air beyond every level. */
 float2 SampleWind(float2 worldXY)
 {
-	const float2 cellPosition = worldXY / CellSize - 0.5;
-	const float2 logical = cellPosition - float2(GridMin);
-	if (any(logical < 0.0) || any(logical >= float(GridRes) - 1.0))
-		return 0.0;
-	const int2 c = int2(floor(cellPosition));
-	const float2 t = cellPosition - float2(c);
-	const int mask = int(GridRes) - 1;
-	return lerp(lerp(Wind.Load(int3(c & mask, 0)), Wind.Load(int3((c + int2(1, 0)) & mask, 0)), t.x),
-		lerp(Wind.Load(int3((c + int2(0, 1)) & mask, 0)), Wind.Load(int3((c + int2(1, 1)) & mask, 0)), t.x), t.y);
+	float2 wind = 0.0;
+	int2 c;
+	float2 t;
+	float share = LevelPlace(2, worldXY, c, t);
+	if (share > 0.0)
+		wind = lerp(wind, SampleLevel(WindFar, 2, c, t), share);
+	share = LevelPlace(1, worldXY, c, t);
+	if (share > 0.0)
+		wind = lerp(wind, SampleLevel(WindMedium, 1, c, t), share);
+	share = LevelPlace(0, worldXY, c, t);
+	if (share > 0.0)
+		wind = lerp(wind, SampleLevel(WindFine, 0, c, t), share);
+	return wind;
 }
 
 /** Wind-carried density noise, 0 to 1: two phases half a period apart, cross-faded so neither restart shows. */

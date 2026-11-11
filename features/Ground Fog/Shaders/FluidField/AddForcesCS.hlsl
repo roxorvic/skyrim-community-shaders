@@ -1,16 +1,9 @@
-// Fluid Field wind, pass 1: carry velocity over and add emitter impulses. Texels that scrolled in hold another
-// cell's data, so they start from rest, as does every texel after a reset.
+// Fluid Field wind, pass 1: carry velocity over and add the movers' impulses (SplatCS). Texels that scrolled in hold
+// another cell's data, so they start from the parent level's wind (D193), or from rest without one, as does every texel
+// after a reset; the edge band relaxes toward the parent so the levels meet without a seam.
 
 #include "FluidField/Common.hlsli"
-
-struct Emitter
-{
-	float2 Position;  // Logical texel coordinates
-	float Radius;     // Texels, Gaussian falloff
-	float Pad0;
-	float2 Velocity;  // World units per second, added once
-	float2 Pad1;
-};
+#include "FluidField/Levels.hlsli"
 
 Texture2D<float2> VelocityIn : register(t0);
 
@@ -26,8 +19,13 @@ float Curl(int2 logical)
 	float2 south = LoadClamped(VelocityIn, logical - int2(0, 1));
 	return ((east.y - west.y) - (north.x - south.x)) / (2.0 * CellSize);
 }
-StructuredBuffer<Emitter> Emitters : register(t1);
+Texture2D<int> SplatWindX : register(t1);
+Texture2D<int> SplatWindY : register(t2);
+Texture2D<float2> ParentVelocity : register(t3);
 RWTexture2D<float2> VelocityOut : register(u0);
+
+/** Share of the way an edge cell moves toward its parent's wind each step. */
+static const float EDGE_RELAX = 0.5;
 
 [numthreads(FLUIDFIELD_GROUP_SIZE, FLUIDFIELD_GROUP_SIZE, 1)] void main(uint2 id : SV_DispatchThreadID) {
 	if (any(id >= GridRes))
@@ -37,7 +35,8 @@ RWTexture2D<float2> VelocityOut : register(u0);
 	int2 cell = GridMin + logical;
 	bool keptFromPrevStep = HistoryValid != 0 && all(cell >= PrevGridMin) && all(cell < PrevGridMin + int(GridRes));
 
-	float2 velocity = keptFromPrevStep ? VelocityIn[id] : 0.0;
+	const float2 parent = HasOther != 0 ? Levels::SampleOther(ParentVelocity, Levels::WorldOf(logical)) : 0.0;
+	float2 velocity = keptFromPrevStep ? VelocityIn[id] : parent;
 
 	// Vorticity confinement: push each swirl's flow around its centre
 	if (keptFromPrevStep) {
@@ -51,12 +50,9 @@ RWTexture2D<float2> VelocityOut : register(u0);
 		}
 	}
 
-	float2 position = float2(logical) + 0.5;
-	for (uint i = 0; i < EmitterCount; i++) {
-		Emitter e = Emitters[i];
-		float2 d = position - e.Position;
-		velocity += e.Velocity * exp(-dot(d, d) / (e.Radius * e.Radius));
-	}
+	velocity += float2(SplatWindX[id], SplatWindY[id]) / Levels::SPLAT_SCALE;
+	if (HasOther != 0)
+		velocity = lerp(velocity, parent, Levels::EdgeWeight(logical) * EDGE_RELAX);
 
 	VelocityOut[id] = velocity;
 }

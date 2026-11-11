@@ -14,6 +14,8 @@ namespace FluidFieldSim
 		constexpr float MAX_SPEED = 1500.0f;
 		/** @brief Per-second rate at which a body part drags the air around it toward its own velocity. */
 		constexpr float PUSH_RATE = 6.0f;
+		/** @brief Speed at which an actor's shove on the fog is whole (a run). */
+		constexpr float FULL_SHOVE_SPEED = 350.0f;
 		/** @brief Parts higher than this above the feet are above the ground fog. */
 		constexpr float MAX_HEIGHT_ABOVE_FEET = 140.0f;
 
@@ -46,18 +48,20 @@ namespace FluidFieldSim
 	void AirSources::Clear()
 	{
 		history.clear();
-		emitters.clear();
+		movers.clear();
+		movedNearby = false;
 	}
 
-	const std::vector<Emitter>& AirSources::Update(const RE::NiPoint3& a_playerPos, const int32_t a_gridMin[2], float a_cellSize, uint32_t a_gridRes,
-		float a_deltaTime, float a_strength, uint32_t a_maxEmitters)
+	const std::vector<Mover>& AirSources::Update(const RE::NiPoint3& a_playerPos, float a_fineReach, float a_outerReach, float a_deltaTime, float a_strength,
+		float a_shove, uint32_t a_maxMovers)
 	{
-		emitters.clear();
+		movers.clear();
+		movedNearby = false;
 		updateCounter++;
-		if (!(a_deltaTime > 0.0f) || !(a_cellSize > 0.0f) || a_strength <= 0.0f)
-			return emitters;
+		if (!(a_deltaTime > 0.0f) || a_strength <= 0.0f)
+			return movers;
 
-		const float halfGrid = a_cellSize * static_cast<float>(a_gridRes) * 0.5f;
+		const float halfGrid = a_outerReach;
 		std::vector<Candidate> candidates;
 		const auto consider = [&](RE::Actor* a_actor) {
 			if (!a_actor || !a_actor->Is3DLoaded() || a_actor->IsDisabled())
@@ -74,14 +78,14 @@ namespace FluidFieldSim
 		consider(RE::PlayerCharacter::GetSingleton());
 		std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) { return a.distanceSquared < b.distanceSquared; });
 
-		// One emitter per moving body part, with history per actor and part
-		const auto emit = [&](uint64_t a_key, const RE::NiPoint3& a_position, float a_radius) {
+		// One mover per moving body part (or body), with history per actor and part
+		const auto emit = [&](uint64_t a_key, const RE::NiPoint3& a_position, float a_radius, bool a_fine) {
 			auto& seen = history[a_key];
 			const bool hasPrevious = seen.lastSeen == updateCounter - 1;
 			const RE::NiPoint3 previous = seen.position;
 			seen.position = a_position;
 			seen.lastSeen = updateCounter;
-			if (!hasPrevious || emitters.size() >= a_maxEmitters)
+			if (!hasPrevious || movers.size() >= a_maxMovers)
 				return;
 			const float vx = (a_position.x - previous.x) / a_deltaTime;
 			const float vy = (a_position.y - previous.y) / a_deltaTime;
@@ -90,15 +94,19 @@ namespace FluidFieldSim
 			if (speed < MIN_SPEED || speed > MAX_SPEED)
 				return;
 			const float push = std::min(PUSH_RATE * a_deltaTime, 1.0f) * a_strength;
-			emitters.push_back({ .position = { a_position.x / a_cellSize - static_cast<float>(a_gridMin[0]), a_position.y / a_cellSize - static_cast<float>(a_gridMin[1]) },
-				.radius = a_radius / a_cellSize,
-				.pad0 = speed,  // Read as the part's speed by the fog pass
+			// From where it was to where it is: a fast part sweeps a line, not a dot
+			movers.push_back({ .from = { previous.x, previous.y },
+				.to = { a_position.x, a_position.y },
+				.radius = a_radius,
+				.shove = a_shove * std::min(speed / FULL_SHOVE_SPEED, 1.0f),
 				.velocity = { vx * push, vy * push },
-				.pad1 = {} });
+				.carve = 0.0f,
+				.pad = {} });
+			movedNearby |= a_fine;
 		};
 
 		for (const auto& candidate : candidates) {
-			if (emitters.size() >= a_maxEmitters)
+			if (movers.size() >= a_maxMovers)
 				break;
 			auto* actor = candidate.actor;
 			const uint64_t actorKey = static_cast<uint64_t>(actor->GetFormID()) << 8;
@@ -106,8 +114,10 @@ namespace FluidFieldSim
 			const float feet = actor->GetPosition().z;
 			auto* root = actor->Get3D(false);
 
+			const auto actorPosition = actor->GetPosition();
+			const bool fine = std::abs(actorPosition.x - a_playerPos.x) < a_fineReach && std::abs(actorPosition.y - a_playerPos.y) < a_fineReach;
 			bool foundPart = false;
-			if (root) {
+			if (root && fine) {
 				for (std::size_t i = 0; i < HUMANOID_PARTS.size(); i++) {
 					auto* node = root->GetObjectByName(HUMANOID_PARTS[i].node);
 					if (!node)
@@ -116,15 +126,15 @@ namespace FluidFieldSim
 					const auto& position = node->world.translate;
 					if (position.z - feet > MAX_HEIGHT_ABOVE_FEET * scale)
 						continue;
-					emit(actorKey | i, position, HUMANOID_PARTS[i].radius * scale);
+					emit(actorKey | i, position, HUMANOID_PARTS[i].radius * scale, true);
 				}
 			}
-			// Creatures without a humanoid skeleton stir the fog with their whole body
+			// Creatures without a humanoid skeleton, and everyone past the fine level, stir the fog with their whole body
 			if (!foundPart) {
 				const auto boundMin = actor->GetBoundMin();
 				const auto boundMax = actor->GetBoundMax();
 				const float halfWidth = 0.5f * std::max(boundMax.x - boundMin.x, boundMax.y - boundMin.y) * scale;
-				emit(actorKey | 0xFF, actor->GetPosition(), std::max(halfWidth, MIN_BODY_RADIUS));
+				emit(actorKey | 0xFF, actorPosition, std::max(halfWidth, MIN_BODY_RADIUS), fine);
 			}
 		}
 
@@ -134,6 +144,6 @@ namespace FluidFieldSim
 			else
 				++it;
 		}
-		return emitters;
+		return movers;
 	}
 }

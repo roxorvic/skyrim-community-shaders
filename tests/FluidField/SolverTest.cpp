@@ -26,7 +26,7 @@
 
 namespace
 {
-	using FluidFieldSim::Emitter;
+	using FluidFieldSim::Mover;
 	using FluidFieldSim::StepParams;
 	using FluidFieldSim::WindSolver;
 
@@ -73,12 +73,23 @@ namespace
 						}
 					}
 
-					for (const Emitter& e : p.emitters) {
-						const float dx = x + 0.5f - e.position[0];
-						const float dy = y + 0.5f - e.position[1];
-						const float w = std::exp(-(dx * dx + dy * dy) / (e.radius * e.radius));
-						v.x += e.velocity[0] * w;
-						v.y += e.velocity[1] * w;
+					// Movers (SplatCS): point movers here, inside each one's footprint, in 1/256 fixed point
+					for (const Mover& m : p.movers) {
+						const float r = std::max(m.radius, 0.75f * p.cellSize);
+						const float spread = (m.radius * m.radius) / (r * r);
+						const int loX = std::max(static_cast<int>(std::floor((m.from[0] - 2.5f * r) / p.cellSize)) - p.gridMin[0], 0);
+						const int loY = std::max(static_cast<int>(std::floor((m.from[1] - 2.5f * r) / p.cellSize)) - p.gridMin[1], 0);
+						const int hiX = std::min(static_cast<int>(std::floor((m.from[0] + 2.5f * r) / p.cellSize)) - p.gridMin[0], n - 1);
+						const int hiY = std::min(static_cast<int>(std::floor((m.from[1] + 2.5f * r) / p.cellSize)) - p.gridMin[1], n - 1);
+						if (x < loX || x > hiX || y < loY || y > hiY)
+							continue;
+						const float dx = (static_cast<float>(p.gridMin[0] + x) + 0.5f) * p.cellSize - m.from[0];
+						const float dy = (static_cast<float>(p.gridMin[1] + y) + 0.5f) * p.cellSize - m.from[1];
+						const float w = std::exp(-(dx * dx + dy * dy) / (r * r));
+						if (w < 1e-3f)
+							continue;
+						v.x += std::round(m.velocity[0] * w * spread * 256.0f) / 256.0f;
+						v.y += std::round(m.velocity[1] * w * spread * 256.0f) / 256.0f;
 					}
 					forced[Index(x, y)] = v;
 				}
@@ -366,6 +377,14 @@ namespace
 		p.jacobiIterations = 20;
 		return p;
 	}
+
+	/** @brief A point mover at texel (27.3, 35.8) of a grid at gridMin, radius 5 texels (16-unit cells). */
+	Mover Puff(const std::int32_t gridMin[2])
+	{
+		const float x = (static_cast<float>(gridMin[0]) + 27.3f) * 16.0f;
+		const float y = (static_cast<float>(gridMin[1]) + 35.8f) * 16.0f;
+		return { .from = { x, y }, .to = { x, y }, .radius = 80.0f, .shove = 0.0f, .velocity = { 600.0f, -250.0f }, .carve = 0.0f, .pad = {} };
+	}
 }
 
 int main(int argc, char** argv)
@@ -392,12 +411,12 @@ int main(int argc, char** argv)
 	// Case 1: one step from rest with an off-centre puff. GridMin is negative and not a
 	// multiple of N, so storage and logical order differ on both axes.
 	{
-		std::puts("Case 1: single step from rest with one emitter");
+		std::puts("Case 1: single step from rest with one mover");
 		const std::int32_t gridMin[2] = { -1000037, 70001 };
-		const Emitter puff{ .position = { 27.3f, 35.8f }, .radius = 5.0f, .pad0 = 0.0f, .velocity = { 600.0f, -250.0f }, .pad1 = {} };
+		const Mover puff = Puff(gridMin);
 
 		StepParams p = BaseParams(gridMin);
-		p.emitters = { &puff, 1 };
+		p.movers = { &puff, 1 };
 
 		solver.Reset(gpu.context.get());
 		solver.Step(gpu.context.get(), p);
@@ -412,13 +431,13 @@ int main(int argc, char** argv)
 	// that carried-over texels keep their world position, that newly exposed texels start at
 	// rest, and that a non-zero field advects correctly.
 	{
-		std::puts("Case 2: scroll by (+5, -3) and step again, no emitter");
+		std::puts("Case 2: scroll by (+5, -3) and step again, no mover");
 		const std::int32_t gridMin1[2] = { -1000037, 70001 };
 		const std::int32_t gridMin2[2] = { gridMin1[0] + 5, gridMin1[1] - 3 };
-		const Emitter puff{ .position = { 27.3f, 35.8f }, .radius = 5.0f, .pad0 = 0.0f, .velocity = { 600.0f, -250.0f }, .pad1 = {} };
+		const Mover puff = Puff(gridMin1);
 
 		StepParams p1 = BaseParams(gridMin1);
-		p1.emitters = { &puff, 1 };
+		p1.movers = { &puff, 1 };
 		StepParams p2 = BaseParams(gridMin2);
 
 		solver.Reset(gpu.context.get());
@@ -438,6 +457,77 @@ int main(int argc, char** argv)
 		const bool reduced = after < 0.75f * std::abs(before);
 		std::printf("  projection: max|div| %.6g before, %.6g after %s\n", std::abs(before), after, reduced ? "ok" : "FAIL");
 		ok &= reduced;
+	}
+
+	// Case 3 (D193): a child level inside a parent. The parent steps with a puff; the child starts from the parent's wind
+	// (it has no mover of its own); the parent then absorbs the child: its texels well inside the child take the child's
+	// mean over their footprint.
+	{
+		std::puts("Case 3: child level starts from its parent; parent absorbs the child");
+		WindSolver parent;
+		parent.CreateResources(gpu.device.get(), N, [](ID3D11DeviceChild*, const char*) {}, "Parent");
+		if (!parent.CompileShaders([&](const wchar_t* fileName) { return CompileShader(gpu.device.get(), shaderRoots, fileName); })) {
+			std::fprintf(stderr, "Shader compilation failed\n");
+			return 2;
+		}
+		// Parent: 32-unit cells; child: 16-unit cells, centred on the parent's centre
+		const std::int32_t parentMin[2] = { -500017, 35001 };
+		const std::int32_t childMin[2] = { parentMin[0] * 2 + static_cast<std::int32_t>(N) / 2, parentMin[1] * 2 + static_cast<std::int32_t>(N) / 2 };
+		const float cx = (static_cast<float>(parentMin[0]) + N * 0.5f + 1.3f) * 32.0f;
+		const float cy = (static_cast<float>(parentMin[1]) + N * 0.5f - 2.2f) * 32.0f;
+		const Mover puff{ .from = { cx, cy }, .to = { cx, cy }, .radius = 120.0f, .shove = 0.0f, .velocity = { 500.0f, 300.0f }, .carve = 0.0f, .pad = {} };
+
+		StepParams pp = BaseParams(parentMin);
+		pp.cellSize = 32.0f;
+		pp.movers = { &puff, 1 };
+		parent.Reset(gpu.context.get());
+		parent.Step(gpu.context.get(), pp);
+
+		StepParams cp = BaseParams(childMin);
+		cp.parent = &parent;
+		solver.Reset(gpu.context.get());
+		solver.Step(gpu.context.get(), cp);
+
+		const auto parentVelocity = ReadLogical<Vec2>(gpu, parent.GetVelocityTexture(), parentMin);
+		const auto childVelocity = ReadLogical<Vec2>(gpu, solver.GetVelocityTexture(), childMin);
+		float parentMost = 0.0f, childMost = 0.0f;
+		for (const auto& v : parentVelocity)
+			parentMost = std::max(parentMost, Magnitude(v));
+		for (const auto& v : childVelocity)
+			childMost = std::max(childMost, Magnitude(v));
+		const bool picked = childMost > 0.25f * parentMost;
+		std::printf("  child max|v| %.6g from parent max|v| %.6g %s\n", childMost, parentMost, picked ? "ok" : "FAIL");
+		ok &= picked;
+
+		// The child's mean over a parent texel's footprint: four bilinear samples a quarter cell from its centre
+		const auto childAt = [&](float a_x, float a_y) {
+			const float fx = a_x / 16.0f - static_cast<float>(childMin[0]) - 0.5f;
+			const float fy = a_y / 16.0f - static_cast<float>(childMin[1]) - 0.5f;
+			const int ix = static_cast<int>(std::floor(fx)), iy = static_cast<int>(std::floor(fy));
+			const float tx = fx - static_cast<float>(ix), ty = fy - static_cast<float>(iy);
+			const auto at = [&](int x, int y) { return childVelocity[static_cast<std::size_t>(std::clamp(y, 0, static_cast<int>(N) - 1)) * N + std::clamp(x, 0, static_cast<int>(N) - 1)]; };
+			const Vec2 a = at(ix, iy), b = at(ix + 1, iy), c = at(ix, iy + 1), d = at(ix + 1, iy + 1);
+			return Vec2{ (a.x * (1 - tx) + b.x * tx) * (1 - ty) + (c.x * (1 - tx) + d.x * tx) * ty, (a.y * (1 - tx) + b.y * tx) * (1 - ty) + (c.y * (1 - tx) + d.y * tx) * ty };
+		};
+		parent.Absorb(gpu.context.get(), solver);
+		const auto absorbed = ReadLogical<Vec2>(gpu, parent.GetVelocityTexture(), parentMin);
+		float worst = 0.0f;
+		const int lx = static_cast<int>(N) / 2 + 1, ly = static_cast<int>(N) / 2 - 2;  // well inside the child (past two edge bands)
+		for (int y = ly - 3; y <= ly + 3; y++) {
+			for (int x = lx - 3; x <= lx + 3; x++) {
+				const float wx = (static_cast<float>(parentMin[0] + x) + 0.5f) * 32.0f, wy = (static_cast<float>(parentMin[1] + y) + 0.5f) * 32.0f;
+				Vec2 mean{};
+				for (int k = 0; k < 4; k++) {
+					const Vec2 v = childAt(wx + ((k & 1) ? 8.0f : -8.0f), wy + ((k & 2) ? 8.0f : -8.0f));
+					mean.x += 0.25f * v.x;
+					mean.y += 0.25f * v.y;
+				}
+				worst = std::max(worst, Difference(absorbed[static_cast<std::size_t>(y) * N + x], mean));
+			}
+		}
+		const bool absorbedOk = worst <= 1e-3f * std::max(childMost, 1.0f);
+		std::printf("  absorb: max err %.6g against the child's mean %s\n", worst, absorbedOk ? "ok" : "FAIL");
+		ok &= absorbedOk;
 	}
 
 	std::puts(ok ? "PASS" : "FAIL");
