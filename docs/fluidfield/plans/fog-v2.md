@@ -38,6 +38,13 @@ Three nested grids centred on the player, the same size each (cost per level fix
   'creepy forest' look) instead of being stopped by the slope.
 - **Blend**: each level fades into the next over the last ~15% of its reach (density and wind).
 
+Done 2026-11-11 (c18d91dfd): the ground rays take placed meshes (roads, dirt cliffs, floors) as ground and skip rocks,
+logs, trunks, plants and clutter, recording their tops as walls (fine and medium levels); ground faces up; under an
+overhang the floor is a second level; the draw does not ramp fog across steps and fades it on steep faces.
+
+Next for overhangs: a fog layer of its own on the lower level, and fog flowing down from the upper level to the lower one
+at the brink (the user's request, 2026-11-11).
+
 ## 3. Movers
 
 Main thread, under a per-frame budget:
