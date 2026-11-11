@@ -45,6 +45,19 @@ overhang the floor is a second level; the draw does not ramp fog across steps an
 Next for overhangs: a fog layer of its own on the lower level, and fog flowing down from the upper level to the lower one
 at the brink (the user's request, 2026-11-11).
 
+### Ground and wall registry
+
+The ground map reads the statics' triangles (GroundMeshes, 2026-11-11). Plants, clutter, effects, markers and critters are
+left out; a model in a wall folder is all wall; anything else goes by each triangle's facing (up, within 300 units of the
+landscape: ground; down: an overhang's underside; steep: wall). Wall folders, and why:
+
+| Folder                                            | Why                                                                                                        |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `\rocks\`, `\logs\`, `\stumps\`, `treelog`, trees | Things standing on the ground: the fog flows round them                                                    |
+| `\mountains\`                                     | Rock slabs: their flat tops are rock, not ground (`MountainTrimSlab.nif`, 000A18FE, Riverwood, 2026-11-11) |
+
+Add a model here, with the reference that showed it, when it carries fog it should not (or the other way round).
+
 ## 3. Movers
 
 Main thread, under a per-frame budget:

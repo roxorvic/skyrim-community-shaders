@@ -16,8 +16,9 @@ namespace FluidFieldSim
 	{
 		/** @brief Model folders left out: they neither carry the fog nor stop it. */
 		constexpr std::array<std::string_view, 7> IGNORED = { "plants\\", "\\plants\\", "clutter\\", "effects\\", "marker", "critters\\", "fxwaterfall" };
-		/** @brief Model folders whose every triangle is a wall: things standing on the ground, not ground. */
-		constexpr std::array<std::string_view, 5> WALLS = { "\\rocks\\", "\\trees\\", "\\logs\\", "\\stumps\\", "treelog" };
+		/** @brief Model folders whose every triangle is a wall: things standing on the ground, not ground. Mountains too: their
+		 * slabs' flat tops are rock, not ground the fog lies on (MountainTrimSlab, 000A18FE, Riverwood). Registry: fog-v2.md. */
+		constexpr std::array<std::string_view, 6> WALLS = { "\\rocks\\", "\\trees\\", "\\logs\\", "\\stumps\\", "treelog", "\\mountains\\" };
 
 		/** @brief A triangle facing up at least this much is ground, down at least this much an underside; between, a wall. */
 		constexpr float GROUND_FACING = 0.5f;
