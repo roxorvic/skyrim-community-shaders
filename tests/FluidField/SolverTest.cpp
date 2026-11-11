@@ -383,7 +383,7 @@ namespace
 	{
 		const float x = (static_cast<float>(gridMin[0]) + 27.3f) * 16.0f;
 		const float y = (static_cast<float>(gridMin[1]) + 35.8f) * 16.0f;
-		return { .from = { x, y }, .to = { x, y }, .radius = 80.0f, .shove = 0.0f, .velocity = { 600.0f, -250.0f }, .carve = 0.0f, .pad = {} };
+		return { .from = { x, y }, .to = { x, y }, .radius = 80.0f, .shove = 0.0f, .velocity = { 600.0f, -250.0f }, .carve = 0.0f, .z = 0.0f, .pad = {} };
 	}
 }
 
@@ -475,7 +475,7 @@ int main(int argc, char** argv)
 		const std::int32_t childMin[2] = { parentMin[0] * 2 + static_cast<std::int32_t>(N) / 2, parentMin[1] * 2 + static_cast<std::int32_t>(N) / 2 };
 		const float cx = (static_cast<float>(parentMin[0]) + N * 0.5f + 1.3f) * 32.0f;
 		const float cy = (static_cast<float>(parentMin[1]) + N * 0.5f - 2.2f) * 32.0f;
-		const Mover puff{ .from = { cx, cy }, .to = { cx, cy }, .radius = 120.0f, .shove = 0.0f, .velocity = { 500.0f, 300.0f }, .carve = 0.0f, .pad = {} };
+		const Mover puff{ .from = { cx, cy }, .to = { cx, cy }, .radius = 120.0f, .shove = 0.0f, .velocity = { 500.0f, 300.0f }, .carve = 0.0f, .z = 0.0f, .pad = {} };
 
 		StepParams pp = BaseParams(parentMin);
 		pp.cellSize = 32.0f;

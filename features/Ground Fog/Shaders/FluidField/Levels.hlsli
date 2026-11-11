@@ -30,7 +30,7 @@ cbuffer WallCB : register(b3)
 	float2 WallPad;
 };
 
-Texture2D<float2> GroundMap : register(t7);
+Texture2D<float4> GroundMap : register(t7);  // x ground, y object top, z floor under an overhang, w rise to a neighbour
 
 namespace Levels
 {
@@ -91,16 +91,23 @@ namespace Levels
 		return saturate((fromEdge - float(EdgeBand)) / float(EdgeBand));
 	}
 
+	/** The ground map's lowest real height (GroundHeightMap::NO_GROUND); below it: unknown land or water (no fog). */
+	static const float NO_GROUND = -1.0e7;
+
+	/** The ground map's texel under a world position (nearest); unknown (x below NO_GROUND) outside it. */
+	float4 GroundAt(float2 worldXY)
+	{
+		const int2 texel = int2(floor(worldXY / GroundCellSize));
+		if (HasWalls == 0 || any(texel < GroundMin) || any(texel >= GroundMin + int(GroundRes)))
+			return float4(NO_GROUND * 2.0, NO_GROUND, NO_GROUND, 0.0);
+		return GroundMap[texel & int(GroundRes - 1)];
+	}
+
 	/** True where a rock, log or trunk stands in the cell: no wind in it, and air and fog go round it. */
 	bool Solid(int2 logical)
 	{
-		if (HasWalls == 0)
-			return false;
-		const int2 texel = int2(floor(WorldOf(logical) / GroundCellSize));
-		if (any(texel < GroundMin) || any(texel >= GroundMin + int(GroundRes)))
-			return false;
-		const float2 g = GroundMap[texel & int(GroundRes - 1)];
-		return g.y > g.x + WallRise;
+		const float4 g = GroundAt(WorldOf(logical));
+		return g.x > NO_GROUND && g.y > g.x + WallRise;
 	}
 
 	/** True where the running child draws this position's movers and is wholly absorbed back. */

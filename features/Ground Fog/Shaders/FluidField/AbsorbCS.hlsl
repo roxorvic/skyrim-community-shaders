@@ -6,11 +6,11 @@
 #include "FluidField/Levels.hlsli"
 
 Texture2D<float2> VelocityIn : register(t0);
-Texture2D<float> FogIn : register(t1);
+Texture2D<float2> FogIn : register(t1);
 Texture2D<float2> ChildVelocity : register(t2);
-Texture2D<float> ChildFog : register(t3);
+Texture2D<float2> ChildFog : register(t3);
 RWTexture2D<float2> VelocityOut : register(u0);
-RWTexture2D<float> FogOut : register(u1);
+RWTexture2D<float2> FogOut : register(u1);
 
 [numthreads(FLUIDFIELD_GROUP_SIZE, FLUIDFIELD_GROUP_SIZE, 1)] void main(uint2 id : SV_DispatchThreadID) {
 	if (any(id >= GridRes))
@@ -18,12 +18,12 @@ RWTexture2D<float> FogOut : register(u1);
 
 	const float2 world = Levels::WorldOf(StorageToLogical(id));
 	float2 velocity = VelocityIn[id];
-	float fog = FogIn[id];
+	float2 fog = FogIn[id];
 	const float weight = HasOther != 0 ? Levels::OtherInterior(world) : 0.0;
 	if (weight > 0.0) {
 		const float quarter = 0.25 * CellSize;
 		float2 childVelocity = 0.0;
-		float childFog = 0.0;
+		float2 childFog = 0.0;
 		[unroll] for (int k = 0; k < 4; k++)
 		{
 			const float2 p = world + quarter * float2(k & 1 ? 1.0 : -1.0, k & 2 ? 1.0 : -1.0);

@@ -9,9 +9,9 @@ namespace FluidFieldSim
 	namespace
 	{
 		constexpr std::uint32_t GROUP_SIZE = 8;  // FLUIDFIELD_GROUP_SIZE in Common.hlsli
-		constexpr std::uint32_t MAX_SRVS = 6;    // Per pass; t7 holds the wall map for the whole step
+		constexpr std::uint32_t MAX_SRVS = 11;   // Per pass; t7 is the wall map
 		constexpr std::uint32_t WALL_SLOT = 7;
-		constexpr std::uint32_t MAX_UAVS = 5;
+		constexpr std::uint32_t MAX_UAVS = 8;
 
 		ID3D11ShaderResourceView* const NULL_SRVS[MAX_SRVS] = {};
 		ID3D11UnorderedAccessView* const NULL_UAVS[MAX_UAVS] = {};
@@ -54,12 +54,12 @@ namespace FluidFieldSim
 		pressure[0] = CreateLayer(device, a_resolution, DXGI_FORMAT_R32_FLOAT, name, label + "Pressure0");
 		pressure[1] = CreateLayer(device, a_resolution, DXGI_FORMAT_R32_FLOAT, name, label + "Pressure1");
 		divergence = CreateLayer(device, a_resolution, DXGI_FORMAT_R32_FLOAT, name, label + "Divergence");
-		fog[0] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16_FLOAT, name, label + "Fog0");
-		fog[1] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16_FLOAT, name, label + "Fog1");
+		fog[0] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16_FLOAT, name, label + "Fog0");
+		fog[1] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16_FLOAT, name, label + "Fog1");
 		// Typed UAV atomics need single-channel 32-bit integers
-		const char* splatNames[] = { "WindX", "WindY", "ShoveX", "ShoveY", "Carve" };
+		const char* splatNames[] = { "WindX", "WindY", "ShoveX", "ShoveY", "Carve", "ShoveX1", "ShoveY1", "Carve1" };
 		for (std::size_t i = 0; i < splat.size(); i++)
-			splat[i] = CreateLayer(device, a_resolution, i < 4 ? DXGI_FORMAT_R32_SINT : DXGI_FORMAT_R32_UINT, name, label + "Splat" + splatNames[i]);
+			splat[i] = CreateLayer(device, a_resolution, i == 4 || i == 7 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R32_SINT, name, label + "Splat" + splatNames[i]);
 
 		D3D11_BUFFER_DESC cbDesc{
 			.ByteWidth = sizeof(Constants),
@@ -263,7 +263,7 @@ namespace FluidFieldSim
 		}
 		ID3D11Buffer* wallCB = wallConstants.get();
 		context->CSSetConstantBuffers(3, 1, &wallCB);
-		ID3D11ShaderResourceView* wallSRV = hasWalls ? params.walls->srv : nullptr;
+		wallSRV = hasWalls ? params.walls->srv : nullptr;
 		context->CSSetShaderResources(WALL_SLOT, 1, &wallSRV);
 
 		prevGridMin[0] = params.gridMin[0];
@@ -288,6 +288,7 @@ namespace FluidFieldSim
 
 		ID3D11ShaderResourceView* boundSRVs[MAX_SRVS] = {};
 		std::copy_n(srvs.begin(), std::min<std::size_t>(srvs.size(), MAX_SRVS), boundSRVs);
+		boundSRVs[WALL_SLOT] = wallSRV;
 		context->CSSetShaderResources(0, MAX_SRVS, boundSRVs);
 		context->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::min<std::size_t>(uavs.size(), MAX_UAVS)), uavs.data(), nullptr);
 		context->CSSetShader(shader, nullptr, 0);
@@ -307,7 +308,9 @@ namespace FluidFieldSim
 
 		// One group per mover, each drawing its own footprint: the cost follows the area moved through, not the grid
 		ID3D11ShaderResourceView* srvs[] = { moverSRV.get() };
-		ID3D11UnorderedAccessView* uavs[] = { splat[0].uav.get(), splat[1].uav.get(), splat[2].uav.get(), splat[3].uav.get(), splat[4].uav.get() };
+		ID3D11UnorderedAccessView* uavs[MAX_UAVS];
+		for (std::size_t i = 0; i < splat.size(); i++)
+			uavs[i] = splat[i].uav.get();
 		context->CSSetShaderResources(0, 1, srvs);
 		context->CSSetUnorderedAccessViews(0, MAX_UAVS, uavs, nullptr);
 		context->CSSetShader(splatCS.get(), nullptr, 0);
@@ -362,7 +365,7 @@ namespace FluidFieldSim
 	{
 		const bool hasParent = parent && parent->HasResources();
 		ID3D11ShaderResourceView* srvs[] = { velocity[current].srv.get(), fog[currentFog].srv.get(), splat[2].srv.get(), splat[3].srv.get(), splat[4].srv.get(),
-			hasParent ? parent->GetFogSRV() : nullptr };
+			hasParent ? parent->GetFogSRV() : nullptr, nullptr, nullptr, splat[5].srv.get(), splat[6].srv.get(), splat[7].srv.get() };
 		Dispatch(context, fogCS.get(), srvs, fog[currentFog ^ 1].uav.get());
 		currentFog ^= 1;
 	}

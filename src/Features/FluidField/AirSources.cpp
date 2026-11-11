@@ -101,6 +101,7 @@ namespace FluidFieldSim
 				.shove = a_shove * std::min(speed / FULL_SHOVE_SPEED, 1.0f),
 				.velocity = { vx * push, vy * push },
 				.carve = 0.0f,
+				.z = a_position.z,
 				.pad = {} });
 			movedNearby |= a_fine;
 		};

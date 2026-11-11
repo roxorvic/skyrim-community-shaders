@@ -14,7 +14,8 @@ struct Mover
 	float Shove;      // World units per second it shoves the fog aside at its edge
 	float2 Velocity;  // Wind impulse, world units per second, added once
 	float Carve;      // Share of the fog it clears outright where it passes
-	float3 Pad;
+	float Z;          // Its height: it parts the fog layer nearest it (D193)
+	float2 Pad;
 };
 
 StructuredBuffer<Mover> Movers : register(t0);
@@ -23,6 +24,9 @@ RWTexture2D<int> WindY : register(u1);
 RWTexture2D<int> ShoveX : register(u2);
 RWTexture2D<int> ShoveY : register(u3);
 RWTexture2D<uint> Carve : register(u4);
+RWTexture2D<int> ShoveX1 : register(u5);  // The same for the layer under overhangs
+RWTexture2D<int> ShoveY1 : register(u6);
+RWTexture2D<uint> Carve1 : register(u7);
 
 /** Radii past which a mover's falloff is left out. */
 static const float REACH = 2.5;
@@ -65,17 +69,29 @@ static const float LEAST_RADIUS = 0.75;
 			InterlockedAdd(WindX[s], int(round(wind.x)));
 			InterlockedAdd(WindY[s], int(round(wind.y)));
 
+			// Under an overhang, the layer nearest the mover's height
+			const float4 ground = Levels::GroundAt(p);
+			const bool lowerLayer = ground.z > Levels::NO_GROUND && abs(m.Z - ground.z) < abs(m.Z - ground.x);
 			if (m.Shove > 0.0) {
 				// d/r * exp(-(d/r)^2) peaks at 1/sqrt(2) of the radius; scaled so the peak is the shove. Little behind the mover
 				const float distance = sqrt(distance2);
 				const float2 outward = d / max(distance, 1e-3);
 				const float bow = 0.25 + 0.75 * saturate(dot(outward, heading) * 0.5 + 0.6);
 				const float2 shove = outward * m.Shove * bow * 2.33 * (distance / r) * g * spread * Levels::SPLAT_SCALE;
-				InterlockedAdd(ShoveX[s], int(round(shove.x)));
-				InterlockedAdd(ShoveY[s], int(round(shove.y)));
+				if (lowerLayer) {
+					InterlockedAdd(ShoveX1[s], int(round(shove.x)));
+					InterlockedAdd(ShoveY1[s], int(round(shove.y)));
+				} else {
+					InterlockedAdd(ShoveX[s], int(round(shove.x)));
+					InterlockedAdd(ShoveY[s], int(round(shove.y)));
+				}
 			}
-			if (m.Carve > 0.0)
-				InterlockedMax(Carve[s], uint(saturate(m.Carve * g) * Levels::CARVE_SCALE));
+			if (m.Carve > 0.0) {
+				if (lowerLayer)
+					InterlockedMax(Carve1[s], uint(saturate(m.Carve * g) * Levels::CARVE_SCALE));
+				else
+					InterlockedMax(Carve[s], uint(saturate(m.Carve * g) * Levels::CARVE_SCALE));
+			}
 		}
 	}
 }

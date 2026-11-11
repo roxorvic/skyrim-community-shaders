@@ -34,9 +34,9 @@ cbuffer GroundFogCB : register(b0)
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> GroundHeight : register(t1);  // x ground, y object top, z floor under an overhang, w rise to a neighbour
 Texture2D<float4> FineGround : register(t10);   // The same, finer, near the player
-Texture2D<float> FogFine : register(t2);
-Texture2D<float> FogMedium : register(t3);
-Texture2D<float> FogFar : register(t4);
+Texture2D<float2> FogFine : register(t2);       // x the ground's layer, y the floor's under an overhang (D193)
+Texture2D<float2> FogMedium : register(t3);
+Texture2D<float2> FogFar : register(t4);
 Texture2D<float2> WindFine : register(t5);
 Texture2D<float2> WindMedium : register(t6);
 Texture2D<float2> WindFar : register(t7);
@@ -111,11 +111,14 @@ static const float2 STEEP_FACE = float2(16.0, 36.0);
  * Of a ground texel's levels (x its ground, z the floor under an overhang there), the highest at or under height z; and
  * (flat) how much fog lies on it: none on a steep face. The floor under an overhang is flat.
  */
-float LevelUnder(float4 texel, float z, out float flat)
+float LevelUnder(float4 texel, float z, out float flat, out float isLower)
 {
-	const float upper = texel.x <= z ? texel.x : NO_GROUND * 10.0;
-	const float lower = texel.z > NO_GROUND && texel.z <= z ? texel.z : NO_GROUND * 10.0;
+	// A level counts unless it lies a step or more over the point: a slope's uphill texel just over a low sample is still its
+	// ground (excluded, every slope broke into steps), a ledge over it is not
+	const float upper = texel.x <= z + GROUND_STEP ? texel.x : NO_GROUND * 10.0;
+	const float lower = texel.z > NO_GROUND && texel.z <= z + GROUND_STEP ? texel.z : NO_GROUND * 10.0;
 	flat = upper >= lower ? 1.0 - smoothstep(STEEP_FACE.x, STEEP_FACE.y, texel.w) : 1.0;
+	isLower = upper >= lower ? 0.0 : 1.0;
 	return max(upper, lower);
 }
 
@@ -124,9 +127,10 @@ float LevelUnder(float4 texel, float z, out float flat)
  * overhang) the highest under the point; bilinear where those lie on one slope, across a step (a ledge over lower ground)
  * the highest, so the fog lies on each level rather than on a ramp hung between them.
  */
-float SampleGroundMap(Texture2D<float4> map, int2 mapMin, uint mapRes, float mapCell, float2 worldXY, float z, out float fromEdge, out float flat)
+float SampleGroundMap(Texture2D<float4> map, int2 mapMin, uint mapRes, float mapCell, float2 worldXY, float z, out float fromEdge, out float flat, out float lowerShare)
 {
 	flat = 1.0;
+	lowerShare = 0.0;
 	const float2 cellPosition = worldXY / mapCell - 0.5;
 	const float2 logical = cellPosition - float2(mapMin);
 	fromEdge = min(min(logical.x, logical.y), min(mapRes - 1 - logical.x, mapRes - 1 - logical.y));
@@ -140,9 +144,10 @@ float SampleGroundMap(Texture2D<float4> map, int2 mapMin, uint mapRes, float map
 	// Unknown ground at any corner keeps the fog away rather than smearing a fake slope
 	if (min(min(c00.x, c10.x), min(c01.x, c11.x)) < NO_GROUND)
 		return NO_GROUND * 10.0;
-	float4 f;
-	const float4 g = float4(LevelUnder(c00, z, f.x), LevelUnder(c10, z, f.y), LevelUnder(c01, z, f.z), LevelUnder(c11, z, f.w));
+	float4 f, l;
+	const float4 g = float4(LevelUnder(c00, z, f.x, l.x), LevelUnder(c10, z, f.y, l.y), LevelUnder(c01, z, f.z, l.z), LevelUnder(c11, z, f.w, l.w));
 	flat = lerp(lerp(f.x, f.y, t.x), lerp(f.z, f.w, t.x), t.y);
+	lowerShare = lerp(lerp(l.x, l.y, t.x), lerp(l.z, l.w, t.x), t.y);
 	const float highest = max(max(g.x, g.y), max(g.z, g.w));
 	if (highest - min(min(g.x, g.y), min(g.z, g.w)) < GROUND_STEP)
 		return lerp(lerp(g.x, g.y, t.x), lerp(g.z, g.w, t.x), t.y);
@@ -152,6 +157,7 @@ float SampleGroundMap(Texture2D<float4> map, int2 mapMin, uint mapRes, float map
 	const float4 onLevel = bilinear * (highest - g < GROUND_STEP ? 1.0 : 0.0);
 	const float cover = dot(onLevel, 1.0);
 	flat = dot(onLevel, f) / max(cover, 1e-4) * smoothstep(0.2, 0.7, cover);
+	lowerShare = dot(onLevel, l) / max(cover, 1e-4);
 	return dot(onLevel, g) / max(cover, 1e-4);
 }
 
@@ -159,18 +165,19 @@ float SampleGroundMap(Texture2D<float4> map, int2 mapMin, uint mapRes, float map
 static const float FINE_BLEND = 32.0;
 
 /** Ground under a world position for a point at height z (SampleGroundMap): the fine map near the player, the coarse beyond. */
-float SampleGround(float2 worldXY, float z, out float areaFade, out float flat)
+float SampleGround(float2 worldXY, float z, out float areaFade, out float flat, out float lowerShare)
 {
 	float coarseEdge;
-	float ground = SampleGroundMap(GroundHeight, GroundMin, GroundRes, GroundCellSize, worldXY, z, coarseEdge, flat);
+	float ground = SampleGroundMap(GroundHeight, GroundMin, GroundRes, GroundCellSize, worldXY, z, coarseEdge, flat, lowerShare);
 	areaFade = smoothstep(0.0, 1.0, coarseEdge / (AREA_FADE * GroundRes));
 	if (FineGroundRes > 0) {
-		float fineEdge, fineFlat;
-		const float fine = SampleGroundMap(FineGround, FineGroundMin, FineGroundRes, FineGroundCellSize, worldXY, z, fineEdge, fineFlat);
+		float fineEdge, fineFlat, fineLower;
+		const float fine = SampleGroundMap(FineGround, FineGroundMin, FineGroundRes, FineGroundCellSize, worldXY, z, fineEdge, fineFlat, fineLower);
 		const float share = saturate(fineEdge / FINE_BLEND);
 		if (share > 0.0 && fine > NO_GROUND) {
 			ground = ground > NO_GROUND ? lerp(ground, fine, share) : fine;
 			flat = lerp(flat, fineFlat, share);
+			lowerShare = lerp(lowerShare, fineLower, share);
 		}
 	}
 	return ground;
@@ -203,10 +210,10 @@ float2 SampleLevel(Texture2D<float2> tex, uint level, int2 c, float2 t)
 		lerp(tex.Load(int3((c + int2(0, 1)) & mask, 0)), tex.Load(int3((c + int2(1, 1)) & mask, 0)), t.x), t.y);
 }
 
-/** Fog amount at a world position: the resting pattern, overlaid far to fine by each level that covers it. */
-float SampleFog(float2 worldXY)
+/** Fog amount (both layers) at a world position: the resting pattern, overlaid far to fine by each level that covers it. */
+float2 SampleFog(float2 worldXY)
 {
-	float fog = FogPattern::Resting(worldXY, PatternOffset);
+	float2 fog = FogPattern::Resting(worldXY, PatternOffset).xx;
 	int2 c;
 	float2 t;
 	float share = LevelPlace(2, worldXY, c, t);
@@ -263,9 +270,10 @@ float FogAt(float3 position, float maxTop, out float shading)
 {
 	shading = 1.0;
 	float areaFade;
-	float flat;
-	const float ground = SampleGround(position.xy, position.z, areaFade, flat);
-	const float fog = SampleFog(position.xy) * areaFade * flat;
+	float flat, lowerShare;
+	const float ground = SampleGround(position.xy, position.z, areaFade, flat, lowerShare);
+	const float2 layers = SampleFog(position.xy);
+	const float fog = lerp(layers.x, layers.y, lowerShare) * areaFade * flat;
 	// Nothing below the ground (or the water surface the fog lies on)
 	const float height = position.z - ground;
 	if (fog <= 0.0 || height > maxTop || height < 0.0)
@@ -330,9 +338,9 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	// (often a mountain, which would leave the whole ray to march)
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float maxTop = Thickness * (1.0 + PILE_RISE) * (1.0 + LIFT) * (1.0 + BILLOW_HEIGHT);
-	float fadeA, fadeB, flatA, flatB;
+	float fadeA, fadeB, flatA, flatB, lowerA, lowerB;
 	const float3 endPoint = camera + direction * rayLength;
-	const float bandTop = max(SampleGround(camera.xy, camera.z, fadeA, flatA), SampleGround(endPoint.xy, endPoint.z + 1.0, fadeB, flatB)) + maxTop;
+	const float bandTop = max(SampleGround(camera.xy, camera.z, fadeA, flatA, lowerA), SampleGround(endPoint.xy, endPoint.z + 1.0, fadeB, flatB, lowerB)) + maxTop;
 	if (rayLength <= 0.0 || min(camera.z, endPoint.z) > bandTop)
 		return float4(0.0, 0.0, 0.0, 1.0);
 	float rayStart = 0.0;

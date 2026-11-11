@@ -157,6 +157,7 @@ private:
 	/** @brief Fog drift at the weather's full wind speed, world units per second. */
 	static constexpr float MAX_WEATHER_DRIFT = 150.0f;
 
+	FluidFieldSim::GroundMeshes groundMeshes;
 	FluidFieldSim::GroundHeightMap groundHeight;
 	FluidFieldSim::GroundHeightMap fineGround;
 	bool fineGroundReady = false;

@@ -187,6 +187,7 @@ void FluidFieldGroundFog::Release()
 	groundHeight.Release();
 	fineGround.Release();
 	fineGroundReady = false;
+	groundMeshes.Clear();
 	groundFogCS = nullptr;
 	groundFogCompositeCS = nullptr;
 	groundFogCB = nullptr;
@@ -214,8 +215,10 @@ void FluidFieldGroundFog::Prepass()
 		return;
 
 	// Every load leaves the player somewhere new; start the wind from rest
-	if (field.ConsumeLoad(seenLoads))
+	if (field.ConsumeLoad(seenLoads)) {
 		queuedReset = true;
+		groundMeshes.Clear();
+	}
 
 	if (!EnsureSolver())
 		return;
@@ -354,11 +357,13 @@ void FluidFieldGroundFog::Prepass()
 	const int32_t groundHalf = static_cast<int32_t>(FOG_GROUND_RESOLUTION / 2);
 	fogGroundMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FOG_GROUND_CELL)) - groundHalf;
 	fogGroundMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FOG_GROUND_CELL)) - groundHalf;
-	fogReady = groundHeight.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), fogGroundMin, FOG_GROUND_RESOLUTION, FOG_GROUND_CELL);
+	// D193: the statics' triangles round the player, out to the coarse map's edge, rasterized into both maps
+	groundMeshes.Update(field.GetLandscape(), playerPos.x, playerPos.y, 0.5f * FOG_GROUND_CELL * static_cast<float>(FOG_GROUND_RESOLUTION));
+	fogReady = groundHeight.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), groundMeshes, fogGroundMin, FOG_GROUND_RESOLUTION, FOG_GROUND_CELL);
 	const int32_t fineHalf = static_cast<int32_t>(FOG_FINE_GROUND_RESOLUTION / 2);
 	fogFineGroundMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FOG_FINE_GROUND_CELL)) - fineHalf;
 	fogFineGroundMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FOG_FINE_GROUND_CELL)) - fineHalf;
-	fineGroundReady = fogReady && fineGround.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), fogFineGroundMin, FOG_FINE_GROUND_RESOLUTION, FOG_FINE_GROUND_CELL);
+	fineGroundReady = fogReady && fineGround.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), groundMeshes, fogFineGroundMin, FOG_FINE_GROUND_RESOLUTION, FOG_FINE_GROUND_CELL);
 	globals::profiler->EndPass();
 }
 

@@ -25,7 +25,8 @@ namespace FluidFieldSim
 		float shove;        ///< World units per second it shoves the fog aside at its edge
 		float velocity[2];  ///< Wind impulse, world units per second, added once
 		float carve;        ///< Share of the fog it clears outright where it passes (0 to 1)
-		float pad[3];
+		float z;            ///< Its height: it parts the fog layer nearest it
+		float pad[2];
 	};
 	static_assert(sizeof(Mover) == 48);
 
@@ -138,7 +139,8 @@ namespace FluidFieldSim
 		ID3D11Texture2D* GetPressureTexture() const { return pressure[pressureResult].texture.get(); }
 
 		ID3D11ShaderResourceView* GetVelocitySRV() const { return velocity[current].srv.get(); }
-		/** @brief Fog density multiplier (D21): 1 is the weather's fog, 0 clear air. Toroidal like the velocity. */
+		/** @brief Fog density multiplier (D21): 1 is the weather's fog, 0 clear air; x the ground's layer, y the floor's under an
+		 * overhang (D193). Toroidal like the velocity. */
 		ID3D11ShaderResourceView* GetFogSRV() const { return fog[currentFog].srv.get(); }
 
 		/** @brief Where the last step placed the grid (world cell of logical texel 0, 0) and its cell size. */
@@ -215,6 +217,7 @@ namespace FluidFieldSim
 		{
 			Dispatch(context, shader, srvs, std::span<ID3D11UnorderedAccessView* const>(&uav, 1));
 		}
+		ID3D11ShaderResourceView* wallSRV = nullptr;  ///< This step's wall map, kept bound at t7 by every pass
 
 		std::uint32_t resolution = 0;
 		float cellSize = 0.0f;
@@ -225,8 +228,9 @@ namespace FluidFieldSim
 		std::array<Layer, 2> pressure;  // Ping-pong within the Jacobi solve
 		Layer divergence;
 		std::array<Layer, 2> fog;  // Ping-pong, `currentFog` holds the latest result
-		/** D193: the movers drawn in this step, fixed point (Levels.hlsli): wind x, y, fog shove x, y, carve. */
-		std::array<Layer, 5> splat;
+		/** D193: the movers drawn in this step, fixed point (Levels.hlsli): wind x, y, fog shove x, y, carve; then the shove x, y
+		 * and carve of the layer under overhangs. */
+		std::array<Layer, 8> splat;
 		std::uint32_t currentFog = 0;
 		std::uint32_t current = 0;
 		std::uint32_t pressureResult = 0;
