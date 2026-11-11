@@ -422,14 +422,19 @@ namespace FluidFieldSim
 			for (int32_t row = y; row <= last; row++) {
 				for (int32_t x = 0; x < n; x++) {
 					const std::size_t i = static_cast<std::size_t>(row) * n + x;
-					// D193: how steep the ground is there (its largest rise to a neighbour): fog does not cling to a cliff's face
+					// D193: how steep the ground is there (its largest slope to a neighbour): fog does not cling to a cliff's face
 					float steep = 0.0f;
 					if (heights[i] > NO_GROUND) {
 						maxHeight = std::max(maxHeight, heights[i]);
 						for (const auto [dx, dy] : { std::pair{ 1, 0 }, std::pair{ -1, 0 }, std::pair{ 0, 1 }, std::pair{ 0, -1 } }) {
-							const float other = heights[static_cast<std::size_t>((row + dy) & mask) * n + ((x + dx) & mask)];
-							if (other > NO_GROUND)
-								steep = std::max(steep, std::abs(other - heights[i]));
+							const std::size_t j = static_cast<std::size_t>((row + dy) & mask) * n + ((x + dx) & mask);
+							if (heights[j] <= NO_GROUND)
+								continue;
+							// Its level nearest this one: beside an overhang the floor under it, not the ledge's top
+							float rise = std::abs(heights[j] - heights[i]);
+							if (lowers[j] > NO_GROUND)
+								rise = std::min(rise, std::abs(lowers[j] - heights[i]));
+							steep = std::max(steep, rise / cellSize);
 						}
 					}
 					float* texel = &upload[(static_cast<std::size_t>(row - y) * n + x) * 4];

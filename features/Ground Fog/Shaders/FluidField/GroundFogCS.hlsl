@@ -34,6 +34,8 @@ cbuffer GroundFogCB : register(b0)
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> GroundHeight : register(t1);  // x ground, y object top, z floor under an overhang, w rise to a neighbour
 Texture2D<float4> FineGround : register(t10);   // The same, finer, near the player
+Texture2D<float> NoiseTexture : register(t11);  // Tiling value noise, NOISE_PERIOD lattice cells across (built at startup)
+SamplerState NoiseSampler : register(s0);       // Linear, wrapping
 Texture2D<float2> FogFine : register(t2);       // x the ground's layer, y the floor's under an overhang (D193)
 Texture2D<float2> FogMedium : register(t3);
 Texture2D<float2> FogFar : register(t4);
@@ -104,8 +106,9 @@ static const float NO_GROUND = -1.0e6;
 /** World units of height between neighbouring ground texels past which they are two levels (a ledge, a cliff), not a slope. */
 static const float GROUND_STEP = 40.0;
 
-/** Rise to a neighbouring ground texel (world units, one texel across) over which the ground is a face fog does not lie on. */
-static const float2 STEEP_FACE = float2(16.0, 36.0);
+/** Slope to a neighbouring ground texel (rise over run) over which the ground is a face fog does not lie on (~40-55 deg: a
+ * cliff's face, a curb's side; one only a texel or two wide, a curb's top, loses its fog too). */
+static const float2 STEEP_FACE = float2(0.85, 1.4);
 
 /**
  * Of a ground texel's levels (x its ground, z the floor under an overhang there), the highest at or under height z; and
@@ -254,6 +257,15 @@ float2 SampleWind(float2 worldXY)
 	return wind;
 }
 
+/** Lattice cells across the noise texture: FogPattern::ValueNoise's cells, tiling. */
+static const float NOISE_PERIOD = 64.0;
+
+/** Smooth value noise, 0 to 1, from the noise texture (as FogPattern::ValueNoise, one read). */
+float Noise(float2 p)
+{
+	return NoiseTexture.SampleLevel(NoiseSampler, p / NOISE_PERIOD, 0.0);
+}
+
 /** Wind-carried density noise, 0 to 1: two phases half a period apart, cross-faded so neither restart shows. */
 float Wisps(float3 position, float2 wind)
 {
@@ -262,8 +274,8 @@ float Wisps(float3 position, float2 wind)
 	const float phase0 = frac(time);
 	const float phase1 = frac(time + 0.5);
 	const float2 uv = position.xy / WISP_SIZE + position.z / (WISP_SIZE * 1.5);
-	const float n0 = FogPattern::ValueNoise(uv - drift * phase0) * 0.5 + FogPattern::ValueNoise(uv * 2.3 - drift * phase0 * 2.3) * 0.3 + FogPattern::ValueNoise(uv * 5.1 - drift * phase0 * 5.1 + 1.9) * 0.2;
-	const float n1 = FogPattern::ValueNoise(uv - drift * phase1 + 7.1) * 0.5 + FogPattern::ValueNoise(uv * 2.3 - drift * phase1 * 2.3 + 3.7) * 0.3 + FogPattern::ValueNoise(uv * 5.1 - drift * phase1 * 5.1 + 9.2) * 0.2;
+	const float n0 = Noise(uv - drift * phase0) * 0.5 + Noise(uv * 2.3 - drift * phase0 * 2.3) * 0.3 + Noise(uv * 5.1 - drift * phase0 * 5.1 + 1.9) * 0.2;
+	const float n1 = Noise(uv - drift * phase1 + 7.1) * 0.5 + Noise(uv * 2.3 - drift * phase1 * 2.3 + 3.7) * 0.3 + Noise(uv * 5.1 - drift * phase1 * 5.1 + 9.2) * 0.2;
 	return lerp(n0, n1, abs(phase0 * 2.0 - 1.0));
 }
 
@@ -274,7 +286,7 @@ float HenyeyGreenstein(float cosTheta, float g)
 }
 
 /** Fog extinction per world unit at a position, and the sky light reaching it through the fog above. */
-float FogAt(float3 position, float maxTop, out float shading)
+float FogAt(float3 position, float maxTop, float2 wind, out float shading)
 {
 	shading = 1.0;
 	float areaFade;
@@ -286,7 +298,6 @@ float FogAt(float3 position, float maxTop, out float shading)
 	const float height = position.z - ground;
 	if (fog <= 0.0 || height > maxTop || height < 0.0)
 		return 0.0;
-	const float2 wind = SampleWind(position.xy);
 	const float churn = saturate(length(wind) / LIFT_SPEED);
 	// Billows: the top rises and falls with the wind, so the layer is not a flat sheet
 	const float billow = Wisps(float3(position.xy * (WISP_SIZE / BILLOW_SIZE), 0.0), wind);
@@ -301,7 +312,7 @@ float FogAt(float3 position, float maxTop, out float shading)
  * Marches the ray between two distances with StepCount / 2 steps growing from FIRST_STEP at the start (the far end when
  * a_fromEnd). Returns in-scattered light (rgb) and transmittance (a).
  */
-float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_fromEnd, float jitter, float3 light, float maxTop)
+float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_fromEnd, float jitter, float3 light, float maxTop, float2 wind)
 {
 	const float span = to - from;
 	const uint count = max(StepCount / 2, 1u);
@@ -321,7 +332,7 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 		stepLength *= growth;
 		const float3 position = camera + direction * (a_fromEnd ? to - along : from + along);
 		float shading;
-		const float extinction = FogAt(position, maxTop, shading);
+		const float extinction = FogAt(position, maxTop, wind, shading);
 		if (extinction <= 0.0)
 			continue;
 		const float stepTransmittance = exp(-extinction * segment);
@@ -372,8 +383,10 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 
 	// Both ends can be in the fog (camera and hit ground), so each half marches from its own end with fine first steps
 	const float middle = rayStart + 0.5 * span;
-	const float4 nearHalf = MarchHalf(camera, direction, rayStart, middle, false, jitter, light, maxTop);
-	const float4 farHalf = MarchHalf(camera, direction, middle, rayEnd, true, jitter, light, maxTop);
+	// The wind once a ray, near its start (the fog nearest the eye shows its drift most)
+	const float2 wind = SampleWind((camera + direction * min(rayStart + 300.0, rayEnd)).xy);
+	const float4 nearHalf = MarchHalf(camera, direction, rayStart, middle, false, jitter, light, maxTop, wind);
+	const float4 farHalf = MarchHalf(camera, direction, middle, rayEnd, true, jitter, light, maxTop, wind);
 	return float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
 }
 
@@ -410,6 +423,29 @@ float SurfaceDistance(float depth, float2 uv)
 	FogHalfDistance[dispatchID.xy] = SurfaceDistance(depth, uv);
 }
 #else
+/**
+ * Debug view (DebugPad 1): a surface's colour by the ground map under it: green ground, yellow steep (no fog), cyan the floor
+ * under an overhang, red a wall, grey a surface the map does not take as ground, blue water or unknown.
+ */
+float3 GroundDebugColour(float depth, float2 uv)
+{
+	float4 positionCS = mul(FrameBuffer::CameraViewProjInverse, float4(2 * float2(uv.x, -uv.y + 1) - 1, depth, 1));
+	const float3 world = FrameBuffer::CameraPosAdjust.xyz + positionCS.xyz / positionCS.w;
+	const bool inFine = FineGroundRes > 0 && all(int2(floor(world.xy / FineGroundCellSize)) >= FineGroundMin) &&
+	                    all(int2(floor(world.xy / FineGroundCellSize)) < FineGroundMin + int(FineGroundRes));
+	const float4 g = inFine ? FineGround.Load(int3(int2(floor(world.xy / FineGroundCellSize)) & int(FineGroundRes - 1), 0)) :
+	                          GroundHeight.Load(int3(int2(floor(world.xy / GroundCellSize)) & int(GroundRes - 1), 0));
+	if (g.x < NO_GROUND)
+		return float3(0.1, 0.2, 0.9);
+	if (g.y > g.x + 8.0 && world.z > g.x + 4.0)
+		return float3(0.9, 0.15, 0.1);
+	if (g.z > NO_GROUND && abs(world.z - g.z) < 10.0)
+		return float3(0.1, 0.8, 0.9);
+	if (abs(world.z - g.x) < 10.0)
+		return lerp(float3(0.2, 0.8, 0.2), float3(0.95, 0.85, 0.1), smoothstep(STEEP_FACE.x, STEEP_FACE.y, g.w));
+	return float3(0.45, 0.45, 0.45);
+}
+
 /** Relative distance difference over which a half-resolution texel stops counting for a pixel (an edge between surfaces). */
 static const float EDGE_TOLERANCE = 0.05;
 
@@ -421,6 +457,11 @@ static const float EDGE_TOLERANCE = 0.05;
 	float2 uv = float2(dispatchID.xy + 0.5) * SharedData::BufferDim.zw;
 	uv *= FrameBuffer::DynamicResolutionParams2.xy;
 	const float distance = SurfaceDistance(DepthTexture[dispatchID.xy], uv);
+	if (DebugPad == 1 && DepthTexture[dispatchID.xy] < 1.0) {
+		const float4 scene = MainRW[dispatchID.xy];
+		MainRW[dispatchID.xy] = float4(lerp(scene.rgb, GroundDebugColour(DepthTexture[dispatchID.xy], uv) * max(dot(scene.rgb, 0.333), 0.15) * 2.0, 0.6), scene.a);
+		return;
+	}
 
 	// Bilinear over the four nearest half-resolution texels, each weighed down by how far its surface lies from this pixel's
 	const int2 halfMax = int2((size + 1) / 2) - 1;

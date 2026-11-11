@@ -51,6 +51,7 @@ struct FluidFieldGroundFog : Feature
 		uint SimLevels = 3;              ///< D193: 1 medium only; 2 fine and medium; 3 fine, medium and far
 		float FineRadius = 768.0f;       ///< D193: the fine level's reach round the player, world units (its cell size follows)
 		uint FarUpdateRate = 2;          ///< D193: the far level steps every this many frames
+		uint DebugView = 0;              ///< D193: 1 colours every surface by what the fog's ground map makes of it
 		uint JacobiIterations = 42;      ///< Pressure solve iterations per step (the fine level's; coarser levels use fewer)
 		float WindDamping = 0.2f;        ///< Fraction of wind speed lost per second, as an exponential rate
 	};
@@ -125,7 +126,7 @@ private:
 	FluidFieldSim::FogParams fogParams;  ///< This step's fog inputs
 
 	/** @brief Samples along each pixel's ray through the ground fog. */
-	static constexpr uint32_t GROUND_FOG_STEPS = 48;
+	static constexpr uint32_t GROUND_FOG_STEPS = 32;
 	/** @brief Matches GroundFogCB in GroundFogCS.hlsl. */
 	struct alignas(16) GroundFogConstants
 	{
@@ -164,8 +165,14 @@ private:
 	int32_t fogFineGroundMin[2]{};
 	winrt::com_ptr<ID3D11ComputeShader> groundFogCS;
 	winrt::com_ptr<ID3D11ComputeShader> groundFogCompositeCS;  ///< D193: lays the half-resolution fog over the scene
-	std::unique_ptr<Texture2D> fogHalf;                        ///< In-scattered light (rgb) and transmittance (a), half resolution
-	std::unique_ptr<Texture2D> fogHalfDistance;                ///< Distance to each half-resolution texel's surface
+	/** @brief D193: tiling value noise for the wisps and billows, built once (one read a sample, not four hashes). */
+	winrt::com_ptr<ID3D11Texture2D> noiseTexture;
+	winrt::com_ptr<ID3D11ShaderResourceView> noiseSRV;
+	winrt::com_ptr<ID3D11SamplerState> noiseSampler;
+	/** @brief Builds the noise texture and its sampler once; false if they could not be created. */
+	bool EnsureNoise();
+	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution
+	std::unique_ptr<Texture2D> fogHalfDistance;  ///< Distance to each half-resolution texel's surface
 	winrt::com_ptr<ID3D11Buffer> groundFogCB;
 	bool groundFogFailed = false;
 	int32_t fogGroundMin[2]{};    ///< The ground map's placement this frame

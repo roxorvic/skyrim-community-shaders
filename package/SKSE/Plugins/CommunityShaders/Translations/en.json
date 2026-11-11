@@ -1309,6 +1309,8 @@
     "feature.extended_translucency.transparency_increase": "Transparency Increase",
     "feature.extended_translucency.transparency_increase_tooltip": "Translucent material will make the material more opaque on average, which could be different from the intent. Reduce the alpha to counter this effect and increase the dynamic range of the output.",
     "feature.fluid_field_ground_fog.cell_size": "Fine cell size: %.1f units",
+    "feature.fluid_field_ground_fog.debug_ground": "Show Ground Map",
+    "feature.fluid_field_ground_fog.debug_ground_tooltip": "Colours every surface by what the fog takes it for: green ground, yellow too steep for fog, cyan the floor under an overhang, red a wall the fog flows round, grey not ground, blue water or unknown.",
     "feature.fluid_field_ground_fog.description": "Low fog lying on the ground around the player, in banks and clearings.",
     "feature.fluid_field_ground_fog.enabled": "Enabled",
     "feature.fluid_field_ground_fog.enabled_tooltip": "Fog lying on the ground around you, in banks and clearings. It parts and swirls around moving actors and drifts with the weather's wind.",

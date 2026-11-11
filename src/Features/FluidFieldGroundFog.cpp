@@ -23,6 +23,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SimLevels,
 	FineRadius,
 	FarUpdateRate,
+	DebugView,
 	JacobiIterations,
 	WindDamping)
 
@@ -72,6 +73,10 @@ void FluidFieldGroundFog::DrawSettings()
 		tooltip(T(TKEY("jacobi_iterations_tooltip"), "More iterations make the wind swirl more accurately and cost more GPU time."));
 		ImGui::SliderFloat(T(TKEY("wind_damping"), "Wind Damping"), &settings.WindDamping, 0.0f, 5.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		tooltip(T(TKEY("wind_damping_tooltip"), "How quickly wind dies down. Higher values calm it sooner."));
+		bool debugView = settings.DebugView == 1;
+		if (ImGui::Checkbox(T(TKEY("debug_ground"), "Show Ground Map"), &debugView))
+			settings.DebugView = debugView ? 1 : 0;
+		tooltip(T(TKEY("debug_ground_tooltip"), "Colours every surface by what the fog takes it for: green ground, yellow too steep for fog, cyan the floor under an overhang, red a wall the fog flows round, grey not ground, blue water or unknown."));
 		if (ImGui::Button(T(TKEY("reset_field"), "Reset Field")))
 			queuedReset = true;
 		ImGui::PopID();
@@ -87,6 +92,7 @@ FluidFieldGroundFog::Settings FluidFieldGroundFog::Sanitize(Settings a_settings)
 	a_settings.SimLevels = std::clamp(a_settings.SimLevels, 1u, LEVEL_COUNT);
 	a_settings.FineRadius = std::isfinite(a_settings.FineRadius) ? std::clamp(a_settings.FineRadius, MIN_FINE_RADIUS, MAX_FINE_RADIUS) : defaults.FineRadius;
 	a_settings.FarUpdateRate = std::clamp(a_settings.FarUpdateRate, 1u, 4u);
+	a_settings.DebugView = std::min(a_settings.DebugView, 1u);
 	a_settings.JacobiIterations = std::clamp(a_settings.JacobiIterations, MIN_JACOBI_ITERATIONS, MAX_JACOBI_ITERATIONS);
 	a_settings.WindDamping = std::isfinite(a_settings.WindDamping) ? std::clamp(a_settings.WindDamping, 0.0f, 5.0f) : defaults.WindDamping;
 	a_settings.FogDensity = std::isfinite(a_settings.FogDensity) ? std::clamp(a_settings.FogDensity, 0.0f, 0.2f) : defaults.FogDensity;
@@ -191,6 +197,9 @@ void FluidFieldGroundFog::Release()
 	groundFogCS = nullptr;
 	groundFogCompositeCS = nullptr;
 	groundFogCB = nullptr;
+	noiseTexture = nullptr;
+	noiseSRV = nullptr;
+	noiseSampler = nullptr;
 	fogHalf.reset();
 	fogHalfDistance.reset();
 	fogReady = false;
@@ -389,9 +398,54 @@ void FluidFieldGroundFog::DrawAfterWorld()
 	globals::game::shadowState->GetRuntimeData().stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
+bool FluidFieldGroundFog::EnsureNoise()
+{
+	if (noiseSRV && noiseSampler)
+		return true;
+	// Value noise over a 64-cell lattice that wraps, 4 texels a cell, eased as FogPattern::ValueNoise
+	constexpr uint32_t SIZE = 256, CELLS = 64, PER_CELL = SIZE / CELLS;
+	const auto hash = [](uint32_t a_x, uint32_t a_y) {
+		uint32_t h = (a_x % CELLS) * 374761393u + (a_y % CELLS) * 668265263u;
+		h = (h ^ (h >> 13)) * 1274126177u;
+		return static_cast<float>((h ^ (h >> 16)) & 0xFFFF) / 65535.0f;
+	};
+	std::vector<uint16_t> texels(SIZE * SIZE);
+	for (uint32_t y = 0; y < SIZE; y++) {
+		for (uint32_t x = 0; x < SIZE; x++) {
+			const uint32_t cx = x / PER_CELL, cy = y / PER_CELL;
+			float fx = (static_cast<float>(x % PER_CELL) + 0.5f) / PER_CELL, fy = (static_cast<float>(y % PER_CELL) + 0.5f) / PER_CELL;
+			fx = fx * fx * (3.0f - 2.0f * fx);
+			fy = fy * fy * (3.0f - 2.0f * fy);
+			const float a = hash(cx, cy), b = hash(cx + 1, cy), c = hash(cx, cy + 1), d = hash(cx + 1, cy + 1);
+			const float value = (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
+			texels[y * SIZE + x] = static_cast<uint16_t>(std::clamp(value, 0.0f, 1.0f) * 65535.0f);
+		}
+	}
+	const D3D11_TEXTURE2D_DESC desc{ .Width = SIZE, .Height = SIZE, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R16_UNORM, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+	const D3D11_SUBRESOURCE_DATA data{ .pSysMem = texels.data(), .SysMemPitch = SIZE * sizeof(uint16_t), .SysMemSlicePitch = 0 };
+	D3D11_SAMPLER_DESC samplerDesc{};
+	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+	auto* device = globals::d3d::device;
+	if (FAILED(device->CreateTexture2D(&desc, &data, noiseTexture.put())) || FAILED(device->CreateShaderResourceView(noiseTexture.get(), nullptr, noiseSRV.put())) ||
+		FAILED(device->CreateSamplerState(&samplerDesc, noiseSampler.put()))) {
+		noiseTexture = nullptr;
+		noiseSRV = nullptr;
+		noiseSampler = nullptr;
+		return false;
+	}
+	Util::SetResourceName(noiseTexture.get(), "FluidField::GroundFogNoise");
+	Util::SetResourceName(noiseSRV.get(), "FluidField::GroundFogNoise SRV");
+	Util::SetResourceName(noiseSampler.get(), "FluidField::GroundFogNoise Sampler");
+	return true;
+}
+
 void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
 {
 	if (!IsActive() || !fogReady || settings.FogDensity <= 0.0f || !a_mainTexture || !a_main || !a_depth || groundFogFailed)
+		return;
+	if (!EnsureNoise())
 		return;
 	if (Util::IsInterior() || !levels[1].solver.HasResources() || !groundHeight.GetSRV())
 		return;
@@ -424,7 +478,7 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11Un
 		.groundRes = FOG_GROUND_RESOLUTION,
 		.groundCellSize = FOG_GROUND_CELL,
 		.patternOffset = { fogPatternOffset[0], fogPatternOffset[1] },
-		.debugMode = 0,
+		.debugMode = settings.DebugView,
 		.pad = 0.0f,
 		.fineGroundMin = { fogFineGroundMin[0], fogFineGroundMin[1] },
 		.fineGroundRes = fineGroundReady ? FOG_FINE_GROUND_RESOLUTION : 0u,
@@ -475,6 +529,10 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11Un
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	ID3D11ShaderResourceView* fineSRV = fineGroundReady ? fineGround.GetSRV() : nullptr;
 	context->CSSetShaderResources(10, 1, &fineSRV);
+	ID3D11ShaderResourceView* noise = noiseSRV.get();
+	context->CSSetShaderResources(11, 1, &noise);
+	ID3D11SamplerState* sampler = noiseSampler.get();
+	context->CSSetSamplers(0, 1, &sampler);
 	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);
@@ -489,7 +547,9 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11Un
 	context->CSSetShader(groundFogCompositeCS.get(), nullptr, 0);
 	context->Dispatch(dispatch.x, dispatch.y, 1);
 
-	ID3D11ShaderResourceView* nullSRVs[11]{};
+	ID3D11ShaderResourceView* nullSRVs[12]{};
+	ID3D11SamplerState* nullSampler = nullptr;
+	context->CSSetSamplers(0, 1, &nullSampler);
 	ID3D11Buffer* nullCB = nullptr;
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
 	context->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
