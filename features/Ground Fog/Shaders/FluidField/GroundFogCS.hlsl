@@ -1,6 +1,8 @@
 // Fluid Field ground fog (D21): fog lying on the terrain around the player. Amount comes from the fog layers (FogCS) of
-// the levels (D193), finest first where it runs, shape from the ground height: a dense layer with a soft top, taller where there is more fog. Each pixel marches its
-// view ray to the scene depth, after opaque lighting and before water and effects, lit by the sun and ambient light.
+// the levels (D193), finest first where each runs; shape from the ground height: a dense layer with a soft top, taller
+// where there is more fog. Each half-resolution pixel (D193) marches its view ray to the nearest of its four pixels'
+// surfaces, lit by the sun and ambient light, into FogHalf (in-scattered light, transmittance) and FogHalfDistance; the
+// COMPOSITE entry lays that over the scene at full resolution, after opaque lighting and before water and effects.
 
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Math.hlsli"
@@ -34,7 +36,14 @@ Texture2D<float> FogFar : register(t4);
 Texture2D<float2> WindFine : register(t5);
 Texture2D<float2> WindMedium : register(t6);
 Texture2D<float2> WindFar : register(t7);
+#ifndef COMPOSITE
+RWTexture2D<float4> FogHalf : register(u0);
+RWTexture2D<float> FogHalfDistance : register(u1);
+#else
+Texture2D<float4> FogHalfIn : register(t8);
+Texture2D<float> FogHalfDistanceIn : register(t9);
 RWTexture2D<float4> MainRW : register(u0);
+#endif
 
 /** Fraction of the simulated area's width over which it hands over to the resting fog. */
 static const float EDGE_FADE = 0.2;
@@ -245,15 +254,9 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 	return float4(inscattering, transmittance);
 }
 
-[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
-	if (any(dispatchID.xy >= uint2(SharedData::BufferDim.xy)))
-		return;
-
-	float2 uv = float2(dispatchID.xy + 0.5) * SharedData::BufferDim.zw;
-	uv *= FrameBuffer::DynamicResolutionParams2.xy;
-
-	// The pixel's surface, camera-relative, and the ray to it
-	const float depth = DepthTexture[dispatchID.xy];
+/** The fog over one view ray to a surface (camera-relative), or to MaxDistance where depth is the sky. */
+float4 FogOverRay(float depth, float2 uv, float2 pixel)
+{
 	float4 positionCS = mul(FrameBuffer::CameraViewProjInverse, float4(2 * float2(uv.x, -uv.y + 1) - 1, depth, 1));
 	const float3 surface = positionCS.xyz / positionCS.w;
 	const float surfaceDistance = length(surface);
@@ -268,7 +271,7 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 	const float3 endPoint = camera + direction * rayLength;
 	const float bandTop = max(SampleGround(camera.xy, fadeA), SampleGround(endPoint.xy, fadeB)) + maxTop;
 	if (rayLength <= 0.0 || min(camera.z, endPoint.z) > bandTop)
-		return;
+		return float4(0.0, 0.0, 0.0, 1.0);
 	float rayStart = 0.0;
 	float rayEnd = rayLength;
 	if (camera.z > bandTop)
@@ -278,10 +281,10 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 	rayStart = clamp(rayStart, 0.0, rayLength);
 	rayEnd = clamp(rayEnd, 0.0, rayLength);
 	if (rayEnd <= rayStart)
-		return;
+		return float4(0.0, 0.0, 0.0, 1.0);
 	const float span = rayEnd - rayStart;
 
-	const float jitter = Random::InterleavedGradientNoise(float2(dispatchID.xy), SharedData::FrameCount);
+	const float jitter = Random::InterleavedGradientNoise(pixel, SharedData::FrameCount);
 
 	// Light: the sun scattered toward the eye, and the ambient average
 	const float3 sun = SharedData::DirLightColor.xyz * HenyeyGreenstein(dot(direction, SharedData::DirLightDirection.xyz), PHASE_G) * 4.0 * Math::PI;
@@ -292,11 +295,82 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 	const float middle = rayStart + 0.5 * span;
 	const float4 nearHalf = MarchHalf(camera, direction, rayStart, middle, false, jitter, light, maxTop);
 	const float4 farHalf = MarchHalf(camera, direction, middle, rayEnd, true, jitter, light, maxTop);
-	const float3 inscattering = nearHalf.rgb + nearHalf.a * farHalf.rgb;
-	const float transmittance = nearHalf.a * farHalf.a;
+	return float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
+}
 
-	if (transmittance >= 0.999)
+/** Distance from the camera to a pixel's surface (MaxDistance for the sky), as GroundFogCompositeCS reads it. */
+float SurfaceDistance(float depth, float2 uv)
+{
+	float4 positionCS = mul(FrameBuffer::CameraViewProjInverse, float4(2 * float2(uv.x, -uv.y + 1) - 1, depth, 1));
+	return depth >= 1.0 ? MaxDistance : min(length(positionCS.xyz / positionCS.w), MaxDistance);
+}
+
+#ifndef COMPOSITE
+[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
+	const uint2 size = uint2(SharedData::BufferDim.xy);
+	const uint2 halfSize = (size + 1) / 2;
+	if (any(dispatchID.xy >= halfSize))
+		return;
+
+	// The nearest of its four pixels: fog marched to a far surface would spill over a near one's edge
+	uint2 pixel = min(dispatchID.xy * 2, size - 1);
+	float depth = DepthTexture[pixel];
+	[unroll] for (uint k = 1; k < 4; k++)
+	{
+		const uint2 other = min(dispatchID.xy * 2 + uint2(k & 1, k >> 1), size - 1);
+		const float otherDepth = DepthTexture[other];
+		if (otherDepth < depth) {
+			depth = otherDepth;
+			pixel = other;
+		}
+	}
+
+	float2 uv = float2(pixel + 0.5) * SharedData::BufferDim.zw;
+	uv *= FrameBuffer::DynamicResolutionParams2.xy;
+	FogHalf[dispatchID.xy] = FogOverRay(depth, uv, float2(dispatchID.xy));
+	FogHalfDistance[dispatchID.xy] = SurfaceDistance(depth, uv);
+}
+#else
+/** Relative distance difference over which a half-resolution texel stops counting for a pixel (an edge between surfaces). */
+static const float EDGE_TOLERANCE = 0.05;
+
+[numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
+	const uint2 size = uint2(SharedData::BufferDim.xy);
+	if (any(dispatchID.xy >= size))
+		return;
+
+	float2 uv = float2(dispatchID.xy + 0.5) * SharedData::BufferDim.zw;
+	uv *= FrameBuffer::DynamicResolutionParams2.xy;
+	const float distance = SurfaceDistance(DepthTexture[dispatchID.xy], uv);
+
+	// Bilinear over the four nearest half-resolution texels, each weighed down by how far its surface lies from this pixel's
+	const int2 halfMax = int2((size + 1) / 2) - 1;
+	const float2 position = (float2(dispatchID.xy) + 0.5) * 0.5 - 0.5;
+	const int2 base = int2(floor(position));
+	const float2 t = position - float2(base);
+	float4 fog = 0.0;
+	float weights = 0.0;
+	float nearestGap = 1e30;
+	float4 nearest = float4(0.0, 0.0, 0.0, 1.0);
+	[unroll] for (uint k = 0; k < 4; k++)
+	{
+		const int2 offset = int2(k & 1, k >> 1);
+		const int2 texel = clamp(base + offset, 0, halfMax);
+		const float4 sample = FogHalfIn[texel];
+		const float gap = abs(FogHalfDistanceIn[texel] - distance) / max(distance, 1.0);
+		const float w = (offset.x ? t.x : 1.0 - t.x) * (offset.y ? t.y : 1.0 - t.y) * saturate(1.0 - gap / EDGE_TOLERANCE);
+		fog += sample * w;
+		weights += w;
+		if (gap < nearestGap) {
+			nearestGap = gap;
+			nearest = sample;
+		}
+	}
+	// No texel on this pixel's surface (a thin edge): the closest in distance
+	fog = weights > 1e-3 ? fog / weights : nearest;
+	if (fog.a >= 0.999)
 		return;
 	const float4 scene = MainRW[dispatchID.xy];
-	MainRW[dispatchID.xy] = float4(scene.rgb * transmittance + inscattering, scene.a);
+	MainRW[dispatchID.xy] = float4(scene.rgb * fog.a + fog.rgb, scene.a);
 }
+#endif

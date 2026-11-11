@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Buffer.h"
 #include "Feature.h"
 #include "FluidField/AirSources.h"
 #include "FluidField/GroundHeightMap.h"
@@ -99,7 +100,7 @@ private:
 	/** @brief Whether a level is in use at the current Sim Levels. */
 	bool UsesLevel(uint a_level) const { return a_level == 1 || (a_level == 0 && settings.SimLevels >= 2) || (a_level == 2 && settings.SimLevels >= 3); }
 
-	void DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
+	void DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
 
 	/** @brief Per level: its solver, where it sits and its share of the drawn fog. */
 	struct Level
@@ -152,6 +153,9 @@ private:
 
 	FluidFieldSim::GroundHeightMap groundHeight;
 	winrt::com_ptr<ID3D11ComputeShader> groundFogCS;
+	winrt::com_ptr<ID3D11ComputeShader> groundFogCompositeCS;  ///< D193: lays the half-resolution fog over the scene
+	std::unique_ptr<Texture2D> fogHalf;                        ///< In-scattered light (rgb) and transmittance (a), half resolution
+	std::unique_ptr<Texture2D> fogHalfDistance;                ///< Distance to each half-resolution texel's surface
 	winrt::com_ptr<ID3D11Buffer> groundFogCB;
 	bool groundFogFailed = false;
 	int32_t fogGroundMin[2]{};    ///< The ground map's placement this frame

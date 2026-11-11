@@ -129,6 +129,7 @@ void FluidFieldGroundFog::ClearShaderCache()
 		level.solver.ReleaseShaders();
 	shaderCompileFailed = false;
 	groundFogCS = nullptr;
+	groundFogCompositeCS = nullptr;
 	groundFogFailed = false;
 }
 
@@ -185,7 +186,10 @@ void FluidFieldGroundFog::Release()
 	}
 	groundHeight.Release();
 	groundFogCS = nullptr;
+	groundFogCompositeCS = nullptr;
 	groundFogCB = nullptr;
+	fogHalf.reset();
+	fogHalfDistance.reset();
 	fogReady = false;
 }
 
@@ -364,13 +368,13 @@ void FluidFieldGroundFog::DrawAfterWorld()
 
 	// The live depth holds the water surfaces; it can only be read once it is no longer bound
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
-	DrawGroundFog(main.UAV, depth.depthSRV);
+	DrawGroundFog(main.texture, main.UAV, depth.depthSRV);
 	globals::game::shadowState->GetRuntimeData().stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
-void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
+void FluidFieldGroundFog::DrawGroundFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
 {
-	if (!IsActive() || !fogReady || settings.FogDensity <= 0.0f || !a_main || !a_depth || groundFogFailed)
+	if (!IsActive() || !fogReady || settings.FogDensity <= 0.0f || !a_mainTexture || !a_main || !a_depth || groundFogFailed)
 		return;
 	if (Util::IsInterior() || !levels[1].solver.HasResources() || !groundHeight.GetSRV())
 		return;
@@ -378,10 +382,12 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 	auto* context = globals::d3d::context;
 	if (!groundFogCS) {
 		groundFogCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", {}, "cs_5_0")));
+		groundFogCompositeCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "COMPOSITE", "" } }, "cs_5_0")));
 		D3D11_BUFFER_DESC desc{ .ByteWidth = sizeof(GroundFogConstants), .Usage = D3D11_USAGE_DYNAMIC, .BindFlags = D3D11_BIND_CONSTANT_BUFFER, .CPUAccessFlags = D3D11_CPU_ACCESS_WRITE, .MiscFlags = 0, .StructureByteStride = 0 };
-		if (!groundFogCS || FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, groundFogCB.put()))) {
+		if (!groundFogCS || !groundFogCompositeCS || FAILED(globals::d3d::device->CreateBuffer(&desc, nullptr, groundFogCB.put()))) {
 			logger::error("[Fluid Field] Ground fog shader failed to compile; the ground fog stays off");
 			groundFogCS = nullptr;
+			groundFogCompositeCS = nullptr;
 			groundFogFailed = true;
 			return;
 		}
@@ -413,6 +419,22 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 		constants.levelInfo[i][1] = shown ? level.weight : 0.0f;
 		constants.levelInfo[i][2] = static_cast<float>(LEVEL_RESOLUTION);
 	}
+	// D193: marched at half resolution (the nearest of each four pixels' surfaces), composited at full
+	D3D11_TEXTURE2D_DESC mainDesc{};
+	a_mainTexture->GetDesc(&mainDesc);
+	const uint32_t halfWidth = (mainDesc.Width + 1) / 2, halfHeight = (mainDesc.Height + 1) / 2;
+	if (!fogHalf || fogHalf->desc.Width != halfWidth || fogHalf->desc.Height != halfHeight) {
+		const auto create = [&](DXGI_FORMAT a_format, const char* a_name) {
+			D3D11_TEXTURE2D_DESC desc{ .Width = halfWidth, .Height = halfHeight, .MipLevels = 1, .ArraySize = 1, .Format = a_format, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, .CPUAccessFlags = 0, .MiscFlags = 0 };
+			auto texture = std::make_unique<Texture2D>(desc, a_name);
+			texture->CreateSRV({ .Format = a_format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 } });
+			texture->CreateUAV({ .Format = a_format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D, .Texture2D = { .MipSlice = 0 } });
+			return texture;
+		};
+		fogHalf = create(DXGI_FORMAT_R16G16B16A16_FLOAT, "FluidField::GroundFogHalf");
+		fogHalfDistance = create(DXGI_FORMAT_R32_FLOAT, "FluidField::GroundFogHalfDistance");
+	}
+
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(context->Map(groundFogCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
 		return;
@@ -431,16 +453,24 @@ void FluidFieldGroundFog::DrawGroundFog(ID3D11UnorderedAccessView* a_main, ID3D1
 	ID3D11Buffer* sharedBuffers[2]{ globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
 	context->CSSetConstantBuffers(5, 2, sharedBuffers);
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
-	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
+	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
+	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);
 	const auto dispatch = Util::GetScreenDispatchCount(true);
+	context->Dispatch((dispatch.x + 1) / 2, (dispatch.y + 1) / 2, 1);
+
+	ID3D11UnorderedAccessView* nullUAVs[2]{};
+	context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+	ID3D11ShaderResourceView* halfSRVs[] = { fogHalf->srv.get(), fogHalfDistance->srv.get() };
+	context->CSSetShaderResources(8, 2, halfSRVs);
+	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
+	context->CSSetShader(groundFogCompositeCS.get(), nullptr, 0);
 	context->Dispatch(dispatch.x, dispatch.y, 1);
 
-	ID3D11ShaderResourceView* nullSRVs[std::size(srvs)]{};
-	ID3D11UnorderedAccessView* nullUAV = nullptr;
+	ID3D11ShaderResourceView* nullSRVs[10]{};
 	ID3D11Buffer* nullCB = nullptr;
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
-	context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+	context->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
 	context->CSSetConstantBuffers(0, 1, &nullCB);
 	context->CSSetConstantBuffers(12, 1, &nullCB);
 	context->CSSetShader(nullptr, nullptr, 0);

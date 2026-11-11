@@ -4,6 +4,7 @@
 #include <winrt/base.h>
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace FluidFieldSim
@@ -13,7 +14,8 @@ namespace FluidFieldSim
 
 	/**
 	 * @brief D21: ground height under the wind grid for the ground fog: landscape, or the water surface over it, so fog
-	 * lies on water as mist.
+	 * lies on water as mist. D193: one ground layer: placed static meshes on the landscape (roads, rocks, ledges) replace
+	 * its height where they stand on it, from downward Havok rays cast a few per frame, nearest first.
 	 *
 	 * Toroidal like the field (world cell c in texel c & (res - 1)); on scroll only new cells are sampled, and cells over
 	 * unloaded land are retried. Main thread; the texture is updated on the render thread's context.
@@ -40,10 +42,21 @@ namespace FluidFieldSim
 	private:
 		/** @brief Updates between retries of cells over unloaded land. */
 		static constexpr uint32_t RETRY_INTERVAL = 60;
+		/** @brief World units above the landscape a ray starts (meshes on it, not roofs or canopies) and below it it ends. */
+		static constexpr float RAY_ABOVE = 150.0f;
+		static constexpr float RAY_BELOW = 32.0f;
+		/** @brief Milliseconds of rays per update. */
+		static constexpr double RAY_BUDGET_MS = 0.5;
+
+		/** @brief Casts the queued cells' rays, nearest the grid's centre first, until the budget runs out. */
+		bool CastPending(const int32_t a_gridMin[2]);
 
 		winrt::com_ptr<ID3D11Texture2D> texture;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
-		std::vector<float> heights;  ///< Toroidal, as the texture
+		std::vector<float> heights;                        ///< Toroidal, as the texture
+		std::vector<float> land;                           ///< The landscape's own height per texel (water and meshes left out)
+		std::vector<std::pair<int32_t, int32_t>> pending;  ///< World cells still to cast, nearest last
+		bool pendingSorted = true;
 		uint32_t resolution = 0;
 		float cellSize = 0.0f;
 		int32_t filledMin[2]{};  ///< Grid placement the map was last filled for
