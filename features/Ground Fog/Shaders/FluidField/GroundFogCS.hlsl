@@ -84,17 +84,19 @@ float StepGrowth(float ratio, uint count)
 {
 	if (ratio <= float(count))
 		return 1.0;
-	// A few Newton iterations on r^count - ratio * (r - 1) - 1 = 0, from a safe start above 1
-	float r = 1.0 + 2.0 * (ratio - count) / (ratio * count);
-	r = max(r, 1.001);
-	[unroll] for (int k = 0; k < 8; k++)
+	// Bisection on r^count - ratio * (r - 1) - 1 between 1 and a bound past the root (Newton from near 1 could settle on the
+	// trivial root r = 1: steps stayed FIRST_STEP and the march stopped short at a set distance, an arc round the camera)
+	float lo = 1.0;
+	float hi = 2.0 * pow(abs(ratio), 1.0 / float(count - 1));
+	[unroll] for (int k = 0; k < 20; k++)
 	{
-		const float rn = pow(r, count);
-		const float f = rn - ratio * (r - 1.0) - 1.0;
-		const float df = count * rn / r - ratio;
-		r = max(r - f / df, 1.0001);
+		const float r = 0.5 * (lo + hi);
+		if (pow(abs(r), count) - ratio * (r - 1.0) - 1.0 > 0.0)
+			hi = r;
+		else
+			lo = r;
 	}
-	return r;
+	return hi;
 }
 
 /** Fastest wisp drift, world units per second, so gusts do not smear them. */
@@ -326,7 +328,8 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 	float stepLength = firstStep;
 	[loop] for (uint i = 0; i < count && travelled < span; i++)
 	{
-		const float segment = min(stepLength, span - travelled);
+		// The last step always reaches the end, whatever the growth
+		const float segment = i + 1 == count ? span - travelled : min(stepLength, span - travelled);
 		const float along = travelled + segment * jitter;
 		travelled += segment;
 		stepLength *= growth;
