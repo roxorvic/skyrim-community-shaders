@@ -4391,3 +4391,17 @@ Entry format:
 - Decided by: @Victor ("keep resolution at the current level only around moving actors"; "L0 ~10m around the player";
   "forests/swamps on steep terrain should ... flow downwards"; "movers, then placement and finally looks")
 - References: D11, D13, D21; GroundFog (Nexus 198571, 0.1.0) as the comparison
+
+## D194: Ground fog v3: a heavy fog layer on a baked height map
+
+- Date: 2026-11-11
+- Decision: replaces D193's nested wind levels. Fog is one shallow layer (depth per cell, pipe-flow sim, vorticity
+  confinement) on one 512² grid round the player, over a three-tier ground (world height maps far, loaded landscape,
+  mesh tiles built on a worker and cached). Sources fill to Ground Thickness (20 u), overflow above Pool Depth (40 u)
+  evaporates; rocks and logs take fog only from above; fog spills off ledges, never climbs them. Close range gets exact
+  cuts through a contact map, mid range pushes the sim, far fog is settled. Drawn as a slab from one column texture,
+  with 3D flow-carried noise. Plan: `plans/fog-v3.md`.
+- Alternatives rejected: the air sim with layer tagging (leaks across ledges, needs a pressure solve); a second sim
+  grid for near detail (seams, hand-offs, wake/idle); runtime re-rasterising of the ground (2.2 ms main thread).
+- Decided by: @Victor ("simplify it as much as possible ... as a whole, simple and elegant")
+- References: D21, D193; FluidNinja "Water on Landscapes" (mass buffer, cached initial state)

@@ -1,5 +1,7 @@
 # Ground fog v2: levels, movers, placement, look (D193)
 
+> Sections 1-3 superseded by `fog-v3.md` (D194); sections 4 (placement and timing) and 5 (look) carry over.
+
 Goal: ground fog that every moving thing pushes and cuts (actors, blades, spells, projectiles, explosions, shouts, physics,
 swimming), lying where it belongs (water, hollows, forests, swamps, some dungeons), draining down forested slopes, and lit
 by Community Shaders' sun shadows, sky light and local lights. Budget: 1 ms per frame in total. Replaces the scope of
