@@ -4373,3 +4373,21 @@ Entry format:
       (not its colour): Rapids(speed x steepness, disturbance). Thresholds set from the baked data (bakestats.py).
 - Left: the cascades still read smooth; their shape (no swell bumps) and thresholds need more data.
 - References: D179, D188, D191
+
+## D193: Ground fog v2: nested levels, movers on a budget, placement, look
+
+- Date: 2026-11-10
+- Decision: the ground fog (D21) grows into three nested sim levels round the player (L0 128² at 12 u, ±11 m, only
+  while something moves in it; L1 at 32 u, ±29 m; L2 at 96 u, ±88 m, every few frames), each writing back into the
+  coarser one; past them a terrain-shaped resting layer. Every mover (skeletons in L0, weapons that carve the fog,
+  projectiles, explosions, shouts, the shallow water, physics, large creatures) goes through one budgeted list and is
+  drawn into force and carve textures per level. Walls block only air climbing steep ground; dense fog drains downhill,
+  most in forests and swamps. One ground layer (mesh replaces landscape) and sources combined by max, so nothing counts
+  twice. Order: movers, then placement and timing, then look (sun shadows, sky light, local lights). Budget 1 ms.
+  Plan: `plans/fog-v2.md`.
+- Alternatives rejected: per-actor fine patches far from the player (cost grows with actor count; a foot-sized swirl past
+  ~10 m is a few pixels; an idle L0 saves more for less); a standalone plugin (the shared field with the water and CS's
+  shadows, sky light and light lists only exist inside CS).
+- Decided by: @Victor ("keep resolution at the current level only around moving actors"; "L0 ~10m around the player";
+  "forests/swamps on steep terrain should ... flow downwards"; "movers, then placement and finally looks")
+- References: D11, D13, D21; GroundFog (Nexus 198571, 0.1.0) as the comparison

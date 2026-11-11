@@ -1,5 +1,7 @@
 # Fog slice: ground fog the wind moves (D21)
 
+> Scope replaced by `fog-v2.md` (D193); the density layer, refill and march here carry over.
+
 Goal: ground fog that actors and the weather's wind push around, so it parts and swirls as the player walks through it and drifts with the wind. A first slice of Phase 4. Fluid Field draws the fog itself (D21, revised).
 
 ## How it fits together
