@@ -4166,13 +4166,12 @@ namespace FluidFieldSim
 			}
 			// D186: none in a band along the rock, then rising off it by distance along the mesh; then softened ROCK_FIELD_PASSES
 			// times, then held to their slopes
-			std::vector<float> footCalm(counts.vertexCount, 1.0f);
 			for (uint32_t v = 0; v < counts.vertexCount; v++) {
 				const float t = std::clamp((fromRock[v] - ROCK_CONTACT) / ROCK_RAMP, 0.0f, 1.0f);
-				// and none at the pool: bobbing layers crossing its flat surface cut a jagged waterline
+				// and less at the pool (FOOT_KEEP of it): the bobbing layers crossing its flat surface cut a jagged waterline
 				const float above = vertexClips[base + v][2];
 				const float foot = above >= NO_WATER ? 1.0f : std::clamp(above / FOOT_CALM, 0.0f, 1.0f);
-				const float calm = footCalm[v] = foot * foot * (3.0f - 2.0f * foot);
+				const float calm = FOOT_KEEP + (1.0f - FOOT_KEEP) * foot * foot * (3.0f - 2.0f * foot);
 				const float ramp = t * t * (3.0f - 2.0f * t) * calm;
 				wobbleSize[v] *= ramp;
 				bounce[v] *= ramp;
@@ -4195,11 +4194,15 @@ namespace FluidFieldSim
 					values->swap(softened);
 				}
 			}
-			// (again: softening spread the motion back down onto the waterline)
+			// its edges eased into what they meet (rock, its open sides, the river it pours out of, the pool): bent back a little toward
+			// the side behind it, so a crest rolls over out of the river rather than rising straight from it
 			for (uint32_t v = 0; v < counts.vertexCount; v++) {
-				wobbleSize[v] *= footCalm[v];
-				swellPush[v] *= footCalm[v];
-				bounce[v] *= footCalm[v];
+				if (inRock[v])
+					continue;
+				const float below = vertexClips[base + v][14], above = vertexClips[base + v][2];
+				const float contact = std::min({ fromEdge[v], fromRock[v], below < NO_WATER ? below : EASE_REACH, above < NO_WATER ? std::max(above, 0.0f) : EASE_REACH });
+				const float t = 1.0f - std::clamp(contact / EASE_REACH, 0.0f, 1.0f);
+				swellPush[v] -= EASE_DEPTH * t * t * (3.0f - 2.0f * t);
 			}
 			limitSlope(wobbleSize, WOBBLE_SLOPE, WOBBLE_SLOPE_FINE);
 			limitSlope(swellPush, PUSH_SLOPE, PUSH_SLOPE_FINE);
@@ -4268,7 +4271,7 @@ namespace FluidFieldSim
 						value[11] = along;
 					}
 				}
-				if (swellPush[v] < 0.05f)
+				if (std::abs(swellPush[v]) < 0.05f)  // (negative: an edge eased back)
 					continue;
 				push[v] = normals[v] * (swellPush[v] / (length * scale));
 				pushed++;

@@ -1421,8 +1421,16 @@ PS_OUTPUT main(PS_INPUT input)
 	const float fallBubbles = fallBubbleSample.x;
 	// D191: dropped water is never a quiet crest, whatever pool it runs out of
 	const float fallLip = max(FallShading::Lip(input.FallData.y, fallFlow.runTime), fallDropped);
-	// its foam and milk eased in down the drop (cut in at once, the crest's white began on a hard line under the clear river)
-	const float fallFoamLip = fallLip * smoothstep(FallGround::AerationLook.x * 0.5, FallGround::AerationLook.x + FallShading::CREST_FOAM_IN, fallFlow.plunge.z);
+	// down the drop in two steps, each column at its own height and pace (one height for all read as a band painted on): clear to
+	// aerated (milk), then aerated to foam
+	// (only water pouring out of a river or pool: a sheet fed by the one above arrives aerated)
+	const float fallCrestPace = lerp(0.7, 1.3, FallShading::RibbonNoise(float2(fallFlow.column * FallShading::STREAK_FREQUENCY.x, 8.3), 1e4));
+	const float fallCrestStart = lerp(FallGround::AerationLook.x, fallStreakStart, 0.5);
+	const bool fallFromSource = input.FallData.y < FallShading::NONE_ABOVE;
+	const float fallMilkLip = fallLip * (fallFromSource ? smoothstep(fallCrestStart * 0.3, fallCrestStart + FallShading::CREST_MILK_IN * fallCrestPace, fallFlow.plunge.z) : 1.0);
+	const float fallFoamLip = fallLip * (fallFromSource ? smoothstep(fallCrestStart + FallShading::CREST_FOAM_AFTER * fallCrestPace,
+															  fallCrestStart + (FallShading::CREST_FOAM_AFTER + FallShading::CREST_FOAM_IN) * fallCrestPace, fallFlow.plunge.z) :
+														  1.0);
 	const float fallBehind = max(SharedData::GetScreenDepth(DepthTex.Load(int3(input.HPosition.xy, 0)).x) - fallDepth, 0.0);
 	const float fallAboveWater = FallShading::AboveWater(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, input.FallFade.z, input.FallFade.y, input.FallData.y);
 	// the foam's holes drawn out along the flow as its grain is; narrowed across, not slowed along, so they keep the water's pace (round holes read as spots)
@@ -1521,8 +1529,11 @@ PS_OUTPUT main(PS_INPUT input)
 	// D189: surface foam fully lit, the volume dimmer with depth
 	const float fallSurfaceShare = saturate(fallSurfaceFoam / max(fallFoam, 1e-4));
 	const float fallFoamShade = lerp(fallAerationVolume.y, 1.0, fallSurfaceShare);
-	// D176: under the water below only the foam shows, fading with it (the plane is flat, so the height interpolates exactly)
-	const float fallAlpha = FallShading::Alpha(input.FallFade.x, fallBehind, fallFoam, input.FallClip) * (fallAboveWater < 0.0 ? fallFoam : 1.0);
+	// D176: under the water below only its bubbles show, a plume seen through the water (the plane is flat, so the height interpolates
+	// exactly): soft and fading with depth, never foam laid on the surface
+	const float fallUnderVis = exp(-max(-fallAboveWater, 0.0) / FallShading::UNDER_SCATTER);
+	const float fallAlpha = FallShading::Alpha(input.FallFade.x, fallBehind, fallFoam, input.FallClip) *
+	                        (fallAboveWater < 0.0 ? lerp(fallFoam, saturate(fallFlow.fields.w), FallShading::UNDER_SOFT) * fallUnderVis * FallShading::UNDER_MOST : 1.0);
 	if (fallAlpha <= 0.002)
 		discard;
 	const float3 waterUp = FallUp;
@@ -1735,7 +1746,7 @@ PS_OUTPUT main(PS_INPUT input)
 		diffuseOutput.refractionColor = lerp(diffuseOutput.refractionColor, fluidFoamLight, white * 0.5);
 		// Milky under the surface by the baked aeration, only where the foam is not, so the two never double up
 		{
-			const float aerMilk = FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallFoamLip);
+			const float aerMilk = FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallMilkLip);
 			const float3 milkColor = lerp(fluidFoamLight, diffuseOutput.refractionDiffuseColor, FallShading::UNIFIED_MILK_HUE);
 			diffuseOutput.refractionDiffuseColor = lerp(diffuseOutput.refractionDiffuseColor, milkColor, aerMilk * FallShading::UNIFIED_MILK);
 			diffuseOutput.refractionColor = lerp(diffuseOutput.refractionColor, milkColor, aerMilk * FallShading::UNIFIED_MILK_VEIL);
@@ -1798,7 +1809,7 @@ PS_OUTPUT main(PS_INPUT input)
 		const float fallsMul = lerp(min(diffuseOutput.refractionMul, clearOpacity), 1.0, fallRibbons.y * FallShading::RIBBON_HAZE_OPACITY);
 		diffuseOutput.refractionMul = lerp(fallRiverMul, fallsMul, fallMotion);
 		// milky water is murkier: less of what lies behind shows through
-		diffuseOutput.refractionMul = lerp(diffuseOutput.refractionMul, 1.0, FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallFoamLip) * FallShading::UNIFIED_MURK);
+		diffuseOutput.refractionMul = lerp(diffuseOutput.refractionMul, 1.0, FallShading::UnifiedMilk(fallFlow.fields.w, fallFoamForming, fallMilkLip) * FallShading::UNIFIED_MURK);
 	}
 #					endif
 #				endif
@@ -1967,8 +1978,9 @@ PS_OUTPUT main(PS_INPUT input)
 #							if defined(FLUID_FIELD_FALLS)
 		// D159: the falls' own foam, laid over the water as the river's is
 		if (fallAboveWater < 0.0) {
-			// D176: under the water below, the foam's colour alone
-			finalColorPreFog = fallFoamLight;
+			// D176: under the water below, the bubbles' colour, dimmed into the water's hue with depth
+			const float3 hue = diffuseOutput.refractionDiffuseColor / max(Color::RGBToLuminance(diffuseOutput.refractionDiffuseColor), 1e-3);
+			finalColorPreFog = fallFoamLight * lerp(hue * FallShading::UNDER_DEEP_LIGHT, 1.0, fallUnderVis);
 			waterOpacity = 1.0;
 		} else if (fallFoam > 0.0) {
 			// wet (a little of the reflection by fresnel) and lit through (backlit into the sun, wrapped round its

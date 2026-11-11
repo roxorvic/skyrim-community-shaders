@@ -694,7 +694,10 @@ namespace FluidFieldSim
 		static constexpr float ROCK_REACH = 60.0f;                         ///< D186: world units over which distance from rock is measured
 		static constexpr float ROCK_CONTACT = 6.0f;                        ///< World units off rock where neither swell nor wobble moves the sheet...
 		static constexpr float ROCK_RAMP = 30.0f;                          ///< ...rising to whole over this far
-		static constexpr float FOOT_CALM = 80.0f;                          ///< World units above the pool over which the sheet's motion rises from none (a smooth waterline)
+		static constexpr float FOOT_CALM = 80.0f;                          ///< World units above the pool over which the sheet's motion eases...
+		static constexpr float FOOT_KEEP = 0.45f;                          ///< ...down to this share of it at the waterline (blended there, softened after)
+		static constexpr float EASE_REACH = 50.0f;                         ///< World units from what a sheet's edge meets over which it bends back toward it...
+		static constexpr float EASE_DEPTH = 10.0f;                         ///< ...by this much at the edge
 		static constexpr int ROCK_FIELD_PASSES = 24;                       ///< Passes softening push and wobble size (many: deform over an area)
 		static constexpr int WOBBLE_COORD_PASSES = 12;                     ///< Passes softening the wobble's coordinates
 		/** @brief D82: the vertex shifts the shaders read (vertexClips 4-6): gap shift plus push. */

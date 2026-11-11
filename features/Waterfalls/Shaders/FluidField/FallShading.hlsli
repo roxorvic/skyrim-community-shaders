@@ -29,7 +29,7 @@ namespace FallShading
 	static const float FOAM_PERIOD = 0.6;
 	static const float FOAM_MAX_DRIFT = 120.0;
 	/** The falls' foam grain drawn out this many times along the flow: streaks, not round blobs (leopard). */
-	static const float FOAM_STREAK_LENGTH = 3.0;
+	static const float FOAM_STREAK_LENGTH = 1.5;
 	/** The falls' foam lit as a white surface of this albedo (the river's FoamColor is mostly the water's own colour: grey here). */
 	static const float FOAM_BASE_ALBEDO = 0.6;
 	/** On flat, fully aerated water (lobes) the flow coordinates fan and curl: the relief kept to this share there, or it draws marble. */
@@ -250,8 +250,17 @@ namespace FallShading
 	static const float RIVER_LOOK_DEPTH = 256.0;
 	/** World units fallen over which the crest leaves the river plane's own shading for the falls'. */
 	static const float CREST_RIVER_FALL = 96.0;
-	/** World units fallen past Foam Start Height over which the crest's foam and milk ease in. */
-	static const float CREST_FOAM_IN = 160.0;
+	/** World units fallen past a column's crest start (halfway to its streak start) over which the crest's milk eases in; its foam starts CREST_FOAM_AFTER on and eases
+	 * in over CREST_FOAM_IN (each scaled by the column's pace, 0.7 to 1.3). */
+	static const float CREST_MILK_IN = 150.0;
+	/** Falls water under the pool's surface, a bubble plume: world units of depth over which it fades by e, its most opacity, its
+	 * cover's share from the aeration (soft) rather than the foam's grain, and its light deep down (in the water's hue). */
+	static const float UNDER_SCATTER = 48.0;
+	static const float UNDER_MOST = 0.7;
+	static const float UNDER_SOFT = 0.6;
+	static const float UNDER_DEEP_LIGHT = 0.35;
+	static const float CREST_FOAM_AFTER = 40.0;
+	static const float CREST_FOAM_IN = 180.0;
 	/** World units fallen past Foam Start Height over which the water counts as wholly dropped. */
 	static const float BAKED_DROP_FULL = 240.0;
 	/**
