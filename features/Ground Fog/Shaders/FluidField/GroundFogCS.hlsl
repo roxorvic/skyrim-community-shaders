@@ -167,18 +167,26 @@ static const float FINE_BLEND = 32.0;
 /** Ground under a world position for a point at height z (SampleGroundMap): the fine map near the player, the coarse beyond. */
 float SampleGround(float2 worldXY, float z, out float areaFade, out float flat, out float lowerShare)
 {
+	// The fine map first: where it covers wholly (near the player, inside the coarse map's fade) the coarse one is not read
+	float fine = NO_GROUND * 10.0, fineFlat = 1.0, fineLower = 0.0, share = 0.0;
+	if (FineGroundRes > 0) {
+		float fineEdge;
+		fine = SampleGroundMap(FineGround, FineGroundMin, FineGroundRes, FineGroundCellSize, worldXY, z, fineEdge, fineFlat, fineLower);
+		share = fine > NO_GROUND ? saturate(fineEdge / FINE_BLEND) : 0.0;
+	}
+	if (share >= 1.0) {
+		areaFade = 1.0;
+		flat = fineFlat;
+		lowerShare = fineLower;
+		return fine;
+	}
 	float coarseEdge;
 	float ground = SampleGroundMap(GroundHeight, GroundMin, GroundRes, GroundCellSize, worldXY, z, coarseEdge, flat, lowerShare);
 	areaFade = smoothstep(0.0, 1.0, coarseEdge / (AREA_FADE * GroundRes));
-	if (FineGroundRes > 0) {
-		float fineEdge, fineFlat, fineLower;
-		const float fine = SampleGroundMap(FineGround, FineGroundMin, FineGroundRes, FineGroundCellSize, worldXY, z, fineEdge, fineFlat, fineLower);
-		const float share = saturate(fineEdge / FINE_BLEND);
-		if (share > 0.0 && fine > NO_GROUND) {
-			ground = ground > NO_GROUND ? lerp(ground, fine, share) : fine;
-			flat = lerp(flat, fineFlat, share);
-			lowerShare = lerp(lowerShare, fineLower, share);
-		}
+	if (share > 0.0) {
+		ground = ground > NO_GROUND ? lerp(ground, fine, share) : fine;
+		flat = lerp(flat, fineFlat, share);
+		lowerShare = lerp(lowerShare, fineLower, share);
 	}
 	return ground;
 }

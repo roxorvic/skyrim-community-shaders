@@ -31,6 +31,9 @@ cbuffer WallCB : register(b3)
 };
 
 Texture2D<float4> GroundMap : register(t7);  // x ground, y object top, z floor under an overhang, w rise to a neighbour
+#ifndef WALL_MASK_WRITER
+Texture2D<uint> WallMask : register(t6);  // This step's walls per cell (WallsCS)
+#endif
 
 namespace Levels
 {
@@ -103,12 +106,20 @@ namespace Levels
 		return GroundMap[texel & int(GroundRes - 1)];
 	}
 
-	/** True where a rock, log or trunk stands in the cell: no wind in it, and air and fog go round it. */
-	bool Solid(int2 logical)
+	/** True where a rock, log or trunk stands in the cell, from the ground map (WallsCS writes it once a step). */
+	bool SolidFromGround(int2 logical)
 	{
 		const float4 g = GroundAt(WorldOf(logical));
 		return g.x > NO_GROUND && g.y > g.x + WallRise;
 	}
+
+#ifndef WALL_MASK_WRITER
+	/** True where a rock, log or trunk stands in the cell: no wind in it, and air and fog go round it. */
+	bool Solid(int2 logical)
+	{
+		return HasWalls != 0 && WallMask[LogicalToStorage(clamp(logical, 0, int(GridRes) - 1))] != 0;
+	}
+#endif
 
 	/** True where the running child draws this position's movers and is wholly absorbed back. */
 	bool ChildCovers(float2 worldXY)

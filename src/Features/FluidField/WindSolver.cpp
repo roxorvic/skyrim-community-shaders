@@ -11,6 +11,7 @@ namespace FluidFieldSim
 		constexpr std::uint32_t GROUP_SIZE = 8;  // FLUIDFIELD_GROUP_SIZE in Common.hlsli
 		constexpr std::uint32_t MAX_SRVS = 11;   // Per pass; t7 is the wall map
 		constexpr std::uint32_t WALL_SLOT = 7;
+		constexpr std::uint32_t WALL_MASK_SLOT = 6;
 		constexpr std::uint32_t MAX_UAVS = 8;
 
 		ID3D11ShaderResourceView* const NULL_SRVS[MAX_SRVS] = {};
@@ -56,6 +57,7 @@ namespace FluidFieldSim
 		divergence = CreateLayer(device, a_resolution, DXGI_FORMAT_R32_FLOAT, name, label + "Divergence");
 		fog[0] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16_FLOAT, name, label + "Fog0");
 		fog[1] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16_FLOAT, name, label + "Fog1");
+		wallMask = CreateLayer(device, a_resolution, DXGI_FORMAT_R8_UINT, name, label + "WallMask");
 		// Typed UAV atomics need single-channel 32-bit integers
 		const char* splatNames[] = { "WindX", "WindY", "ShoveX", "ShoveY", "Carve", "ShoveX1", "ShoveY1", "Carve1" };
 		for (std::size_t i = 0; i < splat.size(); i++)
@@ -123,6 +125,7 @@ namespace FluidFieldSim
 			{ &projectCS, L"ProjectCS.hlsl" },
 			{ &fogCS, L"FogCS.hlsl" },
 			{ &absorbCS, L"AbsorbCS.hlsl" },
+			{ &wallsCS, L"WallsCS.hlsl" },
 		};
 
 		for (auto& [program, fileName] : shaders) {
@@ -135,7 +138,7 @@ namespace FluidFieldSim
 
 	bool WindSolver::HasShaders() const
 	{
-		return splatCS && addForcesCS && advectCS && divergenceCS && jacobiCS && projectCS && fogCS && absorbCS;
+		return splatCS && addForcesCS && advectCS && divergenceCS && jacobiCS && projectCS && fogCS && absorbCS && wallsCS;
 	}
 
 	void WindSolver::ReleaseShaders()
@@ -148,6 +151,7 @@ namespace FluidFieldSim
 		projectCS = nullptr;
 		fogCS = nullptr;
 		absorbCS = nullptr;
+		wallsCS = nullptr;
 	}
 
 	void WindSolver::ReleaseResources()
@@ -157,6 +161,7 @@ namespace FluidFieldSim
 		divergence = {};
 		fog = {};
 		splat = {};
+		wallMask = {};
 		constants = nullptr;
 		fogConstants = nullptr;
 		levelConstants = nullptr;
@@ -289,12 +294,19 @@ namespace FluidFieldSim
 		ID3D11ShaderResourceView* boundSRVs[MAX_SRVS] = {};
 		std::copy_n(srvs.begin(), std::min<std::size_t>(srvs.size(), MAX_SRVS), boundSRVs);
 		boundSRVs[WALL_SLOT] = wallSRV;
+		if (!boundSRVs[WALL_MASK_SLOT] && shader != wallsCS.get())
+			boundSRVs[WALL_MASK_SLOT] = wallMask.srv.get();
 		context->CSSetShaderResources(0, MAX_SRVS, boundSRVs);
 		context->CSSetUnorderedAccessViews(0, static_cast<UINT>(std::min<std::size_t>(uavs.size(), MAX_UAVS)), uavs.data(), nullptr);
 		context->CSSetShader(shader, nullptr, 0);
 
 		const std::uint32_t groups = (resolution + GROUP_SIZE - 1) / GROUP_SIZE;
 		context->Dispatch(groups, groups, 1);
+	}
+
+	void WindSolver::Walls(ID3D11DeviceContext* context)
+	{
+		Dispatch(context, wallsCS.get(), std::span<ID3D11ShaderResourceView* const>(), wallMask.uav.get());
 	}
 
 	void WindSolver::Splat(ID3D11DeviceContext* context)

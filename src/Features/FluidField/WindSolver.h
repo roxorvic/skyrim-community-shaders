@@ -114,6 +114,7 @@ namespace FluidFieldSim
 		void Step(ID3D11DeviceContext* context, const StepParams& params, Wrap&& wrap)
 		{
 			BeginStep(context, params);
+			wrap("Walls", [&] { Walls(context); });
 			wrap("Splat", [&] { Splat(context); });
 			wrap("Add Forces", [&] { AddForces(context, params.parent); });
 			wrap("Advect", [&] { Advect(context); });
@@ -204,6 +205,7 @@ namespace FluidFieldSim
 		void EndStep(ID3D11DeviceContext* context);
 		void WriteLevel(ID3D11DeviceContext* context, const WindSolver* other, const WindSolver* child, std::uint32_t moverCount);
 		void Splat(ID3D11DeviceContext* context);
+		void Walls(ID3D11DeviceContext* context);
 		void AddForces(ID3D11DeviceContext* context, const WindSolver* parent);
 		void Advect(ID3D11DeviceContext* context);
 		void Divergence(ID3D11DeviceContext* context);
@@ -231,6 +233,7 @@ namespace FluidFieldSim
 		/** D193: the movers drawn in this step, fixed point (Levels.hlsli): wind x, y, fog shove x, y, carve; then the shove x, y
 		 * and carve of the layer under overhangs. */
 		std::array<Layer, 8> splat;
+		Layer wallMask;  ///< D193: this step's walls per cell (WallsCS), bound at t6 for the passes after it
 		std::uint32_t currentFog = 0;
 		std::uint32_t current = 0;
 		std::uint32_t pressureResult = 0;
@@ -250,6 +253,7 @@ namespace FluidFieldSim
 		winrt::com_ptr<ID3D11ComputeShader> projectCS;
 		winrt::com_ptr<ID3D11ComputeShader> fogCS;
 		winrt::com_ptr<ID3D11ComputeShader> absorbCS;
+		winrt::com_ptr<ID3D11ComputeShader> wallsCS;
 
 		// Scroll and reset state carried between steps
 		std::int32_t prevGridMin[2]{};
