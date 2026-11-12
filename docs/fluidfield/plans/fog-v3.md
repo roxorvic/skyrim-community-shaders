@@ -403,6 +403,28 @@ ends); the self-shadow; steps in the sim's depth along the trench edge, a cell (
 - Running through fog at the battle save: the wake's walls read smooth, near and far (Victor's check).
 - Draw time measured before and after.
 
+### 4b. Pixelated wisps, fog top and edges (added 2026-11-12)
+
+**Problem:** the wisps and the fog's top layer look pixelated in game: speckled, dotted texels instead of a soft fade.
+It shows most against things standing in the fog: round the moving player, and on vegetation and shrubs (Victor's shot,
+2026-11-12, at `FluidField_FogBattle`). Likely causes, unconfirmed: the half-resolution march's per-pixel jitter not
+resolved (the composite's 3 × 3 blur rejects texels across a depth edge, and thin geometry is mostly edges); the
+nearest-of-four depth the march takes for each half-resolution pixel; and the wisps' hard noise threshold.
+
+**Do (after 4a, on the same draw):**
+
+- **Diagnose first,** as 4a: announced hot-swaps one at a time (no jitter; full-resolution march; softer wisp threshold)
+  to find which part makes the dots. Explain before fixing.
+- Then fix it at its cause: a smoother fade at the wisps' and top's edges, a jitter the frame's TAA resolves, and an
+  edge-aware upsample that keeps fog soft round thin geometry without spilling over near surfaces.
+
+**Accept:**
+
+- The fog top and wisps fade softly, round the moving player and through grass and shrubs, near and far (Victor's
+  check, moving and still).
+- No fog spilling over near surfaces' edges (the reason for the nearest-of-four depth).
+- Draw time measured before and after.
+
 ### 5. Ambient drift from a texture (sim optimisation 6)
 
 **Problem:** `FogInputsCS`' `AmbientDrift` evaluates about 64 hash-noise lookups per cell per level per frame.
