@@ -344,6 +344,10 @@ between them, higher than both, gets its fog cut out. That's the moving-arc fail
   camera angles too (Victor's checks).
 - Draw time measured before and after at `FluidField_FogBattle` (standing, same camera).
 
+**Outcome (2026-11-12, agreed deviation):** the first version only. The probes keep the draw at its old cost (0.87–0.90
+ms; the top map adds 0.066 ms). The full interval walk drew the same picture for 0.22 ms more (1.09–1.12 ms): the walk
+itself costs about 0.12 ms, and the samples it skips, in clear air, were already cheap. Victor chose the probes.
+
 ### 3. Lighting per cell (draw optimisation 1)
 
 **Problem:** every march sample reads Volumetric Shadows' shadow map and evaluates Skylighting's probes. That's tens of
@@ -380,6 +384,24 @@ millions of evaluations per frame, and the main reason the draw went from 0.62 t
 - No visible stair-stepping or seams at ledges and overhang lips compared with before (side-by-side shots at the
   Riverwood ledges).
 - Draw time measured. Target: the whole fog back under 1 ms GPU at `FluidField_FogBattle`.
+
+### 4a. Banding along the wake's walls (added 2026-11-12)
+
+**Problem:** running through the fog leaves a trench whose walls show streaky, layered bands (Victor's shots,
+2026-11-12, at `FluidField_FogBattle`). The self-shadow change of 2026-11-11 (`min(depth, top)`, the sun slant floor) did
+not cure it. Cause unknown. Candidates: too few samples across a steep, thin fog wall (the steps grow away from the ray's
+ends); the self-shadow; steps in the sim's depth along the trench edge, a cell (16 u) each.
+
+**Do (after items 3 and 4, on the draw they leave):**
+
+- **Diagnose first:** one announced hot-swap at a time in the game: self-shadow off; then twice the steps; then a debug
+  colour per sim cell. Explain the cause and the fix to Victor before changing anything.
+- Then fix it at its cause.
+
+**Accept:**
+
+- Running through fog at the battle save: the wake's walls read smooth, near and far (Victor's check).
+- Draw time measured before and after.
 
 ### 5. Ambient drift from a texture (sim optimisation 6)
 
