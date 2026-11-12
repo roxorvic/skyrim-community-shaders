@@ -271,4 +271,509 @@ test spot each time.
   dungeon list).
 - **Water:** still water counts as ground at its surface, with a strong source; fast water gets strong evaporation. That
   belongs to step 7.
-- **Coexistence:** back off when GroundFog (Nexus 198571) or EHF's volumetric fog is on (fog-v2 section 5).
+- **Coexistence:** agreed change (Victor, 2026-11-12): coordinate with Exponential Height Fog (action plan items 18-23);
+  back off only for GroundFog (Nexus 198571).
+
+---
+
+## Action plan 2026-11-12
+
+**For:** the agent continuing Ground Fog on Windows, in worktree `C:\dev\skyrim-community-shaders-fog`, branch
+`fluid-field/fog-v3` (last commit `034618321`).
+
+**Source:** a review of that commit's code and the 2026-11-11/12 session, and Victor's selection and order of the items
+on 2026-11-12. Nothing here is built.
+
+**Plan record:** add this as a section of `docs/fluidfield/plans/fog-v3.md` ("Action plan 2026-11-12"), in its own docs
+commit.
+
+**Order:** Victor's (revised 2026-11-12): correctness first, then the optimisations (draw, sim, CPU), then the missing
+features. The draw items (3–4) should bring the fog back under its 1 ms budget before the features add cost. Report the
+measured cost after every item.
+
+**Rules:**
+
+- Follow `fog-v3.md`. Explain before changing anything; warn Victor before deviating, even when he asks for the deviation.
+- Ask before restarting Skyrim while he's in it. Never leave a debug view on without saying so.
+- Report measured versus estimated, and seen in game versus only built.
+- Commit locally per item. Never push.
+- Staging still has **Waterfalls and Shallow Water switched off** (crash isolation). Leave them off for fog work unless
+  Victor says otherwise, and remind him before any waterfall session.
+
+---
+
+### 1. Ground fallback in the sim (review problem 1)
+
+**Problem:** where a ground tile isn't resident, `FogBedCS.hlsl` falls back to the Terrain Shadows far height map
+(`FarHeight`). That map is quantised in ~2,056-unit steps. The draw falls back to the loaded landscape (`LandMap`,
+32 u), so after a load and at the tile window's edge the sim runs on wildly wrong ground until tiles land.
+
+**Do:**
+
+- In `FogBedCS`, fall back to `LandMap` (the same lookup as the draw's `LandGround`: height, and the flags for fog may
+  form and water). Closed only where neither exists.
+- Remove the far height map entirely: the `FarHeight` binding, `FarScale`/`FarOffset`/`FarZ`/`HasFar` in both shaders'
+  constants, the unused `FarGround` in `GroundFogCS.hlsl`, and its loading in `GroundTiles` / `FluidFieldGroundFog`.
+  Nothing else uses it. Check with a search before deleting.
+- Bump the tile cache version only if the tile format changes; it shouldn't.
+
+**Accept:**
+
+- A new `SolverTest` case: with no tile resident, the bed equals the landscape map's height.
+- In game, after a fresh load (`coc Riverwood`), fog lies on the right ground from the first second, with no sliding
+  or reshaping as tiles arrive.
+
+### 2. Ray bounds from a max mip (review problem 2; also draw optimisation 2)
+
+**Problem:** `FogOverRay` clips the fog band from the ground under the camera and under the ray's end only. A rise
+between them, higher than both, gets its fog cut out. That's the moving-arc failure from v2.
+
+**Do (the plan's max-mip bounds; one implementation covers both review items):**
+
+- **Build the mip:** after `FogDepthCS`, a pass builds a max mip chain of the fog's top, `bed + depth × FLUFF_REACH`,
+  over both levels, per cell. Down to about 8×8 cells a texel. Past the sim grid, use the settled-fog top over the tiles
+  and `LandMap`.
+- **Use it in the march:** walk the ray on a coarse mip to find the intervals where it's below the fog's top, then march
+  only those. A cheaper first version: about 8 probes along the ray on a coarse mip to set the band top, as v2's fix
+  did, then the full interval walk.
+- The steps go into the intervals actually inside the fog, so fewer are wasted.
+
+**Accept:**
+
+- At the Riverwood ledges and on a crest between the camera and distant fog: no arc, no clipped fog on rises, from low
+  camera angles too (Victor's checks).
+- Draw time measured before and after at `FluidField_FogBattle` (standing, same camera).
+
+### 3. Lighting per cell (draw optimisation 1)
+
+**Problem:** every march sample reads Volumetric Shadows' shadow map and evaluates Skylighting's probes. That's tens of
+millions of evaluations per frame, and the main reason the draw went from 0.62 to 1.03 ms.
+
+**Do:**
+
+- **A light pass:** after `FogDepthCS`, one evaluation per cell per level at the fog's mid-height (`bed + 0.5 × depth`):
+  sun visibility (`VolumetricShadows::GetVSMShadow2D`) and sky visibility (Skylighting). Stored in a small texture per
+  level (RG8 or RG16F).
+- **The march** reads it bilinearly, level-matched like the column, instead of evaluating per sample.
+- **Unchanged:** the self-shadow (per sample, cheap) and the local lights (once a ray).
+- **Interiors:** sun off; sky from the cell's ambient (item 9).
+
+**Accept:**
+
+- Light shafts through trees still read at the 16-unit cell size (Victor's look at the battle save at dawn or dusk).
+- Draw time measured before and after.
+
+### 4. One draw texture per cell (draw optimisation 3)
+
+**Problem:** per sample, `Ground` reads five 8-unit ground texels with slot checks (plus `LandMap` past the tiles), and
+`FogColumn` reads twelve bed and column texels with level matching.
+
+**Do:**
+
+- Have the solver's output pass write, per cell and level, everything the march needs, already resolved: floor height,
+  depth, velocity, churn, the fog-may-form and carries shares, and the ceiling under an overhang.
+- The march reads that texture (bilinear, level-matched) and the noise, plus the 8-unit ground only where it keeps edges
+  sharp: near the ray's end (the existing ground fix), and as one nearest-texel level check instead of five texels.
+
+**Accept:**
+
+- No visible stair-stepping or seams at ledges and overhang lips compared with before (side-by-side shots at the
+  Riverwood ledges).
+- Draw time measured. Target: the whole fog back under 1 ms GPU at `FluidField_FogBattle`.
+
+### 5. Ambient drift from a texture (sim optimisation 6)
+
+**Problem:** `FogInputsCS`' `AmbientDrift` evaluates about 64 hash-noise lookups per cell per level per frame.
+
+**Do:** compute the drift (curl of the two eddy scales) into a small texture (for example 128² over the grid) every few
+frames, or derive it from the existing noise textures. Inputs reads it bilinearly.
+
+**Accept:** the same drifting look (Victor's check), and the Inputs pass time measured before and after.
+
+### 6. Skip lower levels where there are none (sim optimisation 7)
+
+**Problem:** the lower level (D195) is dispatched over the whole grid, though most columns have no second level.
+
+**Do:**
+
+- **Quick part:** early-out at the very top of each pass for closed lower beds. `FogDepthCS` currently computes inflow
+  before discarding.
+- **Full part:** the bed pass marks 8×8 groups that contain any lower bed and builds an indirect dispatch list for
+  level 1 in the Inputs, Flux and Depth passes.
+
+**Accept:** `SolverTest` still passes (all 12 cases), and the per-pass times are measured before and after.
+
+### 7. Cache bones per actor (CPU optimisation 8)
+
+**Problem:** `AirSources` looks bones up by name (`GetObjectByName`) every frame for every nearby actor. The creature-leg
+cache was removed over a dangling-pointer worry.
+
+**Do:**
+
+- Per actor, keep the 3D root and the found bones as `NiPointer`s. That keeps them alive, so nothing dangles.
+- Invalidate when `Get3D()` returns a different root, or the actor unloads.
+- Look up by name only on a miss.
+
+**Accept:** movers unchanged in game, and `AirSources::Update` time measured in the battle scene before and after.
+
+### 8. Measure and trim the landscape depth pass (CPU optimisation 9)
+
+The second landscape draw is ours alone: `LandscapeDepth`, used only by the distant fog, and only while the fog is on.
+
+**Do:**
+
+1. **Measure:** GPU timestamps around our extra draws, and CPU time in the hook, at the battle save and in an open
+   valley view.
+2. **Trim:**
+    - draw only distant LOD landscape passes (the LOD-landscape technique), since near landscape is covered by the tiles
+      and `LandMap`;
+    - skip the pass entirely when Distant Fog Reach is 0, or in interiors.
+3. **Check** with Terrain Blending on and off, since our hook chains after its.
+
+**Accept:** the distant fog unchanged (far shore lit, no fog on water, trees or cliffs), and the measured cost before and
+after reported.
+
+### 9. Interiors and dungeons (review missing 3)
+
+**Goal:** fog in the dungeon kinds `fog-v2.md` section 4 lists: caves, Nordic ruins and barrows, Dwemer ruins, ice caves
+and mines.
+
+**Do:**
+
+- **Ground:**
+    - interiors have no landscape, so mesh tiles alone, read from the interior cell's statics with the same
+      classification;
+    - key the tile cache by the interior cell's form ID instead of the worldspace;
+    - no `LandMap` and no distant fog in interiors.
+- **Where it forms:**
+    - only in dungeons, decided by the location's keywords plus a curated list (verify the keywords in game, for example
+      `LocTypeDraugrCrypt`, `LocTypeDwarvenAutomatons`, `LocTypeMine`, `LocTypeAnimalDen`, `LocTypeDungeon`);
+    - per-kind amounts (thicker in barrows and caves, thin in Dwemer ruins) as data, not code.
+- **Lighting:** no sun or sky in interiors. Local lights carry it (torches, braziers), plus the cell's ambient light.
+- **Look:** a per-kind tint and density, with the dungeon list in JSON next to the weather rules from item 11.
+
+**Accept:**
+
+- Fog in one barrow (Bleak Falls Barrow), one cave and one mine, lying on floors and pooling in low rooms.
+- None in houses or shops.
+- Tiles cached and instant on re-entry.
+- Cost measured in a lit barrow corridor.
+
+### 10. Physics clutter as movers (review missing 4)
+
+**Goal:** objects knocked or thrown (clutter, baskets, bodies in ragdoll already done) push and cut the fog.
+
+**Do:**
+
+- Every few frames, collect references with dynamic Havok bodies inside the sim grid, moving faster than a threshold,
+  capped by distance × speed in the existing ranked mover list.
+- Each becomes a pusher, and a contact capsule within Contact Radius, from its bounds and linear velocity.
+- Prefer events where possible (hits, grab and release) to start tracking, rather than a full reference scan every
+  frame.
+
+**Accept:**
+
+- Throwing or knocking clutter through the fog parts it.
+- At rest it doesn't cut (like the stuck-arrow rule).
+- The CPU cost of the scan is measured in the battle scene.
+
+### 11. Placement and timing (review missing 1; fog-v2 section 4, carried into fog-v3)
+
+**Goal:** fog that belongs to the place, the weather and the hour, not one amount everywhere.
+
+**Do:**
+
+- **Fogginess (0–1) per frame, scaling Ground Thickness and Pool Depth:**
+    - weather: its own fog distances first (works with any weather mod), then rules by weather name, then per-weather
+      overrides in JSON;
+    - time of day: thickest just after dawn (about 06:30), present at night. Away from foggy weather, it's mostly gone
+      from dry ground by midday. **In a foggy weather the time of day only thins it a little and never clears it** (no
+      morning burn-off; Victor, 2026-11-12). The weather sets the floor; the hour only trims above it;
+    - wind and season thin it;
+    - **still water at dawn:** a thinner layer over still water (about half Ground Thickness), peaking at dawn and fading
+      through the morning, on top of whatever the weather gives.
+- **Rain:** keep today's rain dents as they are. No further rain work (Victor, 2026-11-12).
+- **Sources, combined by max (never summed), on the bed's fog-may-form share:**
+    - **still and slow water:** let fog form and be drawn over lakes and ponds, using `WaterSurfaces`' flow scale (flowmap
+      types are rivers). Fast rivers keep evaporating, so rapids stay clear;
+    - **cold hollows:** the existing hollowness term, weighted by night and calm;
+    - **dense forest:** tree references per tile, counted where `GroundMeshes` already classifies trees;
+    - **swamps:** a curated region and worldspace list in JSON (Hjaalmarch, Solstheim's marshes), plus auto-detection
+      (shallow water mixed with marsh and mud land textures);
+    - **dungeons:** from item 9.
+- **Never abrupt:**
+    - targets ease over Ease In;
+    - a weather change blends over its transition, with fog forming on slopes and draining so low spots fill first;
+    - **valleys first, made explicit:** while fog is arriving (a weather change into fog, or dusk), weight the sources by
+      hollowness, so valley floors and hollows visibly fill before slopes and open flats catch up;
+    - fast travel, loading and teleports seed the settled field, as now.
+
+**Accept:**
+
+- Over one in-game day at Riverwood in clear weather (timescale raised for the test): dawn fog in hollows and a thin
+  layer over the river's still stretches, gone from the flats by noon, back at dusk.
+- The same day in a foggy weather: only slightly thinner at noon, never cleared.
+- A foggy weather fills low spots first.
+- Lake Ilinalta gets fog over the water, the river rapids don't.
+
+---
+
+## Improvements (after items 1–11)
+
+Victor's picks from the review's "ways to make it more interesting", 2026-11-12. Same rules as above: explain before
+changing, warn before deviating, measure every item, commit each on its own. Items 16 and 17 need fog over still water,
+which item 11 brings, so they come last.
+
+### 12. Landing from a jump stamps a ring
+
+**Goal:** an actor landing in the fog throws it outward in a ring, which then flows back. Victor: "THANK YOU, that has
+been driving me crazy".
+
+**Do:**
+
+- **Detect landings** for the player and NPCs in the grid: falling to grounded, from the character controller's airborne
+  state (verify the CommonLib call), with vertical speed going from falling to about zero as the fallback. Record impact
+  speed and position.
+- **The stamp:** a short radial push outward (a few frames), scaled by impact speed and actor scale. Fog piles in a ring
+  and the centre clears for a moment, then the flow fills it back in. A churn kick at the ring lifts it into wisps.
+- **Close range:** the landing feet also cut through the contact map, as they do now.
+
+**Accept:**
+
+- Jumping into fog leaves a visible ring that refills over a second or two.
+- A taller fall gives a bigger ring.
+- NPCs landing (jumping down ledges) do it too.
+
+### 13. Running kicks wisps up sideways and behind only
+
+**Goal:** a running actor kicks the fog up beside and behind them, never ahead.
+
+**Do:**
+
+- **Today:** churn (which drives the draw's lift and wisps) is just the flow's speed.
+- **Add a kick:** a decaying per-cell kick, splatted for actors above a running speed only where
+  `dot(outward, heading) < 0.3`, so beside and behind them. It fades over about 1 s.
+- **Storage:** a fourth Force channel, or a small per-level kick texture. The column's churn becomes
+  `max(flow speed, kick)`.
+- **The bow wave ahead** stays a push only, not a lift.
+
+**Accept:** running through fog leaves lifted wisps trailing behind and to the sides, nothing kicked up ahead, and
+walking doesn't kick.
+
+### 14. Frost spells only push
+
+**Today:** fire, frost and shock projectiles thin the fog a little under their path ("heat").
+**Change:** frost only pushes the fog out of the way, with no thinning. Fire and shock stay as they are.
+**Accept:** an Ice Spike or Frostbite through fog parts it but leaves its amount unchanged once it flows back.
+
+### 15. Dragon wings on take-off and landing
+
+**Goal:** a dragon taking off or landing blasts the fog outward with its downdraft.
+
+**Do:**
+
+- **Detect:** dragons by race or keyword (`ActorTypeDragon`), and their take-off and landing from their flight state
+  (verify the CommonLib accessor), or from vertical speed near the ground.
+- **The downdraft:**
+    - a wide radial push centred under the body (several hundred units), lasting about 1–2 s;
+    - a cut under the body;
+    - a churn kick at the rim, so the fog billows up there.
+    - Optionally, weaker pulses while hovering low.
+- Goes through the ranked mover list like every other mover.
+
+**Accept:** at a dragon fight (a dragon spawned near Whiterun or Riverwood, with `tgm`), take-off and landing visibly
+blow a clearing that refills. Cost measured during the fight.
+
+### 16. Swimming churns both the fog and the water
+
+**Needs:** fog over still water (item 11), and **Shallow Water switched back on** in staging for this test (Victor's OK
+first, since it's off for crash isolation).
+
+**Do:**
+
+- **Swimmers and waders** push and churn the fog over the water they're in. The movers already exist; make sure they
+  act on water cells' fog.
+- **Water drives the fog:**
+    - when Shallow Water is active, the fog's Inputs pass reads its flow texture, sampled by world position, since its grid
+      differs from the fog's;
+    - fog over water is dragged by the water's velocity (a share of it), and churned where the water is turbulent (shear),
+      so a swimmer's wake stirs both.
+- **Optional:** without Shallow Water, the fog works as before, so the binding is optional.
+
+**Accept:**
+
+- Swimming across a still pool at dawn churns the mist above and leaves a wake in both.
+- With Shallow Water off, nothing breaks.
+
+### 17. Fire on water makes steam
+
+**Goal:** fire meeting water throws up rising steam.
+
+**Do:**
+
+- **Detect:**
+    - fire projectiles, explosions and beams (fire damage, for example by `MagicDamageFire` or the effect's resist value)
+      hitting or passing low over water, checked against `WaterSurfaces`' height at the point;
+    - burning objects standing in water.
+- **The steam:**
+    - a short-lived fog source on those water cells (a new add-fog splat channel);
+    - strong churn and lift, so it rises in wisps;
+    - a slightly brighter, whiter look;
+    - it evaporates quickly unless the weather is foggy.
+- Flames held over water make a continuous plume.
+
+**Accept:** a Fireball into a lake makes a burst of steam that rises and fades, and Flames over water steam
+continuously. Cost measured.
+
+### Decided against, or later
+
+- **Morning burn-off:** no. In foggy weather the hour only thins it a little; see item 11.
+- **Rain:** today's dents are enough. No further work.
+- **Lightning flashes lighting the fog:** not needed. Mods already add particle lights to spells, and the fog's local
+  lights pick them up through Light Limit Fix.
+- **Waterfalls feeding mist into pools:** later, once waterfalls are back in scope.
+
+---
+
+## EHF integration (after items 1–17)
+
+From a review of Exponential Height Fog (EHF) on 2026-11-12, approved by Victor the same day: **coexist and coordinate,
+don't merge.**
+
+**Why:**
+
+- EHF is the atmosphere: two exponential layers at **fixed world heights**, applied inside every material shader as each
+  surface draws, plus an optional volumetric froxel fog with near and far grids.
+- Ours is a fog layer measured **above the terrain**, composited once after the world.
+- They're complementary. "Seamless" means agreeing on draw order, light, the distant hand-over and weather.
+
+**Plan change:** fog-v2 section 5's "back off when Exponential Height Fog's volumetric fog or GroundFog is on" is replaced:
+**coordinate with EHF (items 18–23); back off only for GroundFog (Nexus 198571), which stacks the same kind of fog.**
+Record this in `fog-v3.md` as an agreed change (Victor, 2026-11-12).
+
+**Ruled out for now:** putting our fog into EHF's froxel volume. Its 16-pixel near tiles and 64-pixel far tiles can't
+hold a 20–40-unit layer: the top, the wisps and the contact cuts would be lost, and its frame-to-frame reuse would smear
+wakes. Putting only the distant layer in is a possible later experiment, not part of this plan.
+
+**Every item works with EHF off:** our fog behaves exactly as now. Test each item with EHF off, with EHF on, and with EHF's
+volumetric fog on.
+
+### 18. Respect EHF's fog in front of ours
+
+**Problem:** EHF's fog is already baked into each surface when our composite runs, so ours is treated as nearer than all
+of EHF's fog. Distant ground fog pops out crisp and bright against hazy mountains instead of sitting inside the haze.
+
+**Do:**
+
+- `GroundFogCS.hlsl` includes `ExponentialHeightFog/ExponentialHeightFog.hlsli`.
+- **Once per ray,** at the fog's representative distance `d`, evaluate EHF there: its analytic fog plus its volumetric
+  sample (`GetExponentialHeightFog` / `SampleVolumetricFog`, or their internals), giving its transmittance `T_ehf(d)` and
+  the light it scatters in front of `d`, `L_ehf(0..d)`. The representative distance is the scatter-weighted point
+  already computed for local lights.
+- **Compose physically**, so EHF's haze in front isn't dimmed by our fog and ours is dimmed by it:
+  `result = scene · T_ours + T_ehf(d) · L_ours + L_ehf(0..d) · (1 − T_ours)`.
+- Same for the distant layer (`DistantFog`), at its surface distance.
+- Bind EHF's integrated scattering textures (t19 and t22 in materials) to our draw at free slots, or reach the volume
+  through EHF's feature, without changing EHF.
+
+**Accept:**
+
+- With EHF on, distant ground fog reads as inside the haze: dimmer and softer with distance, no bright band against hazy
+  hills.
+- Near fog is unchanged.
+- EHF off: identical to before.
+- Cost measured, about 0.02 ms expected.
+
+### 19. Shared light with EHF
+
+**Problem:** where ours fades into EHF the two are lit differently, so the hand-over shows as a shift in colour and
+brightness:
+
+- EHF uses sky IBL × tint, plus the vanilla fog colour's share, plus its own sun lobe;
+- ours uses its own albedo, forward and backward sun lobes, and desaturated Skylighting colour.
+
+**Do:**
+
+- **With EHF on,** our sky term is built from EHF's inscattering inputs: sky IBL, or Dynamic Cubemaps in interiors; the
+  inscattering tint; the vanilla fog colour amount; and its directional multiplier and anisotropy as the sun lobe's base.
+- **Kept on top near the player:** our own detail (sun shadows, sky visibility, self-shadow, local lights).
+- **With distance,** our colour blends fully onto EHF's own fog colour, so far ground fog is the same medium as the haze.
+
+**Accept:**
+
+- No colour or brightness step where our fog meets EHF, at noon, at dusk and at night.
+- Victor's judgement on the near look, which should still read as our fog's lighting.
+
+### 20. Hand the distant layer over by EHF's opacity
+
+**Problem:** our distant layer fades out at a fixed reach (Distant Fog Reach, 90%), whatever EHF does at that distance.
+
+**Do:**
+
+- With EHF on, the distant layer fades out as EHF's opacity at that distance rises (from item 18's evaluation). It vanishes
+  exactly where the haze hides it.
+- **Remove the Distant Fog Reach slider** (Victor, 2026-11-12): its setting, its UI and i18n strings, and its constant.
+  The reach is no longer a user choice:
+    - **EHF on:** the fade follows EHF's opacity alone. The only hard limit is the landscape actually drawn
+      (`LandscapeDepth::GetReach()`).
+    - **EHF off:** a fixed fade over the last part of the landscape's drawn reach (today's 90% default, built in).
+
+**Accept:**
+
+- In a wide valley view (the battle save across the lake) with EHF on, there's no visible end to the ground fog.
+- With EHF off, the fade looks as it does today at 90%.
+- The slider is gone from the menu, and old saved settings load without errors.
+
+### 21. Composite before effects
+
+**Problem:** our composite runs after `Main_RenderWorld` returns. As far as the hook order shows, that's after particles
+and effects (fire, spell particles), which write no depth, so our fog is laid over flames as if they stood at the opaque
+surface behind them. EHF fogs each particle at its own depth.
+
+**Do:**
+
+1. **Confirm** with one RenderDoc capture where effects draw relative to our composite.
+2. **If they come before it:** find a hook point after water but before the alpha effects pass, and composite there. Fire
+   and spell particles then draw over our fog, and EHF keeps fogging them per pixel. Fog over water (item 11) still works,
+   because water is already drawn.
+3. **If no clean hook exists:** keep today's point and record why.
+
+**Accept:**
+
+- A campfire and a Flames spell in fog show bright flames over the fog, not fogged flames.
+- Fog over still water is still visible.
+- No change elsewhere.
+
+### 22. One weather signal for both
+
+**Problem:** item 11's fogginess and EHF react to weather separately, so in a transition one can thicken while the other
+lags.
+
+**Do:**
+
+- Register Ground Fog's per-weather amount (and, if useful, Ground Thickness and Pool Depth scale) as CS weather variables,
+  the way EHF's settings are (`RegisterWeatherVariables` / the weather variable registry; verify the API in this tree).
+- Both features then follow the same weather blend, and the CS editor tunes them side by side.
+- Item 11's "the weather's own fog distances first" becomes the default for that variable. Name rules and JSON overrides
+  sit on top as item 11 describes.
+
+**Accept:**
+
+- A weather change into fog thickens both together, and back out thins both together.
+- The amount is editable per weather in the CS editor.
+
+### 23. Coexistence rules and guidance
+
+**Do:**
+
+- **No back-off for EHF.** Keep a back-off (fade to nothing) only when the GroundFog mod is detected (its DLL loaded).
+- **A short guidance note** in Ground Fog's settings and in the docs: use EHF as the atmosphere (its layers well above the
+  ground, no low ground layer) with Ground Fog for the ground.
+- **A UI hint,** text only and never changing EHF's settings, when EHF's second layer looks like a ground layer (a high
+  density with a steep falloff close to the terrain's height round the player).
+
+**Accept:**
+
+- With GroundFog installed, ours steps aside.
+- With EHF set up as a ground layer, the hint shows.
+- EHF's settings are never touched by Ground Fog.
