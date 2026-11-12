@@ -54,8 +54,10 @@ Texture3D<float> Noise : register(t7);        // Tiling value noise, 8 lattice c
 Texture3D<float> ClumpNoise : register(t10);  // 4 cells: clumps
 Texture2D<float> BankNoise : register(t11);
 Texture2D<float2> LandMap : register(t12);
-Texture2D<float> FogTop : register(t15);          // The fog's highest top per TOP_TEXEL round the player, toroidal, max mips (TOP passes)
-Texture2D<float> LandscapeDepth : register(t13);  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
+Texture2D<float> FogTop : register(t15);  // The fog's highest top per TOP_TEXEL round the player, toroidal, max mips (TOP passes)
+Texture2D<float> LandscapeDepth : register(t13);
+Texture2DArray<float2> LightNear : register(t19);  // Per cell and level, toroidal as Column: sun (x) and sky (y) visibility (TOP 3)
+Texture2D<float2> LightFar : register(t20);        // The same per TOP_TEXEL past the grid, toroidal as FogTop  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
 SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
 
@@ -248,25 +250,50 @@ float Ground(float3 position, out float forming, out float carries, out float ce
 	                                           reference;
 }
 
+/** The fog top map (TOP passes): texels of TOP_TEXEL, TOP_TEXELS a side round the land map's centre cell, TOP_MIPS max mips. */
+static const float TOP_TEXEL = 64.0;
+static const int TOP_TEXELS = 512;
+static const uint TOP_MIPS = 7;
+static const float TOP_NONE = -1.0e30;
+/** Probes along a ray for its band's top. */
+static const uint TOP_PROBES = 8;
+
+/** World texel of the top map's window's south-west corner. */
+int2 TopMin()
+{
+	const int perCell = int(LAND_CELL / TOP_TEXEL);
+	return LandCell * perCell + perCell / 2 - TOP_TEXELS / 2;
+}
+
+/** The fog's highest top over the mip texel holding xy. */
+float FogTopAt(float2 xy, uint level)
+{
+	const int2 texel = int2(floor(xy / TOP_TEXEL)) >> level;
+	return FogTop.Load(int3(texel & ((TOP_TEXELS >> level) - 1), level));
+}
+
 float Banks(float2 xy);
 
 /**
  * The fog over ground of the given height (x depth, yz velocity, w churn): the column (bilinear) of each nearest cell's
  * level whose floor is that ground's (D195; cells a level away left out), handing over to the settled depth at the grid's
- * edge.
+ * edge. o_light: its sun and sky visibility (TOP 3's), likewise.
  */
-float4 FogColumn(float2 xy, float ground, float forming)
+float4 FogColumn(float2 xy, float ground, float forming, out float2 o_light)
 {
 	const float2 c = xy / CellSize - 0.5;
 	const float2 logical = c - float2(GridMin);
 	const float fromEdge = min(min(logical.x, logical.y), min(float(Resolution) - 1.0 - logical.x, float(Resolution) - 1.0 - logical.y));
 	const float settled = FarDepth * forming * Banks(xy);
+	const float2 farLight = LightFar.SampleLevel(WrapSampler, xy / (TOP_TEXEL * TOP_TEXELS), 0);
+	o_light = farLight;
 	if (fromEdge < 0.0)
 		return float4(settled, 0.0, 0.0, 0.0);
 	const int2 base = int2(floor(c));
 	const float2 f = c - float2(base);
 	const uint mask = Resolution - 1;
 	float4 column = 0.0;
+	float2 light = 0.0;
 	float weights = 0.0;
 	[unroll] for (uint k = 0; k < 4; k++)
 	{
@@ -278,10 +305,12 @@ float4 FogColumn(float2 xy, float ground, float forming)
 		const float floorHeight = level == 1 ? lower.x : top.x;
 		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (floorHeight - ground < LEVEL_STEP && ground - floorHeight < LEVEL_STEP ? 1.0 : 0.0);
 		column += Column[uint3(texel, level)] * w;
+		light += LightNear[uint3(texel, level)] * w;
 		weights += w;
 	}
 	const float4 simulated = weights > 1e-4 ? column / weights : 0.0;
 	const float edge = saturate(fromEdge / EDGE_BAND);
+	o_light = lerp(farLight, weights > 1e-4 ? light / weights : farLight, edge);
 	return float4(lerp(settled, simulated.x, edge), simulated.yzw * edge);
 }
 
@@ -321,44 +350,24 @@ float Uncut(float3 position)
 	return 1.0 - smoothstep(-CONTACT_SOFTNESS, 0.0, position.z - bottom) * (1.0 - smoothstep(0.0, CONTACT_SOFTNESS, position.z - top));
 }
 
-/** The fog top map (TOP passes): texels of TOP_TEXEL, TOP_TEXELS a side round the land map's centre cell, TOP_MIPS max mips. */
-static const float TOP_TEXEL = 64.0;
-static const int TOP_TEXELS = 512;
-static const uint TOP_MIPS = 7;
-static const float TOP_NONE = -1.0e30;
-/** Probes along a ray for its band's top. */
-static const uint TOP_PROBES = 8;
-
-/** World texel of the top map's window's south-west corner. */
-int2 TopMin()
-{
-	const int perCell = int(LAND_CELL / TOP_TEXEL);
-	return LandCell * perCell + perCell / 2 - TOP_TEXELS / 2;
-}
-
-/** The fog's highest top over the mip texel holding xy. */
-float FogTopAt(float2 xy, uint level)
-{
-	const int2 texel = int2(floor(xy / TOP_TEXEL)) >> level;
-	return FogTop.Load(int3(texel & ((TOP_TEXELS >> level) - 1), level));
-}
-
 /** The surface a ray ends on, and how far its ground map is off there (the landscape is drawn as triangles, sampled
  * bilinearly): samples near the end take the surface's height (GROUND_FIX). */
 static float3 rayEnd = 0.0;
 static float groundError = 0.0;
 
-/** Fog extinction per world unit at a position, the depth of fog over it (its self-shadow), and how high in the layer it lies (0 bottom, 1 top). */
-float FogAt(float3 position, out float shading, out float upInLayer)
+/** Fog extinction per world unit at a position, the depth of fog over it (its self-shadow), how high in the layer it lies
+ * (0 bottom, 1 top), and its sun and sky visibility. */
+float FogAt(float3 position, out float shading, out float upInLayer, out float2 o_light)
 {
 	shading = 1.0;
 	upInLayer = 0.0;
+	o_light = 1.0;
 	float forming, carries, ceiling;
 	const float ground = Ground(position, forming, carries, ceiling) + groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
 	const float height = position.z - ground;
 	if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth * FLUFF_REACH)
 		return 0.0;
-	const float4 column = FogColumn(position.xy, ground, forming);
+	const float4 column = FogColumn(position.xy, ground, forming, o_light);
 	const float depth = column.x;
 	if (depth <= 0.5 || height > depth * FLUFF_REACH)
 		return 0.0;
@@ -448,7 +457,8 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 		const float distance = a_fromEnd ? to - along : from + along;
 		const float3 position = camera + direction * distance;
 		float shading, upInLayer;
-		const float extinction = FogAt(position, shading, upInLayer) * (1.0 - smoothstep(MaxDistance * (1.0 - DISTANCE_FADE), MaxDistance, distance));
+		float2 visibility;
+		const float extinction = FogAt(position, shading, upInLayer, visibility) * (1.0 - smoothstep(MaxDistance * (1.0 - DISTANCE_FADE), MaxDistance, distance));
 		if (extinction <= 0.0)
 			continue;
 		const float stepTransmittance = exp(-extinction * segment);
@@ -457,7 +467,7 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 		const float above = Density * shading;
 		const float sunShade = exp(-SUN_SELF_SHADING * above / max(SharedData::DirLightDirection.z, LOWEST_SUN));
 		const float skyShade = exp(-SELF_SHADING * above);
-		const float3 light = a_sun * SunVisibility(positionCR) * sunShade + a_sky * SkyVisibility(positionCR) * skyShade * lerp(BOTTOM_LIGHT, TOP_LIGHT, upInLayer);
+		const float3 light = a_sun * visibility.x * sunShade + a_sky * visibility.y * skyShade * lerp(BOTTOM_LIGHT, TOP_LIGHT, upInLayer);
 		const float3 scattered = (1.0 - stepTransmittance) * light;
 		const float weight = (1.0 - stepTransmittance) * transmittance;
 		o_where += float4(positionCR * weight, weight);
@@ -568,9 +578,12 @@ float SurfaceDistance(float depth, float2 uv)
 // The fog top map, for the rays' bounds. TOP 0: each texel's highest fog top: the simulated fog over its cells' beds, and
 // where the settled fog may lie (in the grid's edge band and past it), the highest ground plus the settled fog's deepest;
 // over that, the most the ground map and the ray's end may shift it. TOP 1: dilated a texel (the march's bilinear reach
-// into the neighbours). TOP 2: one max mip from the one before.
+// into the neighbours). TOP 2: one max mip from the one before. TOP 3: the light (sun and sky visibility) once per cell
+// and level at the fog's mid-height, and past the grid once per TOP_TEXEL at the settled fog's; the march reads it.
+#	if TOP < 3
 RWTexture2D<float> TopOut : register(u0);
 Texture2D<float> TopIn : register(t16);
+#	endif
 
 #	if TOP == 0
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
@@ -635,7 +648,7 @@ Texture2D<float> TopIn : register(t16);
 	}
 	TopOut[id.xy] = top;
 }
-#	else
+#	elif TOP == 2
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	uint width, height;
 	TopOut.GetDimensions(width, height);
@@ -643,6 +656,45 @@ Texture2D<float> TopIn : register(t16);
 		return;
 	const uint2 from = id.xy * 2;
 	TopOut[id.xy] = max(max(TopIn[from], TopIn[from + uint2(1, 0)]), max(TopIn[from + uint2(0, 1)], TopIn[from + 1]));
+}
+#	else
+RWTexture2DArray<float2> LightNearOut : register(u0);
+RWTexture2D<float2> LightFarOut : register(u1);
+
+float2 LightAt(float3 world)
+{
+	const float3 positionCR = world - FrameBuffer::CameraPosAdjust.xyz;
+	return float2(SunVisibility(positionCR), SkyVisibility(positionCR));
+}
+
+// One thread a cell and a far texel (the grid and the top map are both 512 a side)
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	if (any(id.xy >= Resolution) || any(id.xy >= uint(TOP_TEXELS)))
+		return;
+	const int2 cell = GridMin + ((int2(id.xy) - GridMin) & int(Resolution - 1));
+	const float2 centre = (float2(cell) + 0.5) * CellSize;
+	[unroll] for (uint level = 0; level < 2; level++)
+	{
+		// Only where fog lies (the march reads light only there)
+		const float4 bed = Bed[uint3(id.xy, level)];
+		const float depth = Column[uint3(id.xy, level)].x;
+		LightNearOut[uint3(id.xy, level)] = bed.z != 2.0 && depth > 0.5 ? LightAt(float3(centre, bed.x + 0.5 * depth)) : 1.0;
+	}
+	const int2 topMin = TopMin();
+	const int2 world = topMin + ((int2(id.xy) - topMin) & (TOP_TEXELS - 1));
+	const float2 farCentre = (float2(world) + 0.5) * TOP_TEXEL;
+	float2 farLight = 1.0;
+	// Past the grid's interior (inside it the march reads LightNear) and within the rays' reach
+	const float2 logical = farCentre / CellSize - float2(GridMin);
+	const float inner = (EDGE_BAND + 1.0) + TOP_TEXEL / CellSize;
+	const bool interior = all(logical > inner) && all(logical < float(Resolution) - inner);
+	if (!interior && distance(farCentre, FrameBuffer::CameraPosAdjust.xy) < MaxDistance + TOP_TEXEL) {
+		float forming, carries, ceiling;
+		const float ground = Ground(float3(farCentre, 1e30), forming, carries, ceiling);
+		if (ground > NO_GROUND)
+			farLight = LightAt(float3(farCentre, ground + 0.5 * FarDepth));
+	}
+	LightFarOut[id.xy] = farLight;
 }
 #	endif
 #elif !defined(COMPOSITE)

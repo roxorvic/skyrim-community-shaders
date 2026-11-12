@@ -184,12 +184,18 @@ private:
 	/** @brief The rays' bounds (GroundFogCS's TOP passes): the fog's highest top per 64-unit texel round the player, then
 	 * dilated into fogTop's first mip, with max mips. */
 	static constexpr uint32_t TOP_TEXELS = 512, TOP_MIPS = 7;
+	static_assert(TOP_TEXELS == GRID_RESOLUTION, "GroundFogCS TOP 3 runs one thread a cell and a top map texel");
 	winrt::com_ptr<ID3D11Texture2D> fogTopRaw, fogTop;
 	winrt::com_ptr<ID3D11ShaderResourceView> fogTopRawSRV, fogTopSRV;
 	winrt::com_ptr<ID3D11UnorderedAccessView> fogTopRawUAV;
 	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, TOP_MIPS> fogTopMipSRVs;
 	std::array<winrt::com_ptr<ID3D11UnorderedAccessView>, TOP_MIPS> fogTopMipUAVs;
-	std::array<winrt::com_ptr<ID3D11ComputeShader>, 3> fogTopCS;  ///< TOP 0, 1, 2
+	std::array<winrt::com_ptr<ID3D11ComputeShader>, 4> fogTopCS;  ///< TOP 0 to 3
+	/** @brief Item 3: sun and sky visibility (RG8) per cell and level (as the column), and per top map texel past the grid
+	 * (TOP 3), which the march reads instead of evaluating them per sample. */
+	winrt::com_ptr<ID3D11Texture2D> lightNear, lightFar;
+	winrt::com_ptr<ID3D11ShaderResourceView> lightNearSRV, lightFarSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> lightNearUAV, lightFarUAV;
 	bool EnsureFogTop();
 	void ReleaseFogTop();
 	void BuildFogTop(ID3D11DeviceContext* a_context);
