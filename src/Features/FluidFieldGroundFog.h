@@ -191,11 +191,12 @@ private:
 	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, TOP_MIPS> fogTopMipSRVs;
 	std::array<winrt::com_ptr<ID3D11UnorderedAccessView>, TOP_MIPS> fogTopMipUAVs;
 	std::array<winrt::com_ptr<ID3D11ComputeShader>, 4> fogTopCS;  ///< TOP 0 to 3
-	/** @brief Item 3: sun and sky visibility (RG8) per cell and level (as the column), and per top map texel past the grid
-	 * (TOP 3), which the march reads instead of evaluating them per sample. */
-	winrt::com_ptr<ID3D11Texture2D> lightNear, lightFar;
-	winrt::com_ptr<ID3D11ShaderResourceView> lightNearSRV, lightFarSRV;
-	winrt::com_ptr<ID3D11UnorderedAccessView> lightNearUAV, lightFarUAV;
+	/** @brief Items 3 and 4 (TOP 3): per cell and level (as the column), all the march reads there: drawA (floor, depth,
+	 * velocity, RGBA32F) and drawB (churn, carrying share, sun and sky visibility, RGBA16F); and the light per top map
+	 * texel past the grid (lightFar, RG8). */
+	winrt::com_ptr<ID3D11Texture2D> drawA, drawB, lightFar;
+	winrt::com_ptr<ID3D11ShaderResourceView> drawASRV, drawBSRV, lightFarSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> drawAUAV, drawBUAV, lightFarUAV;
 	bool EnsureFogTop();
 	void ReleaseFogTop();
 	void BuildFogTop(ID3D11DeviceContext* a_context);

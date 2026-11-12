@@ -173,11 +173,14 @@ void FluidFieldGroundFog::Release()
 void FluidFieldGroundFog::ReleaseFogTop()
 {
 	fogTopCS = {};
-	lightNearUAV = nullptr;
+	drawAUAV = nullptr;
+	drawBUAV = nullptr;
 	lightFarUAV = nullptr;
-	lightNearSRV = nullptr;
+	drawASRV = nullptr;
+	drawBSRV = nullptr;
 	lightFarSRV = nullptr;
-	lightNear = nullptr;
+	drawA = nullptr;
+	drawB = nullptr;
 	lightFar = nullptr;
 	fogTopMipSRVs = {};
 	fogTopMipUAVs = {};
@@ -202,10 +205,13 @@ bool FluidFieldGroundFog::EnsureFogTop()
 		const D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{ .Format = DXGI_FORMAT_R32_FLOAT, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D, .Texture2D = { .MipSlice = m } };
 		ok = SUCCEEDED(device->CreateShaderResourceView(fogTop.get(), &srvDesc, fogTopMipSRVs[m].put())) && SUCCEEDED(device->CreateUnorderedAccessView(fogTop.get(), &uavDesc, fogTopMipUAVs[m].put()));
 	}
-	D3D11_TEXTURE2D_DESC lightDesc{ .Width = GRID_RESOLUTION, .Height = GRID_RESOLUTION, .MipLevels = 1, .ArraySize = 2, .Format = DXGI_FORMAT_R8G8_UNORM, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, .CPUAccessFlags = 0, .MiscFlags = 0 };
-	ok = ok && SUCCEEDED(device->CreateTexture2D(&lightDesc, nullptr, lightNear.put())) && SUCCEEDED(device->CreateShaderResourceView(lightNear.get(), nullptr, lightNearSRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(lightNear.get(), nullptr, lightNearUAV.put()));
+	D3D11_TEXTURE2D_DESC lightDesc{ .Width = GRID_RESOLUTION, .Height = GRID_RESOLUTION, .MipLevels = 1, .ArraySize = 2, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, .CPUAccessFlags = 0, .MiscFlags = 0 };
+	ok = ok && SUCCEEDED(device->CreateTexture2D(&lightDesc, nullptr, drawA.put())) && SUCCEEDED(device->CreateShaderResourceView(drawA.get(), nullptr, drawASRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(drawA.get(), nullptr, drawAUAV.put()));
+	lightDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	ok = ok && SUCCEEDED(device->CreateTexture2D(&lightDesc, nullptr, drawB.put())) && SUCCEEDED(device->CreateShaderResourceView(drawB.get(), nullptr, drawBSRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(drawB.get(), nullptr, drawBUAV.put()));
 	lightDesc.Width = lightDesc.Height = TOP_TEXELS;
 	lightDesc.ArraySize = 1;
+	lightDesc.Format = DXGI_FORMAT_R8G8_UNORM;
 	ok = ok && SUCCEEDED(device->CreateTexture2D(&lightDesc, nullptr, lightFar.put())) && SUCCEEDED(device->CreateShaderResourceView(lightFar.get(), nullptr, lightFarSRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(lightFar.get(), nullptr, lightFarUAV.put()));
 	if (!ok) {
 		ReleaseFogTop();
@@ -213,7 +219,8 @@ bool FluidFieldGroundFog::EnsureFogTop()
 	}
 	Util::SetResourceName(fogTopRaw.get(), "FluidField::FogTopRaw");
 	Util::SetResourceName(fogTop.get(), "FluidField::FogTop");
-	Util::SetResourceName(lightNear.get(), "FluidField::FogLightNear");
+	Util::SetResourceName(drawA.get(), "FluidField::FogDrawA");
+	Util::SetResourceName(drawB.get(), "FluidField::FogDrawB");
 	Util::SetResourceName(lightFar.get(), "FluidField::FogLightFar");
 	return true;
 }
@@ -422,15 +429,15 @@ namespace
 	void UnbindAll(ID3D11DeviceContext* a_context)
 	{
 		ID3D11ShaderResourceView* nullSRVs[14]{};
-		ID3D11UnorderedAccessView* nullUAVs[2]{};
+		ID3D11UnorderedAccessView* nullUAVs[3]{};
 		ID3D11SamplerState* nullSamplers[2]{};
 		ID3D11Buffer* nullCB = nullptr;
 		a_context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
-		a_context->CSSetShaderResources(14, 7, nullSRVs);
+		a_context->CSSetShaderResources(14, 9, nullSRVs);
 		a_context->CSSetShaderResources(18, 1, nullSRVs);
 		a_context->CSSetShaderResources(35, 3, nullSRVs);
 		a_context->CSSetShaderResources(98, 1, nullSRVs);
-		a_context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+		a_context->CSSetUnorderedAccessViews(0, 3, nullUAVs, nullptr);
 		a_context->CSSetSamplers(0, 2, nullSamplers);
 		a_context->CSSetConstantBuffers(0, 1, &nullCB);
 		a_context->CSSetConstantBuffers(12, 1, &nullCB);
@@ -609,19 +616,21 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	globals::profiler->BeginPass("FluidField::Fog Top");
 	BuildFogTop(context);
 	globals::profiler->EndPass();
-	globals::profiler->BeginPass("FluidField::Fog Light");
-	ID3D11UnorderedAccessView* lightUAVs[] = { lightNearUAV.get(), lightFarUAV.get() };
-	context->CSSetUnorderedAccessViews(0, 2, lightUAVs, nullptr);
+	globals::profiler->BeginPass("FluidField::Fog Cells");
+	ID3D11ShaderResourceView* drawFloorSRV = solver.GetDrawFloorSRV();
+	context->CSSetShaderResources(22, 1, &drawFloorSRV);
+	ID3D11UnorderedAccessView* cellUAVs[] = { drawAUAV.get(), lightFarUAV.get(), drawBUAV.get() };
+	context->CSSetUnorderedAccessViews(0, 3, cellUAVs, nullptr);
 	context->CSSetShader(fogTopCS[3].get(), nullptr, 0);
 	context->Dispatch((GRID_RESOLUTION + 7) / 8, (GRID_RESOLUTION + 7) / 8, 1);
-	ID3D11UnorderedAccessView* noUAVs[2]{};
-	context->CSSetUnorderedAccessViews(0, 2, noUAVs, nullptr);
+	ID3D11UnorderedAccessView* noUAVs[3]{};
+	context->CSSetUnorderedAccessViews(0, 3, noUAVs, nullptr);
 	globals::profiler->EndPass();
 	globals::profiler->BeginPass("FluidField::Ground Fog");
 	ID3D11ShaderResourceView* topSRV = fogTopSRV.get();
 	context->CSSetShaderResources(15, 1, &topSRV);
-	ID3D11ShaderResourceView* fogLightSRVs[] = { lightNearSRV.get(), lightFarSRV.get() };
-	context->CSSetShaderResources(19, 2, fogLightSRVs);
+	ID3D11ShaderResourceView* cellSRVs[] = { drawASRV.get(), lightFarSRV.get(), drawBSRV.get() };
+	context->CSSetShaderResources(19, 3, cellSRVs);
 	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);

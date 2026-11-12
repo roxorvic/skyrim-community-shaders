@@ -101,6 +101,8 @@ namespace FluidFieldSim
 		ID3D11ShaderResourceView* GetColumnSRV() const { return column.srv.get(); }
 		/** @brief Per level, as GetColumnSRV: x height, y fog source share, z kind (FogCommon.hlsli). */
 		ID3D11ShaderResourceView* GetBedSRV() const { return bed.srv.get(); }
+		/** @brief Per level, for the draw: x the level's mean floor (-1e7 where none), y its share that carries fog. */
+		ID3D11ShaderResourceView* GetDrawFloorSRV() const { return drawFloor.srv.get(); }
 		/** @brief The contact map's lowest and highest points per texel (encoded as FogContactCS's EncodeHeight). */
 		ID3D11ShaderResourceView* GetContactLowSRV() const { return contactLow.srv.get(); }
 		ID3D11ShaderResourceView* GetContactHighSRV() const { return contactHigh.srv.get(); }
@@ -156,7 +158,7 @@ namespace FluidFieldSim
 		void Dispatch(ID3D11DeviceContext* context, ID3D11ComputeShader* shader, std::span<ID3D11ShaderResourceView* const> srvs, std::span<ID3D11UnorderedAccessView* const> uavs, std::uint32_t a_groupsX, std::uint32_t a_slices);
 
 		std::uint32_t resolution = 0;
-		Layer bed, depth, velocity, column, force, contactLow, contactHigh;
+		Layer bed, drawFloor, depth, velocity, column, force, contactLow, contactHigh;
 		Layer flux[2];  ///< Ping-pong; flux[0] holds the step's result
 		Buffer pushers, contacts;
 		std::uint32_t pusherCount = 0, contactCount = 0;

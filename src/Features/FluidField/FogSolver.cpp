@@ -42,6 +42,7 @@ namespace FluidFieldSim
 	{
 		ReleaseResources();
 		bed = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R32G32B32A32_FLOAT, name, "Bed");
+		drawFloor = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R32G32_FLOAT, name, "Draw Floor");
 		depth = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R32_FLOAT, name, "Depth");
 		velocity = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R16G16_FLOAT, name, "Velocity");
 		column = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R16G16B16A16_FLOAT, name, "Column");
@@ -84,7 +85,7 @@ namespace FluidFieldSim
 
 	void FogSolver::ReleaseResources()
 	{
-		bed = depth = velocity = column = force = contactLow = contactHigh = flux[0] = flux[1] = {};
+		bed = drawFloor = depth = velocity = column = force = contactLow = contactHigh = flux[0] = flux[1] = {};
 		pushers = contacts = {};
 		constants = nullptr;
 		sampler = nullptr;
@@ -182,7 +183,7 @@ namespace FluidFieldSim
 		ID3D11SamplerState* s = sampler.get();
 		context->CSSetSamplers(0, 1, &s);
 		ID3D11ShaderResourceView* srvs[] = { ground.tiles, ground.land };
-		ID3D11UnorderedAccessView* uavs[] = { bed.uav.get() };
+		ID3D11UnorderedAccessView* uavs[] = { bed.uav.get(), drawFloor.uav.get() };
 		Dispatch(context, bedCS.get(), srvs, uavs, 0, 1);
 	}
 

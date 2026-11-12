@@ -56,8 +56,10 @@ Texture2D<float> BankNoise : register(t11);
 Texture2D<float2> LandMap : register(t12);
 Texture2D<float> FogTop : register(t15);  // The fog's highest top per TOP_TEXEL round the player, toroidal, max mips (TOP passes)
 Texture2D<float> LandscapeDepth : register(t13);
-Texture2DArray<float2> LightNear : register(t19);  // Per cell and level, toroidal as Column: sun (x) and sky (y) visibility (TOP 3)
-Texture2D<float2> LightFar : register(t20);        // The same per TOP_TEXEL past the grid, toroidal as FogTop  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
+Texture2DArray<float4> DrawA : register(t19);      // Per cell and level, toroidal as Column (TOP 3): x mean floor, y depth, zw velocity
+Texture2DArray<float4> DrawB : register(t21);      // Likewise: x churn, y share that carries fog, z sun and w sky visibility
+Texture2D<float2> LightFar : register(t20);        // Sun and sky visibility per TOP_TEXEL past the grid, toroidal as FogTop
+Texture2DArray<float2> DrawFloor : register(t22);  // The solver's per-level mean floor and carrying share (FogBedCS), for TOP 3  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
 SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
 
@@ -242,7 +244,7 @@ float Ground(float3 position, out float forming, out float carries, out float ce
 		weights += w;
 	}
 	const bool resident = nearestTexel.x > NO_GROUND;
-	float landForming;
+	float landForming = 0.0;
 	const float land = resident ? NO_GROUND : LandGround(position.xy, landForming);
 	forming = resident ? form / max(weights, 1e-4) : landForming;
 	carries = resident ? carry / max(weights, 1e-4) : landForming;
@@ -305,7 +307,7 @@ float4 FogColumn(float2 xy, float ground, float forming, out float2 o_light)
 		const float floorHeight = level == 1 ? lower.x : top.x;
 		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (floorHeight - ground < LEVEL_STEP && ground - floorHeight < LEVEL_STEP ? 1.0 : 0.0);
 		column += Column[uint3(texel, level)] * w;
-		light += LightNear[uint3(texel, level)] * w;
+		light += DrawB[uint3(texel, level)].zw * w;
 		weights += w;
 	}
 	const float4 simulated = weights > 1e-4 ? column / weights : 0.0;
@@ -355,6 +357,62 @@ float Uncut(float3 position)
 static float3 rayEnd = 0.0;
 static float groundError = 0.0;
 
+/** A mean floor this low: the level has none there. */
+static const float NO_FLOOR = -1.0e6;
+
+/**
+ * Inside the grid (past its edge band): the fog at a position from the cells (item 4), the level under it from the
+ * nearest 8-unit ground texel (sharp ledges), and the cells' floors, fog and light bilinear on that level (cells a level
+ * away left out). Returns the column as FogColumn; false in o_inside past the interior (the exact path is used there).
+ */
+float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float o_carries, out float o_ceiling, out float2 o_light)
+{
+	o_ground = NO_GROUND;
+	o_carries = 0.0;
+	o_ceiling = 1e30;
+	o_light = 1.0;
+	const float2 c = position.xy / CellSize - 0.5;
+	const float2 logical = c - float2(GridMin);
+	const float fromEdge = min(min(logical.x, logical.y), min(float(Resolution) - 1.0 - logical.x, float(Resolution) - 1.0 - logical.y));
+	o_inside = fromEdge >= EDGE_BAND;
+	if (!o_inside)
+		return 0.0;
+	const float4 nearest = Texel(int2(round(position.xy / TILE_TEXEL - 0.5)));
+	float landForming = 0.0;
+	const bool resident = nearest.x > NO_GROUND;
+	const float2 g = resident ? LevelUnder(nearest, position.z) : float2(LandGround(position.xy, landForming), 0.0);
+	if (g.x <= NO_GROUND || position.z - g.x > MaxDepth * FLUFF_REACH + LEVEL_STEP)
+		return 0.0;
+	const uint level = resident && nearest.z > NO_GROUND && g.x == nearest.z ? 1 : 0;
+	o_ceiling = level == 1 ? nearest.z + floor(nearest.w / GAP_SCALE) : 1e30;
+	const int2 base = int2(floor(c));
+	const float2 f = c - float2(base);
+	const uint mask = Resolution - 1;
+	float floorSum = 0.0, weights = 0.0;
+	float4 column = 0.0;
+	float4 extra = 0.0;
+	[unroll] for (uint k = 0; k < 4; k++)
+	{
+		const int2 offset = int2(k & 1, k >> 1);
+		const uint3 texel = uint3(uint2(base + offset) & mask, level);
+		const float4 a = DrawA[texel];
+		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (a.x > NO_FLOOR && abs(a.x - g.x) < LEVEL_STEP ? 1.0 : 0.0);
+		const float4 b = DrawB[texel];
+		floorSum += a.x * w;
+		column += float4(a.y, a.zw, b.x) * w;
+		extra += float4(b.y, b.zw, 0.0) * w;
+		weights += w;
+	}
+	if (weights <= 1e-4) {
+		o_ground = g.x;
+		return 0.0;
+	}
+	o_ground = floorSum / weights;
+	o_carries = extra.x / weights;
+	o_light = extra.yz / weights;
+	return column / weights;
+}
+
 /** Fog extinction per world unit at a position, the depth of fog over it (its self-shadow), how high in the layer it lies
  * (0 bottom, 1 top), and its sun and sky visibility. */
 float FogAt(float3 position, out float shading, out float upInLayer, out float2 o_light)
@@ -362,12 +420,23 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 	shading = 1.0;
 	upInLayer = 0.0;
 	o_light = 1.0;
-	float forming, carries, ceiling;
-	const float ground = Ground(position, forming, carries, ceiling) + groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
-	const float height = position.z - ground;
-	if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth * FLUFF_REACH)
+	bool inside = false;
+	float ground = NO_GROUND, carries = 0.0, ceiling = 1e30;
+	float4 column = CellFog(position, inside, ground, carries, ceiling, o_light);
+	if (!inside) {
+		float forming = 0.0;
+		ground = Ground(position, forming, carries, ceiling);
+		const float height = position.z - ground - groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
+		if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth * FLUFF_REACH)
+			return 0.0;
+		column = FogColumn(position.xy, ground, forming, o_light);
+	}
+	if (ground <= NO_GROUND)
 		return 0.0;
-	const float4 column = FogColumn(position.xy, ground, forming, o_light);
+	ground += groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
+	const float height = position.z - ground;
+	if (height < 0.0 || height > MaxDepth * FLUFF_REACH)
+		return 0.0;
 	const float depth = column.x;
 	if (depth <= 0.5 || height > depth * FLUFF_REACH)
 		return 0.0;
@@ -658,8 +727,9 @@ Texture2D<float> TopIn : register(t16);
 	TopOut[id.xy] = max(max(TopIn[from], TopIn[from + uint2(1, 0)]), max(TopIn[from + uint2(0, 1)], TopIn[from + 1]));
 }
 #	else
-RWTexture2DArray<float2> LightNearOut : register(u0);
+RWTexture2DArray<float4> DrawAOut : register(u0);
 RWTexture2D<float2> LightFarOut : register(u1);
+RWTexture2DArray<float4> DrawBOut : register(u2);
 
 float2 LightAt(float3 world)
 {
@@ -675,10 +745,14 @@ float2 LightAt(float3 world)
 	const float2 centre = (float2(cell) + 0.5) * CellSize;
 	[unroll] for (uint level = 0; level < 2; level++)
 	{
-		// Only where fog lies (the march reads light only there)
-		const float4 bed = Bed[uint3(id.xy, level)];
-		const float depth = Column[uint3(id.xy, level)].x;
-		LightNearOut[uint3(id.xy, level)] = bed.z != 2.0 && depth > 0.5 ? LightAt(float3(centre, bed.x + 0.5 * depth)) : 1.0;
+		// The march's cell (item 4); light only where fog lies (the march reads it only there)
+		const uint3 texel = uint3(id.xy, level);
+		const float4 bed = Bed[texel];
+		const float4 column = Column[texel];
+		const float2 drawFloor = DrawFloor[texel];
+		const bool open = bed.z != 2.0 && drawFloor.x > NO_FLOOR;
+		DrawAOut[texel] = float4(open ? drawFloor.x : -1.0e7, column.xyz);
+		DrawBOut[texel] = float4(column.w, drawFloor.y, open && column.x > 0.5 ? LightAt(float3(centre, bed.x + 0.5 * column.x)) : 1.0);
 	}
 	const int2 topMin = TopMin();
 	const int2 world = topMin + ((int2(id.xy) - topMin) & (TOP_TEXELS - 1));

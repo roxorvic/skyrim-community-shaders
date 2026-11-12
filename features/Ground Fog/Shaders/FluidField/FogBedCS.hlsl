@@ -8,7 +8,11 @@
 
 Texture2D<float4> GroundTiles : register(t0);  // x top height, y flags, z lower height, w flags
 Texture2D<float2> LandMap : register(t1);
-RWTexture2DArray<float4> Bed : register(u0);  // Per level: x height, y fog source share, z kind
+RWTexture2DArray<float4> Bed : register(u0);        // Per level: x height, y fog source share, z kind
+RWTexture2DArray<float2> DrawFloor : register(u1);  // Per level, for the draw: x the mean floor, y the share that carries fog
+
+/** DrawFloor where a level has no floor. */
+static const float NO_FLOOR = -1.0e7;
 
 bool TileValid(int2 texel)
 {
@@ -57,6 +61,9 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 	float lower = -1e30;
 	uint lowerFlags = 0;
 	float lowerCount = 0.0, lowerForming = 0.0, lowerWater = 0.0;
+	// The draw's floors: each level's mean over its texels (the top's: those within a level of it), and their share that
+	// carries fog (not rock, steep or water)
+	float topSum = 0.0, topCount = 0.0, topCarries = 0.0, lowerSum = 0.0, lowerCarries = 0.0;
 	[loop] for (int y2 = t0.y; y2 <= t1.y; y2++)
 	{
 		[loop] for (int x2 = t0.x; x2 <= t1.x; x2++)
@@ -66,6 +73,11 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 			const float4 g = GroundTiles.Load(int3(int2(x2, y2) & (TILE_SLOTS * 128 - 1), 0));
 			if (g.x < -1e6)
 				continue;
+			if (g.x > top - LEVEL_STEP) {
+				topSum += g.x;
+				topCount += 1.0;
+				topCarries += (uint(g.y) & (TILE_ROCK | TILE_STEEP | TILE_WATER)) ? 0.0 : 1.0;
+			}
 			// This texel's floor under the cell's top: its own lower level, or its top a level down
 			const bool own = g.z > -1e6;
 			const float floorHeight = own ? g.z : g.x;
@@ -73,6 +85,8 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 			if (floorHeight > top - LEVEL_STEP)
 				continue;
 			lowerCount += 1.0;
+			lowerSum += floorHeight;
+			lowerCarries += (floorFlags & (TILE_ROCK | TILE_STEEP | TILE_WATER)) ? 0.0 : 1.0;
 			lowerForming += (floorFlags & TILE_MAY_FORM) ? 1.0 : 0.0;
 			lowerWater += (floorFlags & TILE_WATER) ? 1.0 : 0.0;
 			if (floorHeight > lower) {
@@ -83,13 +97,18 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 	}
 
 	float4 topBed;
-	if (known > 0.0)
+	float2 topFloor;
+	if (known > 0.0) {
 		topBed = MakeBed(top, topFlags, known, forming, water);
-	else {
+		topFloor = float2(topSum / max(topCount, 1.0), topCarries / max(topCount, 1.0));
+	} else {
 		float landForming, landWater;
 		const float land = HasLand != 0 ? LandHeight(LandMap, LandCell, (float2(cell) + 0.5) * CellSize, landForming, landWater) : LAND_NONE;
 		topBed = land > LAND_NONE ? float4(land, landForming, landWater > 0.5 ? KIND_WATER : KIND_GROUND, 0.0) : float4(0.0, 0.0, KIND_CLOSED, 0.0);
+		topFloor = float2(land > LAND_NONE ? land : NO_FLOOR, landForming);
 	}
 	Bed[uint3(id.xy, 0)] = topBed;
 	Bed[uint3(id.xy, 1)] = lowerCount > 0.0 ? MakeBed(lower, lowerFlags, lowerCount, lowerForming, lowerWater) : float4(0.0, 0.0, KIND_CLOSED, 0.0);
+	DrawFloor[uint3(id.xy, 0)] = topFloor;
+	DrawFloor[uint3(id.xy, 1)] = lowerCount > 0.0 ? float2(lowerSum / lowerCount, lowerCarries / lowerCount) : float2(NO_FLOOR, 0.0);
 }
