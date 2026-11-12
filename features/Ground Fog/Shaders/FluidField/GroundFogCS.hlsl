@@ -2,7 +2,7 @@
 // its depth the fog solver's column (FogDepthCS); D195: two of them where a column has two levels (under an overhang, at a
 // ledge's foot), each sample on the level under it. Within the contact map, fog is cut where something stands in it.
 // Fluff: 3D noise carried by the fog's flow and rising slowly breaks the top into clumps; deeper fog billows more, churned
-// fog lifts, and a few wisps stray over the top; past the simulated grid, the far height map with the settled depth. Each
+// fog lifts, and a few wisps stray over the top; past the simulated grid, the loaded landscape with the settled depth. Each
 // half-resolution pixel marches its view ray to the nearest of its four pixels' surfaces, lit by the sun and ambient
 // light, into FogHalf (in-scattered light, transmittance) and FogHalfDistance; the COMPOSITE entry lays that over the scene
 // at full resolution, after opaque lighting and before water and effects.
@@ -11,6 +11,7 @@
 #include "Common/Math.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
+#include "FluidField/LandMap.hlsli"
 
 cbuffer GroundFogCB : register(b0)
 {
@@ -25,20 +26,16 @@ cbuffer GroundFogCB : register(b0)
 	float FarDepth;       // Settled depth past the grid where fog may form (Ground Thickness)
 	int4 SlotTiles[256];  // Ground tiles: per resident slot, xy the tile there, z 1 once valid
 	int2 TileMin;
-	float2 FarScale;  // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
-	float2 FarOffset;
-	float2 FarZ;
-	uint HasFar;
+	int2 LandCell;  // The land map's centre cell (LandMap.hlsli)
+	float LandPad;
 	float HollowGain;    // Settled depth per unit of hollowness (FogInputsCS)
 	float FarPoolDepth;  // Pool Depth, for the settled depth past the grid
 	float ContactCell;   // Contact map: world units a texel, world texel of texel (0, 0), texels a side
 	int2 ContactMin;
 	uint ContactResolution;
 	float FarDistance;  // The composite's reach for the sky, world units
-	int2 LandCell;      // The land map's centre cell (GroundTiles: the loaded landscape, LAND_REACH cells round it)
-	float2 Pad;
-	float2 LodOrigin;  // Unused
-	uint HasLod;       // The landscape depth is in (the distant fog)
+	float2 LodOrigin;   // Unused
+	uint HasLod;        // The landscape depth is in (the distant fog)
 	float LodPad;
 	uint HasSunShadow;  // Volumetric Shadows' shared shadow map is in: sun shadows in the fog
 	uint HasSky;        // Skylighting's probes are in: sky light in the fog
@@ -49,9 +46,8 @@ cbuffer GroundFogCB : register(b0)
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> GroundTiles : register(t1);  // x top height, y flags, z lower height, w flags
 Texture2DArray<float4> Column : register(t2);  // Per level: x depth, yz velocity, w churn; toroidal
-Texture2D<float> FarHeight : register(t3);
-Texture2DArray<float4> Bed : register(t4);  // Per level: x height, z kind (2 closed)
-Texture2D<uint> ContactLow : register(t5);  // Lowest and highest point of what stands over each texel (FogContactCS)
+Texture2DArray<float4> Bed : register(t4);     // Per level: x height, z kind (2 closed)
+Texture2D<uint> ContactLow : register(t5);     // Lowest and highest point of what stands over each texel (FogContactCS)
 Texture2D<uint> ContactHigh : register(t6);
 Texture3D<float> Noise : register(t7);        // Tiling value noise, 8 lattice cells a side: detail
 Texture3D<float> ClumpNoise : register(t10);  // 4 cells: clumps
@@ -185,32 +181,11 @@ float HenyeyGreenstein(float cosTheta, float g)
 	return (1.0 - g2) / (4.0 * Math::PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5));
 }
 
-static const float LAND_TEXEL = 32.0;
-static const int LAND_TEXELS = 1024, LAND_REACH = 2;
-
 /** The middle tier where no tile is resident: the loaded landscape, bilinear, and its share fog may form on (not water). */
 float LandGround(float2 xy, out float forming)
 {
-	forming = 0.0;
-	const int2 cell = int2(floor(xy / 4096.0));
-	if (any(abs(cell - LandCell) > LAND_REACH))
-		return NO_GROUND;
-	const float2 t = xy / LAND_TEXEL - 0.5;
-	const int2 base = int2(floor(t));
-	const float2 f = t - float2(base);
-	float height = 0.0, form = 0.0;
-	[unroll] for (uint k = 0; k < 4; k++)
-	{
-		const int2 offset = int2(k & 1, k >> 1);
-		const float2 g = LandMap.Load(int3((base + offset) & (LAND_TEXELS - 1), 0));
-		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y);
-		if (g.x < -1e6)
-			return NO_GROUND;
-		height += g.x * w;
-		form += ((uint(g.y) & TILE_MAY_FORM) ? 1.0 : 0.0) * w;
-	}
-	forming = form;
-	return height;
+	float water;
+	return LandHeight(LandMap, LandCell, xy, forming, water);
 }
 
 /** A ground texel (top height, flags, lower height, flags), or NO_GROUND where its tile is not resident yet. */
@@ -235,17 +210,12 @@ float2 LevelNearest(float4 g, float reference)
 	return g.z > NO_GROUND && abs(g.z - reference) < abs(g.x - reference) ? g.zw : g.xy;
 }
 
-float FarGround(float2 xy)
-{
-	return HasFar != 0 ? lerp(FarZ.x, FarZ.y, FarHeight.SampleLevel(LinearSampler, xy * FarScale + FarOffset, 0)) : NO_GROUND;
-}
-
 /**
  * Ground under a position at height z: the level under it of the nearest texel, bilinear over the four nearest texels'
  * levels nearest that (those a level away left out: no slope hung across a ledge). forming: their share fog may form on;
  * carries: their share neither rock nor steep (an 8-unit map cannot follow a rock's face: fog drawn on it flickers in
- * and out of the mesh); ceiling: the overhang's underside over the floor under it (very high in the open). The far height
- * map where no tile is resident.
+ * and out of the mesh); ceiling: the overhang's underside over the floor under it (very high in the open). The loaded
+ * landscape where no tile is resident.
  */
 float Ground(float3 position, out float forming, out float carries, out float ceiling)
 {

@@ -2,7 +2,8 @@
 //
 // Runs the real FogSolver and its HLSL on a WARP (software) D3D11 device over made-up ground and checks the layer's rules
 // (fog-v3.md): fog is conserved, a bowl fills level up to Pool Depth, fog spills off a ledge but never climbs onto it,
-// rocks take fog only from higher ground, a push conserves fog, and fog under an overhang lies apart from the fog on it.
+// rocks take fog only from higher ground, a push conserves fog, fog under an overhang lies apart from the fog on it, and
+// where no tile is resident the bed is the loaded landscape.
 //
 // Exit code 0 = every case passed, 1 = a case failed, 2 = setup failure.
 
@@ -363,6 +364,34 @@ int main(int argc, char** argv)
 		for (std::size_t i = 0; i < alone.size(); i++)
 			moved = std::max(moved, std::abs(stirred[i] - alone[i]));
 		pass &= Check("6. a mover on top leaves the fog under it", moved < 0.05f, std::format("most change under it {:.4f}", moved));
+	}
+
+	// 7. Where no tile is resident, the bed is the loaded landscape's (the land map: 32-unit texels, 4,096-unit cells)
+	{
+		Run run(gpu, solver, [&](float, float) { return std::pair{ 0.0f, std::uint32_t{ MAY_FORM } }; });
+		run.ground.slots = {};
+		const auto landHeight = [](float x, float y) { return 300.0f + 0.25f * x - 0.1f * y; };
+		std::vector<float> land(1024 * 1024 * 2);
+		for (int y = 0; y < 1024; y++)
+			for (int x = 0; x < 1024; x++) {
+				land[(static_cast<std::size_t>(y) * 1024 + x) * 2] = landHeight((x + 0.5f) * 32.0f, (y + 0.5f) * 32.0f);
+				land[(static_cast<std::size_t>(y) * 1024 + x) * 2 + 1] = static_cast<float>(MAY_FORM);
+			}
+		const D3D11_TEXTURE2D_DESC desc{ .Width = 1024, .Height = 1024, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32G32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+		const D3D11_SUBRESOURCE_DATA data{ .pSysMem = land.data(), .SysMemPitch = 1024 * 2 * sizeof(float), .SysMemSlicePitch = 0 };
+		winrt::com_ptr<ID3D11Texture2D> landTexture;
+		winrt::com_ptr<ID3D11ShaderResourceView> landSRV;
+		winrt::check_hresult(gpu.device->CreateTexture2D(&desc, &data, landTexture.put()));
+		winrt::check_hresult(gpu.device->CreateShaderResourceView(landTexture.get(), nullptr, landSRV.put()));
+		run.ground.land = landSRV.get();
+		run.Step(Closed(), 1);
+		const auto bed = run.Read(solver.GetBedTexture(), 4, 0);
+		// From the second cell in: the first's bilinear reaches texel -1, which wraps to the map's far side
+		float worst = 0.0f;
+		for (std::uint32_t y = 1; y < N; y++)
+			for (std::uint32_t x = 1; x < N; x++)
+				worst = std::max(worst, std::abs(bed[y * N + x] - landHeight((x + 0.5f) * CELL, (y + 0.5f) * CELL)));
+		pass &= Check("7. no tile: the bed is the land map's", worst < 0.01f, std::format("worst error {:.4f}", worst));
 	}
 
 	std::printf("%s\n", pass ? "All cases passed" : "Some cases FAILED");

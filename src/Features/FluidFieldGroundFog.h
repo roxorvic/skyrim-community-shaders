@@ -11,7 +11,7 @@
  * @brief Ground Fog (D194): a thin heavy fog layer lying on a baked ground round the player, drawn as a volume.
  *
  * The ground comes in three tiers (GroundTiles): mesh tiles near the player, built on a worker and cached on disk, the
- * loaded landscape while they build, and the worldspace's height map far out. The fog flows over it (FogSolver): it forms
+ * loaded landscape while they build, and the landscape's own depth far out. The fog flows over it (FogSolver): it forms
  * where it may, drains downhill, pools in hollows and spills off ledges but never climbs them; D195: on two levels where
  * the ground has two (under overhangs). Moving actors push it; close by, their legs cut it exactly (the contact map). Runs
  * only while this feature is on.
@@ -111,18 +111,14 @@ private:
 		float farDepth;
 		FluidFieldSim::GroundTiles::SlotTile slotTiles[FluidFieldSim::GroundTiles::SLOTS * FluidFieldSim::GroundTiles::SLOTS];
 		int32_t tileMin[2];
-		float farScale[2];
-		float farOffset[2];
-		float farZ[2];
-		uint32_t hasFar;
+		int32_t landCell[2];
+		float landPad;
 		float hollowGain;
 		float farPoolDepth;
 		float contactCell;
 		int32_t contactMin[2];
 		uint32_t contactResolution;
 		float farDistance;
-		int32_t landCell[2];
-		float pad[2];
 		float lodOrigin[2];  ///< Unused
 		uint32_t hasLod;
 		float lodPad;
@@ -131,24 +127,22 @@ private:
 		uint32_t localLights;   ///< Light Limit Fix's lights bound (t35 to t37): the setting, else 0
 		float lightPad;
 	};
-	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 112);
+	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 80);
 
 	/** @brief Matches GroundDebugCB in GroundDebugCS.hlsl. */
 	struct alignas(16) GroundDebugConstants
 	{
 		FluidFieldSim::GroundTiles::SlotTile slotTiles[FluidFieldSim::GroundTiles::SLOTS * FluidFieldSim::GroundTiles::SLOTS];
 		int32_t tileMin[2];
-		float farScale[2];
-		float farOffset[2];
-		float farZ[2];
-		uint32_t hasFar;
+		int32_t landCell[2];
 		uint32_t resolution;
 		float cellSize;
 		float poolDepth;
+		float pad0;
 		int32_t gridMin[2];
 		float pad[2];
 	};
-	static_assert(sizeof(GroundDebugConstants) == 256 * 16 + 64);
+	static_assert(sizeof(GroundDebugConstants) == 256 * 16 + 48);
 
 	FluidFieldSim::GroundTiles ground;
 	FluidFieldSim::FogSolver solver;

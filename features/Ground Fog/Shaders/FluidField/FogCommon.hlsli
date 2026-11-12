@@ -21,10 +21,8 @@ cbuffer FogCB : register(b0)
 	float Pad0;
 	int4 SlotTiles[256];  // Ground tiles: per resident slot, xy the tile there, z 1 once valid
 	int2 TileMin;
-	float2 FarScale;  // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
-	float2 FarOffset;
-	float2 FarZ;
-	uint HasFar;
+	int2 LandCell;  // The land map's centre cell (LandMap.hlsli)
+	uint HasLand;
 	uint MoverCount;
 	uint ContactCount;
 	float ContactCell;  // World units per contact map texel

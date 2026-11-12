@@ -1,32 +1,30 @@
 // Fluid Field ground fog debug view (D194): every surface coloured by what the fog's ground takes it for (D195: the floor
 // under an overhang for surfaces below its top). Green: fog may
 // form; red: rock or log; yellow: steep; cyan: water; grey: a surface under the ground's height (a wall's side); magenta: over it (a surface the map missed); blue: no tile
-// yet (the far height map there, darker past it). Provisional tiles (their area not settled yet) are striped. Brighter: fog
+// yet (the loaded landscape there, darker off it). Provisional tiles (their area not settled yet) are striped. Brighter: fog
 // lying there, white at Pool Depth.
 
 #include "Common/FrameBuffer.hlsli"
 #include "Common/SharedData.hlsli"
+#include "FluidField/LandMap.hlsli"
 
 cbuffer GroundDebugCB : register(b0)
 {
 	int4 SlotTiles[256];  // Per resident slot: xy the tile uploaded there, z 1 once valid
 	int2 TileMin;         // The window's south-west tile
-	float2 FarScale;      // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
-	float2 FarOffset;
-	float2 FarZ;
-	uint HasFar;
-	uint Resolution;  // The fog grid: cells per side, world units a cell, Pool Depth, world cell of logical texel (0, 0)
+	int2 LandCell;        // The land map's centre cell (LandMap.hlsli)
+	uint Resolution;      // The fog grid: cells per side, world units a cell, Pool Depth, world cell of logical texel (0, 0)
 	float CellSize;
 	float PoolDepth;
+	float Pad0;
 	int2 GridMin;
 	float2 Pad;
 };
 
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> GroundTiles : register(t1);  // x top height, y flags (GroundTiles::Flag), z lower height, w flags
-Texture2D<float> FarHeight : register(t2);
+Texture2D<float2> LandMap : register(t2);
 Texture2DArray<float4> Column : register(t3);  // Per level: x fog depth, toroidal
-SamplerState LinearSampler : register(s0);
 RWTexture2D<float4> MainRW : register(u0);
 
 static const float TEXEL = 8.0;
@@ -49,8 +47,9 @@ float3 GroundColour(float3 world, uint2 pixel)
 	// Off the ground: grey under the map's height, magenta over it (a surface the map missed)
 	float3 colour = world.z > g.x + ON_GROUND ? float3(0.85, 0.1, 0.85) : float3(0.45, 0.45, 0.45);
 	if (any(tile < TileMin) || any(tile >= TileMin + SLOTS) || slot.z == 0 || any(slot.xy != tile)) {
-		const float far = lerp(FarZ.x, FarZ.y, FarHeight.SampleLevel(LinearSampler, world.xy * FarScale + FarOffset, 0));
-		colour = HasFar != 0 && abs(world.z - far) < 64.0 ? float3(0.15, 0.3, 1.0) : float3(0.05, 0.05, 0.35);
+		float forming, water;
+		const float land = LandHeight(LandMap, LandCell, world.xy, forming, water);
+		colour = land > LAND_NONE && abs(world.z - land) < 64.0 ? float3(0.15, 0.3, 1.0) : float3(0.05, 0.05, 0.35);
 	} else if (g.x < -1e6)
 		colour = float3(0.15, 0.3, 1.0);
 	else if (flags & ROCK)

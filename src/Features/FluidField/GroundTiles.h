@@ -15,7 +15,6 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -111,10 +110,11 @@ namespace FluidFieldSim
 	};
 
 	/**
-	 * @brief D194: the ground the fog lies on, in three tiers. Near: tiles of 1,024 world units (128² texels of 8 u) built from
-	 * the landscape and GroundMeshes on a worker thread, cached on disk once settled, kept in one toroidal texture round the
-	 * player (height and flags of the top surface and of the floor under an overhang, D195). Far: the worldspace's Terrain Shadows height map. Between, a tile not yet built is unknown
-	 * (consumers fall back to the far map). Main thread: copies inputs, uploads finished tiles.
+	 * @brief D194: the ground the fog lies on, in two tiers (the distant fog uses LandscapeDepth). Near: tiles of 1,024 world
+	 * units (128² texels of 8 u) built from the landscape and GroundMeshes on a worker thread, cached on disk once settled,
+	 * kept in one toroidal texture round the player (height and flags of the top surface and of the floor under an overhang,
+	 * D195). Middle: the loaded landscape at LAND_TEXEL, where a tile is not built yet. Main thread: copies inputs, uploads
+	 * finished tiles.
 	 */
 	class GroundTiles
 	{
@@ -143,13 +143,6 @@ namespace FluidFieldSim
 			int32_t x, y, valid, pad;
 		};
 
-		/** @brief The far tier's mapping: uv = xy * scale + offset; height = lerp(z0, z1, texel). */
-		struct FarMap
-		{
-			float scale[2], offset[2];
-			float z0, z1;
-		};
-
 		GroundTiles() = default;
 		~GroundTiles();
 		GroundTiles(const GroundTiles&) = delete;
@@ -167,8 +160,6 @@ namespace FluidFieldSim
 		const int32_t* GetTileMin() const { return tileMin; }
 		const std::array<SlotTile, SLOTS * SLOTS>& GetSlots() const { return slots; }
 		const std::vector<HeatSource>& GetHeat() const { return meshes.GetHeat(); }
-		/** @brief The far height map, or null (none for this worldspace, or still loading). */
-		ID3D11ShaderResourceView* GetFarSRV() const { return farSRV.get(); }
 		/** @brief The middle tier: the loaded landscape cells round the player at LAND_TEXEL (height, flags), toroidal (world
 		 * texel t in texel t & (LAND_TEXELS - 1)); valid within LAND_REACH cells of GetLandCell(). */
 		ID3D11ShaderResourceView* GetLandSRV() const { return landSRV.get(); }
@@ -176,7 +167,6 @@ namespace FluidFieldSim
 		static constexpr float LAND_TEXEL = 32.0f;
 		static constexpr uint32_t LAND_TEXELS = 1024;
 		static constexpr int32_t LAND_REACH = 2;
-		const FarMap& GetFarMap() const { return farMap; }
 
 		/** @brief Tiles waiting for the worker, and the tiles kept provisional (for the UI). */
 		std::size_t GetQueued() const;
@@ -222,9 +212,8 @@ namespace FluidFieldSim
 		void Run(std::stop_token a_stop);
 		/** @brief Worker: rasterizes one tile's height and flags from its inputs. */
 		static void Build(const Job& a_job, std::vector<float>& o_texels);
-		/** @brief Starts the cache folder and far map for a worldspace. */
-		void EnterWorldspace(ID3D11Device* a_device, const std::string& a_name);
-		using FarResult = std::pair<winrt::com_ptr<ID3D11ShaderResourceView>, FarMap>;
+		/** @brief Starts the cache folder for a worldspace. */
+		void EnterWorldspace(const std::string& a_name);
 
 		GroundMeshes meshes;
 		uint64_t meshVersion = 0;
@@ -246,9 +235,6 @@ namespace FluidFieldSim
 		uint64_t waterSignature = 0;
 
 		std::string worldspace;
-		winrt::com_ptr<ID3D11ShaderResourceView> farSRV;
-		FarMap farMap{};
-		std::future<FarResult> farLoad;
 		double clock = 0.0;                               ///< Seconds of updates
 		std::chrono::steady_clock::time_point enteredAt;  ///< Last Clear: reads run on a bigger budget just after
 

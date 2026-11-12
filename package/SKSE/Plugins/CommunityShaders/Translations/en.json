@@ -1311,7 +1311,7 @@
     "feature.fluid_field_ground_fog.contact_radius": "Contact Radius",
     "feature.fluid_field_ground_fog.contact_radius_tooltip": "How far round you actors' legs cut exact holes in the fog. Farther out they only push it.",
     "feature.fluid_field_ground_fog.debug_ground": "Show Ground Map",
-    "feature.fluid_field_ground_fog.debug_ground_tooltip": "Colours every surface by what the fog takes it for: green ground fog may form on, red rock, yellow too steep, cyan water, grey not ground, blue not built yet (the far height map). Striped: still being built. Brighter: fog lying there.",
+    "feature.fluid_field_ground_fog.debug_ground_tooltip": "Colours every surface by what the fog takes it for: green ground fog may form on, red rock, yellow too steep, cyan water, grey not ground, blue not built yet (the loaded landscape). Striped: still being built. Brighter: fog lying there.",
     "feature.fluid_field_ground_fog.description": "Low fog lying on the ground around the player, in banks and clearings.",
     "feature.fluid_field_ground_fog.distant_reach": "Distant Fog Reach",
     "feature.fluid_field_ground_fog.distant_reach_now": "Distant fog reaches %.0f m",

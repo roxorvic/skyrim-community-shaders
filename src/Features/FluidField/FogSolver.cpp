@@ -139,12 +139,9 @@ namespace FluidFieldSim
 		std::memcpy(c.slots, ground.slots.data(), sizeof(c.slots));
 		c.tileMin[0] = ground.tileMin[0];
 		c.tileMin[1] = ground.tileMin[1];
-		for (int i = 0; i < 2; i++) {
-			c.farScale[i] = ground.farScale[i];
-			c.farOffset[i] = ground.farOffset[i];
-			c.farZ[i] = ground.farZ[i];
-		}
-		c.hasFar = ground.farHeight ? 1 : 0;
+		c.landCell[0] = ground.landCell[0];
+		c.landCell[1] = ground.landCell[1];
+		c.hasLand = ground.land ? 1 : 0;
 		c.moverCount = pusherCount;
 		c.contactCount = contactCount;
 		c.contactCell = CONTACT_CELL;
@@ -184,7 +181,7 @@ namespace FluidFieldSim
 	{
 		ID3D11SamplerState* s = sampler.get();
 		context->CSSetSamplers(0, 1, &s);
-		ID3D11ShaderResourceView* srvs[] = { ground.tiles, ground.farHeight };
+		ID3D11ShaderResourceView* srvs[] = { ground.tiles, ground.land };
 		ID3D11UnorderedAccessView* uavs[] = { bed.uav.get() };
 		Dispatch(context, bedCS.get(), srvs, uavs, 0, 1);
 	}

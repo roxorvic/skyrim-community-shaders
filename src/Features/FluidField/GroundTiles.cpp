@@ -1,10 +1,6 @@
 #include "GroundTiles.h"
 
-#include "Features/TerrainShadows.h"
-#include "Globals.h"
 #include "Utils/FileSystem.h"
-
-#include <DirectXTex.h>
 
 #include <algorithm>
 #include <array>
@@ -129,7 +125,7 @@ namespace FluidFieldSim
 			return (a_b[0] - a_a[0]) * (a_c[1] - a_a[1]) - (a_b[1] - a_a[1]) * (a_c[0] - a_a[0]);
 		}
 
-		/** @brief The worldspace whose land the current one uses (Terrain Shadows keys its height maps by it). */
+		/** @brief The worldspace whose land the current one uses. */
 		RE::TESWorldSpace* GetLandWorldspace()
 		{
 			auto* tes = RE::TES::GetSingleton();
@@ -402,7 +398,6 @@ namespace FluidFieldSim
 		srv = nullptr;
 		landTexture = nullptr;
 		landSRV = nullptr;
-		farSRV = nullptr;
 		worldspace.clear();
 		cached.clear();
 	}
@@ -474,42 +469,14 @@ namespace FluidFieldSim
 		return static_cast<uint32_t>(std::ranges::count_if(state, [](const Slot& a_slot) { return a_slot.built && !a_slot.final; }));
 	}
 
-	void GroundTiles::EnterWorldspace(ID3D11Device* a_device, const std::string& a_name)
+	void GroundTiles::EnterWorldspace(const std::string& a_name)
 	{
 		worldspace = a_name;
 		cached.clear();
-		farSRV = nullptr;
 		{
 			std::scoped_lock lock(mutex);
 			workerCacheDir = Util::PathHelpers::GetCommunityShaderPath() / "FogGround" / a_name / std::format("{:016x}", LoadOrderHash());
 		}
-		// The far tier: Terrain Shadows' height map for this worldspace, loaded off the render thread
-		const auto& heightmaps = globals::features::terrainShadows.heightmaps;
-		const auto it = heightmaps.find(a_name);
-		if (it == heightmaps.end()) {
-			logger::info("[Fluid Field] No height map for {}: the fog's far ground is the loaded landscape only", a_name);
-			return;
-		}
-		const auto metadata = it->second;
-		farLoad = std::async(std::launch::async, [a_device, metadata]() -> FarResult {
-			DirectX::ScratchImage image;
-			const auto path = std::filesystem::path(metadata.dir) / metadata.filename;
-			winrt::com_ptr<ID3D11Resource> resource;
-			FarResult out{};
-			if (FAILED(DirectX::LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image)) ||
-				FAILED(DirectX::CreateTexture(a_device, image.GetImages(), image.GetImageCount(), image.GetMetadata(), resource.put())) ||
-				FAILED(a_device->CreateShaderResourceView(resource.get(), nullptr, out.first.put()))) {
-				logger::warn("[Fluid Field] Could not load the height map {}", path.string());
-				return {};
-			}
-			const auto& info = image.GetMetadata();
-			const float sizeX = metadata.pos1.x - metadata.pos0.x, sizeY = metadata.pos1.y - metadata.pos0.y;
-			// Texel centres on the landscape's vertices, from the south-west corner (as TerrainShadows' offset)
-			out.second = { { 1.0f / sizeX, 1.0f / sizeY },
-				{ -metadata.pos0.x / sizeX + 0.5f / static_cast<float>(info.width), -metadata.pos0.y / sizeY - 0.5f / static_cast<float>(info.height) },
-				metadata.pos0.z, metadata.pos1.z };
-			return out;
-		});
 	}
 
 	void GroundTiles::Update(ID3D11Device* a_device, ID3D11DeviceContext* a_context, const LandscapeCache& a_landscape, const WaterSurfaces& a_water, float a_playerX, float a_playerY, float a_deltaTime)
@@ -521,14 +488,8 @@ namespace FluidFieldSim
 			return;
 		if (name != worldspace) {
 			Clear();
-			EnterWorldspace(a_device, name);
+			EnterWorldspace(name);
 		}
-		if (farLoad.valid() && farLoad.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-			std::tie(farSRV, farMap) = farLoad.get();
-			if (farSRV)
-				logger::info("[Fluid Field] Fog far ground: the {} height map", worldspace);
-		}
-
 		if (!worker.joinable())
 			worker = std::jthread([this](std::stop_token a_stop) { Run(a_stop); });
 		if (!texture) {

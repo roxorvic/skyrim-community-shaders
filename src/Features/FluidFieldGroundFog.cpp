@@ -78,7 +78,7 @@ void FluidFieldGroundFog::DrawSettings()
 		bool debugView = settings.DebugView == 1;
 		if (ImGui::Checkbox(T(TKEY("debug_ground"), "Show Ground Map"), &debugView))
 			settings.DebugView = debugView ? 1 : 0;
-		tooltip(T(TKEY("debug_ground_tooltip"), "Colours every surface by what the fog takes it for: green ground fog may form on, red rock, yellow too steep, cyan water, grey not ground, blue not built yet (the far height map). Striped: still being built. Brighter: fog lying there."));
+		tooltip(T(TKEY("debug_ground_tooltip"), "Colours every surface by what the fog takes it for: green ground fog may form on, red rock, yellow too steep, cyan water, grey not ground, blue not built yet (the loaded landscape). Striped: still being built. Brighter: fog lying there."));
 		if (ImGui::Button(T(TKEY("reset_field"), "Reset Field")))
 			queuedReset = true;
 		ImGui::PopID();
@@ -196,17 +196,12 @@ FluidFieldSim::FogGround FluidFieldGroundFog::MakeGround() const
 {
 	FluidFieldSim::FogGround out;
 	out.tiles = ground.GetSRV();
-	out.farHeight = ground.GetFarSRV();
+	out.land = ground.GetLandSRV();
 	out.tileMin[0] = ground.GetTileMin()[0];
 	out.tileMin[1] = ground.GetTileMin()[1];
 	std::memcpy(out.slots.data(), ground.GetSlots().data(), sizeof(out.slots));
-	const auto& farMap = ground.GetFarMap();
-	for (int i = 0; i < 2; i++) {
-		out.farScale[i] = farMap.scale[i];
-		out.farOffset[i] = farMap.offset[i];
-	}
-	out.farZ[0] = farMap.z0;
-	out.farZ[1] = farMap.z1;
+	out.landCell[0] = ground.GetLandCell()[0];
+	out.landCell[1] = ground.GetLandCell()[1];
 	return out;
 }
 
@@ -466,7 +461,6 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		}
 	}
 
-	const auto& farMap = ground.GetFarMap();
 	// The lighting CS already has, where those features are in (Volumetric Shadows, Skylighting, Light Limit Fix)
 	auto& volumetricShadows = globals::features::volumetricShadows;
 	auto& skylighting = globals::features::skylighting;
@@ -494,18 +488,14 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.farDepth = settings.GroundThickness,
 		.slotTiles = {},
 		.tileMin = { ground.GetTileMin()[0], ground.GetTileMin()[1] },
-		.farScale = { farMap.scale[0], farMap.scale[1] },
-		.farOffset = { farMap.offset[0], farMap.offset[1] },
-		.farZ = { farMap.z0, farMap.z1 },
-		.hasFar = ground.GetFarSRV() ? 1u : 0u,
+		.landCell = { ground.GetLandCell()[0], ground.GetLandCell()[1] },
+		.landPad = 0.0f,
 		.hollowGain = MakeLayer().hollowGain,
 		.farPoolDepth = std::max(settings.PoolDepth, settings.GroundThickness),
 		.contactCell = FluidFieldSim::FogSolver::CONTACT_CELL,
 		.contactMin = { contactMin[0], contactMin[1] },
 		.contactResolution = FluidFieldSim::FogSolver::CONTACT_RESOLUTION,
 		.farDistance = FluidFieldSim::LandscapeDepth::GetSRV() ? std::max(DistantDistance(), 12000.0f) : FAR_DISTANCE,
-		.landCell = { ground.GetLandCell()[0], ground.GetLandCell()[1] },
-		.pad = {},
 		.lodOrigin = {},
 		.hasLod = FluidFieldSim::LandscapeDepth::GetSRV() ? 1u : 0u,
 		.lodPad = 0.0f,
@@ -538,7 +528,7 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	ID3D11Buffer* cb = groundFogCB.get();
 	context->CSSetConstantBuffers(0, 1, &cb);
 	BindFrameBuffers(context);
-	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetFarSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRVs[0].get(), nullptr, nullptr, noiseSRVs[1].get(), noiseSRVs[2].get(), ground.GetLandSRV(), FluidFieldSim::LandscapeDepth::GetSRV() };
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), nullptr, solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRVs[0].get(), nullptr, nullptr, noiseSRVs[1].get(), noiseSRVs[2].get(), ground.GetLandSRV(), FluidFieldSim::LandscapeDepth::GetSRV() };
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get() };
 	context->CSSetSamplers(0, 2, samplers);
@@ -581,14 +571,8 @@ void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11Sha
 	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
 	constants.tileMin[0] = ground.GetTileMin()[0];
 	constants.tileMin[1] = ground.GetTileMin()[1];
-	const auto& farMap = ground.GetFarMap();
-	constants.farScale[0] = farMap.scale[0];
-	constants.farScale[1] = farMap.scale[1];
-	constants.farOffset[0] = farMap.offset[0];
-	constants.farOffset[1] = farMap.offset[1];
-	constants.farZ[0] = farMap.z0;
-	constants.farZ[1] = farMap.z1;
-	constants.hasFar = ground.GetFarSRV() ? 1 : 0;
+	constants.landCell[0] = ground.GetLandCell()[0];
+	constants.landCell[1] = ground.GetLandCell()[1];
 	constants.resolution = GRID_RESOLUTION;
 	constants.cellSize = cellSize;
 	constants.poolDepth = std::max(settings.PoolDepth, settings.GroundThickness);
@@ -601,10 +585,8 @@ void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11Sha
 	ID3D11Buffer* cb = groundDebugCB.get();
 	context->CSSetConstantBuffers(0, 1, &cb);
 	BindFrameBuffers(context);
-	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), ground.GetFarSRV(), solver.GetColumnSRV() };
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), ground.GetLandSRV(), solver.GetColumnSRV() };
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
-	ID3D11SamplerState* sampler = linearSampler.get();
-	context->CSSetSamplers(0, 1, &sampler);
 	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
 	context->CSSetShader(groundDebugCS.get(), nullptr, 0);
 	const auto dispatch = Util::GetScreenDispatchCount(true);

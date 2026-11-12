@@ -1,13 +1,13 @@
 // Ground fog v3 (D194): each cell's two beds from the ground tiles' 8-unit texels under it. The top: their highest surface
 // (a step crossing the cell stays sharp), rock if that is a rock's top. D195, the lower level: the highest of their floors
 // under overhangs and of their tops a level below the cell's top (a ledge's foot), closed where there is none. Each with
-// the share of it fog may form on. Past the tiles, the far height map (top only).
+// the share of it fog may form on. Where no tile is resident, the loaded landscape (top only).
 
 #include "FluidField/FogCommon.hlsli"
+#include "FluidField/LandMap.hlsli"
 
 Texture2D<float4> GroundTiles : register(t0);  // x top height, y flags, z lower height, w flags
-Texture2D<float> FarHeight : register(t1);
-SamplerState LinearSampler : register(s0);
+Texture2D<float2> LandMap : register(t1);
 RWTexture2DArray<float4> Bed : register(u0);  // Per level: x height, y fog source share, z kind
 
 bool TileValid(int2 texel)
@@ -85,11 +85,11 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 	float4 topBed;
 	if (known > 0.0)
 		topBed = MakeBed(top, topFlags, known, forming, water);
-	else if (HasFar != 0) {
-		const float2 centre = (float2(cell) + 0.5) * CellSize;
-		topBed = float4(lerp(FarZ.x, FarZ.y, FarHeight.SampleLevel(LinearSampler, centre * FarScale + FarOffset, 0)), 1.0, KIND_GROUND, 0.0);
-	} else
-		topBed = float4(0.0, 0.0, KIND_CLOSED, 0.0);
+	else {
+		float landForming, landWater;
+		const float land = HasLand != 0 ? LandHeight(LandMap, LandCell, (float2(cell) + 0.5) * CellSize, landForming, landWater) : LAND_NONE;
+		topBed = land > LAND_NONE ? float4(land, landForming, landWater > 0.5 ? KIND_WATER : KIND_GROUND, 0.0) : float4(0.0, 0.0, KIND_CLOSED, 0.0);
+	}
 	Bed[uint3(id.xy, 0)] = topBed;
 	Bed[uint3(id.xy, 1)] = lowerCount > 0.0 ? MakeBed(lower, lowerFlags, lowerCount, lowerForming, lowerWater) : float4(0.0, 0.0, KIND_CLOSED, 0.0);
 }

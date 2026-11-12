@@ -13,14 +13,14 @@
 
 namespace FluidFieldSim
 {
-	/** @brief The fog's ground: GroundTiles' resident texture and far height map, as FogCB takes them. */
+	/** @brief The fog's ground: GroundTiles' resident texture and land map, as FogCB takes them. */
 	struct FogGround
 	{
-		ID3D11ShaderResourceView* tiles = nullptr;      ///< Top height, flags, lower height, flags per 8-unit texel, toroidal
-		ID3D11ShaderResourceView* farHeight = nullptr;  ///< May be null
+		ID3D11ShaderResourceView* tiles = nullptr;  ///< Top height, flags, lower height, flags per 8-unit texel, toroidal
+		ID3D11ShaderResourceView* land = nullptr;   ///< GroundTiles::GetLandSRV, where no tile is resident; may be null
 		std::int32_t tileMin[2]{};
 		std::array<std::int32_t, 256 * 4> slots{};  ///< Per resident slot (16 a side): tile x, y, valid, pad
-		float farScale[2]{}, farOffset[2]{}, farZ[2]{};
+		std::int32_t landCell[2]{};                 ///< GroundTiles::GetLandCell
 	};
 
 	/** @brief The layer's look and behaviour for a step. */
@@ -105,6 +105,7 @@ namespace FluidFieldSim
 		ID3D11ShaderResourceView* GetContactLowSRV() const { return contactLow.srv.get(); }
 		ID3D11ShaderResourceView* GetContactHighSRV() const { return contactHigh.srv.get(); }
 		ID3D11Texture2D* GetDepthTexture() const { return depth.texture.get(); }
+		ID3D11Texture2D* GetBedTexture() const { return bed.texture.get(); }  ///< For tests/FluidField
 
 	private:
 		struct Layer
@@ -128,8 +129,8 @@ namespace FluidFieldSim
 			float gravity, groundThickness, poolDepth, sourceRate, evaporateRate, fluxDamping, confinement, hollowGain, pad0;
 			std::int32_t slots[256 * 4];
 			std::int32_t tileMin[2];
-			float farScale[2], farOffset[2], farZ[2];
-			std::uint32_t hasFar, moverCount, contactCount;
+			std::int32_t landCell[2];
+			std::uint32_t hasLand, moverCount, contactCount;
 			float contactCell;
 			std::int32_t contactMin[2];
 			std::uint32_t contactResolution;
@@ -139,7 +140,7 @@ namespace FluidFieldSim
 			float eye[3];
 			std::uint32_t hasOcclusion;
 		};
-		static_assert(sizeof(Constants) == 1248 + 192 * 16);
+		static_assert(sizeof(Constants) == 1232 + 192 * 16);
 
 		static Layer CreateLayer(ID3D11Device* device, std::uint32_t resolution, std::uint32_t slices, DXGI_FORMAT format, const NameFn& name, const char* label);
 		static Buffer CreateMoverBuffer(ID3D11Device* device, const NameFn& name, const char* label);
