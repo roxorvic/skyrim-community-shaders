@@ -425,6 +425,40 @@ nearest-of-four depth the march takes for each half-resolution pixel; and the wi
 - No fog spilling over near surfaces' edges (the reason for the nearest-of-four depth).
 - Draw time measured before and after.
 
+### 4c. Stirred fog keeps its surroundings' shading (added 2026-11-12)
+
+**Problem:** fog lights up a little where an actor moves through it, even in shade (Victor's shot SS 2537, 16:30
+clear, at `FluidField_FogBattle`). Not the sun: two of the draw's shading terms follow the stirred fog. Lifted fog and
+wisps sit high in the layer, which is lit up to about 40% brighter than its bottom (`TOP_LIGHT` against `BOTTOM_LIGHT`);
+and the self-shadow counts the fog over a point, which a wake thins and lifted wisps rise above.
+
+**Do (Victor's choice of fix, option A):** the self-shadow and the bottom-to-top light follow the undisturbed fog round
+the stir (its settled depth), not the stirred depth, so a wake doesn't glow. Explain the exact change before making it.
+
+**Accept:**
+
+- Running through fog in shade: no glow round the actor; the fog stays as dim as the fog round it (Victor's check).
+- Sunlit fog and still fog look as before (side-by-side shots).
+- Draw time measured.
+
+### 4d. Actor shadows in the fog (added 2026-11-12)
+
+**Problem:** since item 3, the sun's shadow in the fog is per 16-unit cell, so an actor's shadow (30–50 units wide)
+shows at best as a blocky smudge. Unknown: whether Volumetric Shadows' shadow map holds actors at all (test swap,
+2026-11-12: the fog coloured by the per-sample sun visibility).
+
+**Do:**
+
+- **If the shadow map holds actors:** within about the contact radius of the camera, the march's samples read the
+  shadow map themselves again (as before item 3); past it, the per-cell light.
+- **If it doesn't:** explain to Victor what it would take (likely our own shadow from the actors' capsules, which the
+  contact map already has) and let him decide.
+
+**Accept:**
+
+- The player's and nearby actors' shadows read in sunlit fog, moving with them (Victor's check at 16:30 clear).
+- Draw time measured before and after.
+
 ### 5. Ambient drift from a texture (sim optimisation 6)
 
 **Problem:** `FogInputsCS`' `AmbientDrift` evaluates about 64 hash-noise lookups per cell per level per frame.
