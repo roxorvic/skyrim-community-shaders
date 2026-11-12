@@ -139,9 +139,9 @@ namespace
 			winrt::check_hresult(gpu.device->CreateTexture2D(&desc, &data, tiles.put()));
 			winrt::check_hresult(gpu.device->CreateShaderResourceView(tiles.get(), nullptr, tilesSRV.put()));
 			ground.tiles = tilesSRV.get();
-			for (int i = 0; i < 64; i++) {
-				ground.slots[i * 4] = i % 8;
-				ground.slots[i * 4 + 1] = i / 8;
+			for (int i = 0; i < 256; i++) {
+				ground.slots[i * 4] = i % 16;
+				ground.slots[i * 4 + 1] = i / 16;
 				ground.slots[i * 4 + 2] = 1;
 			}
 			solver.Reset();
@@ -199,7 +199,7 @@ namespace
 		FogLayerParams layer;
 		layer.sourceRate = 0.0f;
 		layer.evaporateRate = 0.0f;
-		layer.waterEvaporate = 0.0f;
+		layer.drift = 0.0f;
 		return layer;
 	}
 

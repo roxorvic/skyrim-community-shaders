@@ -27,8 +27,10 @@ static const float ABOVE_FOG = 80.0;
 
 	const float2 lo = min(m.From, m.To) - REACH * r;
 	const float2 hi = max(m.From, m.To) + REACH * r;
-	const int2 cellLo = max(int2(floor(lo / CellSize)), GridMin);
-	const int2 cellHi = min(min(int2(floor(hi / CellSize)), GridMin + int(Resolution) - 1), cellLo + MAX_FOOTPRINT - 1);
+	// Clipped round its middle: an oversized mover still covers where it is
+	const int2 middle = int2(floor((m.From + m.To) * 0.5 / CellSize));
+	const int2 cellLo = max(max(int2(floor(lo / CellSize)), GridMin), middle - MAX_FOOTPRINT / 2);
+	const int2 cellHi = min(min(int2(floor(hi / CellSize)), GridMin + int(Resolution) - 1), middle + MAX_FOOTPRINT / 2 - 1);
 
 	const float speed = length(m.Velocity);
 	const float2 heading = speed > 0.0 ? m.Velocity / speed : 0.0;

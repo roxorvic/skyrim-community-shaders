@@ -10,6 +10,9 @@ Texture2DArray<float> DepthIn : register(t1);
 Texture2DArray<float4> FluxIn : register(t2);
 RWTexture2DArray<float4> Flux : register(u0);
 
+/** Seconds of wind speed taken as surface tilt: at 80 units a second, 16 units a cell (climbs about 15 degrees). */
+static const float WIND_HEAD = 0.2;
+
 [numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
 	if (any(id.xy >= Resolution))
 		return;
@@ -33,7 +36,8 @@ RWTexture2DArray<float4> Flux : register(u0);
 			const uint3 there = uint3(TexelOf(cell + DIRECTIONS[d]), target);
 			const float4 otherBed = Bed[there];
 			open = !(otherBed.z == KIND_ROCK && (bed.z == KIND_ROCK ? bed.x < otherBed.x : bed.x <= otherBed.x));
-			fall = surface - otherBed.x - DepthIn[there];
+			// The weather's wind as pressure: as if the fog's surface tilted downwind, so it climbs windward slopes, slips off ridges
+			fall = surface - otherBed.x - DepthIn[there] + dot(float2(WindX, WindY), float2(DIRECTIONS[d])) * WIND_HEAD;
 		}
 		outflow[d] = open ? max(outflow[d] + DeltaTime * Gravity * fall / CellSize, 0.0) : 0.0;
 	}

@@ -1,15 +1,21 @@
 // Ground fog v3 (D194), pass 1, per level: cells new to the grid (a scroll, a reset) start from the settled field; fog
-// forms toward Ground Thickness where it may, evaporates over Pool Depth and over water; movers push it (as flux) and cut
-// it; vorticity confinement keeps swirls alive.
+// forms toward Ground Thickness where it may (less on slopes), evaporates over Pool Depth;
+// movers and the ambient drift push it (as flux; the wind pushes in FogFluxCS) and movers cut it; rain strikes the top level, denting it here and
+// there (the flow fills the dents back in); vorticity confinement keeps swirls alive.
 
 #define FOG_BEDS t0
 #include "FluidField/FogCommon.hlsli"
 
 Texture2DArray<float2> Velocity : register(t1);  // Last step's
 Texture2DArray<float4> FluxIn : register(t2);
+Texture2D<float> PrecipOcclusion : register(t3);  // Depth from above; HasOcclusion 0: none
+SamplerState LinearSampler : register(s0);
 RWTexture2DArray<float> Depth : register(u0);
 RWTexture2DArray<float4> Flux : register(u1);  // Ping-pong: typed loads of RGBA16F are optional on D3D11
 RWTexture2DArray<int> Force : register(u2);    // FogSplatCS's; cleared here once read
+
+/** A slope's share of the fog forming on flats. */
+static const float SLOPE_SOURCE = 0.35;
 
 /** Settled depth: Ground Thickness where fog may form, deeper in hollows (ground lower than round it), up to Pool Depth. */
 float Settled(int2 cell, uint level, float4 bed)
@@ -37,6 +43,63 @@ float Settled(int2 cell, uint level, float4 bed)
 	}
 	const float hollow = count > 0.0 ? max(sum / count - bed.x, 0.0) : 0.0;
 	return min(PoolDepth, GroundThickness * bed.y + hollow * HollowGain);
+}
+
+/** Whether rain reaches a point: the precipitation occlusion map sees it from above (as Skylighting reads it). */
+bool Open(int2 cell, float z)
+{
+	if (HasOcclusion == 0)
+		return true;
+	float3 position = mul(OcclusionViewProj, float4(float3((float2(cell) + 0.5) * CellSize, z) - Eye, 1.0)).xyz;
+	position.y = -position.y;
+	const float2 uv = position.xy * 0.5 + 0.5;
+	return any(uv <= 0.0) || any(uv >= 1.0) || position.z <= PrecipOcclusion.SampleLevel(LinearSampler, uv, 0) + 0.001;
+}
+
+/** Smooth value noise over a lattice, 0 to 1 (the ambient drift's stream function). */
+float StreamNoise(float3 p)
+{
+	const float3 i = floor(p), f = p - i;
+	const float3 u = f * f * (3.0 - 2.0 * f);
+	float corners[8];
+	[unroll] for (uint k = 0; k < 8; k++)
+	{
+		const float3 c = i + float3(k & 1, (k >> 1) & 1, k >> 2);
+		uint h = asuint(int(c.x)) * 374761393u + asuint(int(c.y)) * 668265263u + asuint(int(c.z)) * 2147483647u;
+		h = (h ^ (h >> 13)) * 1274126177u;
+		corners[k] = float((h ^ (h >> 16)) & 0xFFFF) / 65535.0;
+	}
+	const float x0 = lerp(lerp(corners[0], corners[1], u.x), lerp(corners[2], corners[3], u.x), u.y);
+	const float x1 = lerp(lerp(corners[4], corners[5], u.x), lerp(corners[6], corners[7], u.x), u.y);
+	return lerp(x0, x1, u.z);
+}
+
+/** The curl of slowly changing noise at a cell, over eddies SPAN units across. */
+float2 Eddies(int2 cell, float span, float period)
+{
+	static const float STEP = 0.05;
+	const float3 p = float3((float2(cell) + 0.5) * CellSize / span, Time / period + span);
+	const float dx = StreamNoise(p + float3(STEP, 0.0, 0.0)) - StreamNoise(p - float3(STEP, 0.0, 0.0));
+	const float dy = StreamNoise(p + float3(0.0, STEP, 0.0)) - StreamNoise(p - float3(0.0, STEP, 0.0));
+	return float2(dy, -dx) / (2.0 * STEP);
+}
+
+/** The ambient drift at a cell: large slow eddies and smaller quicker ones, so it swirls without piling fog up anywhere. */
+float2 AmbientDrift(int2 cell)
+{
+	return (Eddies(cell, 600.0, 40.0) + 0.6 * Eddies(cell, 200.0, 15.0)) * Drift;
+}
+
+/** 1 on flat ground, SLOPE_SOURCE on a slope steeper than about 20 degrees: fog forms most on flats; slopes keep a thin layer
+ * that creeps down. */
+float Flatness(int2 cell, uint level, float floorHeight)
+{
+	const int2 last = GridMin + int(Resolution) - 1;
+	const float e = Bed[uint3(TexelOf(min(cell + int2(1, 0), last)), level)].x, w = Bed[uint3(TexelOf(max(cell - int2(1, 0), GridMin)), level)].x;
+	const float n = Bed[uint3(TexelOf(min(cell + int2(0, 1), last)), level)].x, s = Bed[uint3(TexelOf(max(cell - int2(0, 1), GridMin)), level)].x;
+	// A neighbour a level away (a ledge, a closed level) is no slope
+	const float2 rise = float2(abs(e - w) < 2.0 * LEVEL_STEP ? e - w : 0.0, abs(n - s) < 2.0 * LEVEL_STEP ? n - s : 0.0) / (2.0 * CellSize);
+	return lerp(1.0, SLOPE_SOURCE, smoothstep(0.15, 0.35, length(rise)));
 }
 
 float Curl(int2 cell, uint level)
@@ -69,19 +132,26 @@ float Curl(int2 cell, uint level)
 		return;
 	}
 	float depth = Depth[id];
-	if (bed.z == KIND_WATER)
-		depth -= depth * saturate(WaterEvaporate * DeltaTime);
-	else {
+	// Over water fog forms none and is not drawn (for now), but it is no sink: shores do not drain into lakes and vanish
+	{
 		if (bed.z == KIND_GROUND)
-			depth += max(GroundThickness - depth, 0.0) * saturate(SourceRate * bed.y * DeltaTime);
+			depth += max(GroundThickness - depth, 0.0) * saturate(SourceRate * bed.y * Flatness(cell, level, bed.x) * DeltaTime);
 		depth -= max(depth - PoolDepth, 0.0) * saturate(EvaporateRate * DeltaTime);
 	}
 	depth *= 1.0 - cut;
+	// Rain: each tick, a share of the top level's cells is struck (as CS's puddle ripples, from intensity and time)
+	if (Rain > 0.0 && level == 0 && Open(cell, bed.x + depth)) {
+		static const float TICKS = 20.0, STRUCK = 0.006, DENT = 0.35;
+		uint h = asuint(cell.x) * 374761393u + asuint(cell.y) * 668265263u + uint(Time * TICKS) * 2246822519u;
+		h = (h ^ (h >> 13)) * 1274126177u;
+		if (float((h ^ (h >> 16)) & 0xFFFF) / 65535.0 < Rain * STRUCK)
+			depth *= 1.0 - DENT;
+	}
 	Depth[id] = max(depth, 0.0);
 
 	// Flux is depth per second across a face: a flow of v carries depth * v / CellSize
 	float4 flux = FluxIn[id];
-	float2 drive = push;
+	float2 drive = push + (Drift > 0.0 ? AmbientDrift(cell) : 0.0);
 	if (Confinement > 0.0 && depth > 0.01) {
 		// Vorticity confinement: a push along the swirl, toward stronger curl
 		const float curl = Curl(cell, level);

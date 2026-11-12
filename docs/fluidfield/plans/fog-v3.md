@@ -23,6 +23,9 @@ fog only flows from a higher fog surface to a lower one: ledges, pooling and dra
     - rocks, logs, trees, stumps and mountains are rock/log;
     - everything else goes by facing: up within 300 u of the landscape is ground, except `Landscape\` meshes which count at
       any height; steep is flagged.
+- **Solid hollows:** boats, ships, carts, wagons, furniture, coffins and troughs count as rock: fog forms inside a boat
+  otherwise (Riverwood, 2026-11-11). Tents stay ground. Add a model family here with the spot that showed it.
+- **Fires** (campfires, fire pits, fireplaces, braziers, forges, smelters, hearths, fire effects) clear the fog round them.
 - **Overhangs (D195):** two levels per column: the top surface and, under an overhang, the floor below it (height and
   flags for each).
 
@@ -39,7 +42,15 @@ fog only flows from a higher fog surface to a lower one: ledges, pooling and dra
   tiles; nothing is rasterised.
 - Where a tile isn't ready, it's filled from the landscape (tier 2) at once, and replaced when the tile arrives.
 
-**Far ground:**
+**Far ground (agreed deviation, 2026-11-12):** the landscape's own depth (`LandscapeDepth`): during the depth pre-pass every
+landscape pass (LOD landscape included) is drawn once more into a depth target of its own, the way Terrain Blending does
+(hooks chained, no CS core change). The distant fog is one lookup per pixel: a layer on the surface where the scene's depth is
+the landscape's (trees, rocks and buildings stand in front; water lies over its bed), reaching Distant Fog Reach (default
+90%) of the drawn landscape's reach. Replaced a first try the same night that rasterized the LOD meshes into a height map
+(its heights did not match the terrain drawn). Replaces the Terrain Shadows height map below: decoded on 2026-11-11 it is quantized in ~2,056 u steps, too coarse
+for a 20 u layer. The loaded-landscape middle tier (below) was built late, the same day.
+
+**Far ground (as first planned):**
 
 - The Terrain Shadows height map for the worldspace (`features/Terrain Shadows - Heightmaps`). Its filename encodes the
   extents; reuse `TerrainShadows::HeightMapMetadata` and its loader. Load it ourselves if Terrain Shadows is off.

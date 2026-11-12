@@ -1,12 +1,15 @@
 #include "FluidFieldGroundFog.h"
 
 #include "../I18n/I18n.h"
+#include "Features/WetnessEffects.h"
 #include "FluidField/Field.h"
 #include "Menu.h"
 #include "Profiler.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
+
+#include <numbers>
 
 #define I18N_KEY_PREFIX "feature.fluid_field_ground_fog."
 
@@ -21,6 +24,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FogDetail,
 	ContactRadius,
 	Stir,
+	DistantReach,
 	DebugView)
 
 void FluidFieldGroundFog::DrawSettings()
@@ -51,10 +55,16 @@ void FluidFieldGroundFog::DrawSettings()
 	if (ImGui::CollapsingHeader(T(TKEY("quality"), "Quality"))) {
 		ImGui::PushID("QualitySection");
 		static constexpr uint MIN_DETAIL = 0, MAX_DETAIL = 2;
-		ImGui::SliderScalar(T(TKEY("fog_detail"), "Fog Detail"), ImGuiDataType_U32, &settings.FogDetail, &MIN_DETAIL, &MAX_DETAIL, "%u", ImGuiSliderFlags_AlwaysClamp);
-		tooltip(T(TKEY("fog_detail_tooltip"), "0: finest fog, simulated 43 m round you. 1: 58 m. 2: coarsest, 88 m. The cost stays the same; past it the fog lies settled."));
+		ImGui::SliderScalar(T(TKEY("fog_detail"), "Simulation Detail"), ImGuiDataType_U32, &settings.FogDetail, &MIN_DETAIL, &MAX_DETAIL, "%u", ImGuiSliderFlags_AlwaysClamp);
+		tooltip(T(TKEY("fog_detail_tooltip"), "How fine the simulated fog round you is. 0: finest, 43 m round you. 1: 58 m. 2: coarsest, 88 m. The cost stays the same. Past it, the distant (LOD) fog is always drawn."));
 		ImGui::SliderFloat(T(TKEY("contact_radius"), "Contact Radius"), &settings.ContactRadius, 15.0f, 20.0f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
 		tooltip(T(TKEY("contact_radius_tooltip"), "How far round you actors' legs cut exact holes in the fog. Farther out they only push it."));
+		float reach = settings.DistantReach * 100.0f;
+		if (ImGui::SliderFloat(T(TKEY("distant_reach"), "Distant Fog Reach"), &reach, 30.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
+			settings.DistantReach = reach / 100.0f;
+		tooltip(T(TKEY("distant_reach_tooltip"), "How far the distant fog reaches, as a share of the distant terrain's reach. It lies on the distant terrain, not on water."));
+		if (FluidFieldSim::LandscapeDepth::GetReach() > 0.0f)
+			ImGui::Text(T(TKEY("distant_reach_now"), "Distant fog reaches %.0f m"), DistantDistance() / 70.0f);
 		bool debugView = settings.DebugView == 1;
 		if (ImGui::Checkbox(T(TKEY("debug_ground"), "Show Ground Map"), &debugView))
 			settings.DebugView = debugView ? 1 : 0;
@@ -87,6 +97,7 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 	settings.FogDetail = std::min(settings.FogDetail, 2u);
 	settings.ContactRadius = clamp(settings.ContactRadius, 15.0f, 20.0f, defaults.ContactRadius);
 	settings.Stir = clamp(settings.Stir, 0.0f, 3.0f, defaults.Stir);
+	settings.DistantReach = clamp(settings.DistantReach, 0.3f, 1.0f, defaults.DistantReach);
 	settings.DebugView = std::min(settings.DebugView, 1u);
 }
 
@@ -105,6 +116,12 @@ void FluidFieldGroundFog::PostPostLoad()
 	FluidFieldSim::Field::Get().RegisterListeners();
 }
 
+void FluidFieldGroundFog::DataLoaded()
+{
+	FluidFieldSim::AirSources::Install();
+	FluidFieldSim::LandscapeDepth::Install();
+}
+
 void FluidFieldGroundFog::ClearShaderCache()
 {
 	solver.ReleaseShaders();
@@ -115,9 +132,15 @@ void FluidFieldGroundFog::ClearShaderCache()
 	drawFailed = false;
 }
 
+float FluidFieldGroundFog::DistantDistance() const
+{
+	return settings.DistantReach * FluidFieldSim::LandscapeDepth::GetReach();
+}
+
 void FluidFieldGroundFog::Release()
 {
 	ground.Release();
+	FluidFieldSim::LandscapeDepth::SetEnabled(false);
 	solver.ReleaseResources();
 	solver.ReleaseShaders();
 	cellSize = 0.0f;
@@ -128,7 +151,7 @@ void FluidFieldGroundFog::Release()
 	groundFogCB = nullptr;
 	groundDebugCB = nullptr;
 	linearSampler = nullptr;
-	noiseSRV = nullptr;
+	noiseSRVs = {};
 	wrapSampler = nullptr;
 	fogHalf.reset();
 	fogHalfDistance.reset();
@@ -182,6 +205,31 @@ FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 	layer.groundThickness = settings.GroundThickness;
 	layer.poolDepth = std::max(settings.PoolDepth, settings.GroundThickness);
 	layer.sourceRate = 1.0f / settings.EaseIn;
+	// The weather's wind: speed and direction stored as 0-255; direction 0 blows from the north
+	if (const auto* sky = RE::Sky::GetSingleton(); sky && sky->currentWeather) {
+		// Any real wind carries it visibly (square root, from a floor); only a near calm leaves it still
+		const float wind = static_cast<float>(sky->currentWeather->data.windSpeed) / 255.0f;
+		const float speed = wind < CALM_WIND ? 0.0f : std::lerp(MIN_WIND_DRIFT, MAX_WIND_DRIFT, std::sqrt(wind));
+		const float heading = static_cast<float>(sky->currentWeather->data.windDirection) / 256.0f * 2.0f * std::numbers::pi_v<float>;
+		layer.wind[0] = -std::sin(heading) * speed;
+		layer.wind[1] = -std::cos(heading) * speed;
+	}
+	layer.time = fogTime;
+	// How hard it rains, from Wetness Effects (its puddle ripples read the same)
+	if (globals::features::wetnessEffects.loaded) {
+		const auto wetness = globals::features::wetnessEffects.GetCommonBufferData();
+		layer.rain = std::clamp(wetness.Raining, 0.0f, 1.0f);
+		// Rain only where the sky is open: the precipitation occlusion map, as Wetness Effects and Skylighting read it
+		auto& occlusion = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
+		if (layer.rain > 0.0f && occlusion.depthSRV) {
+			layer.occlusion = occlusion.depthSRV;
+			std::memcpy(layer.occlusionViewProj, &wetness.OcclusionViewProj, sizeof(layer.occlusionViewProj));
+			const auto eye = Util::GetEyePosition();
+			layer.eye[0] = eye.x;
+			layer.eye[1] = eye.y;
+			layer.eye[2] = eye.z;
+		}
+	}
 	return layer;
 }
 
@@ -215,6 +263,7 @@ void FluidFieldGroundFog::Prepass()
 	const auto start = std::chrono::steady_clock::now();
 	globals::profiler->BeginPass("FluidField::Fog Ground");
 	ground.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), playerPos.x, playerPos.y, field.GetDeltaTime());
+	FluidFieldSim::LandscapeDepth::SetEnabled(true);
 	globals::profiler->EndPass();
 	const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 	groundMs += (ms - groundMs) * 0.05f;
@@ -234,10 +283,11 @@ void FluidFieldGroundFog::Prepass()
 	gridMin[0] = static_cast<int32_t>(std::floor(playerPos.x / cellSize)) - half;
 	gridMin[1] = static_cast<int32_t>(std::floor(playerPos.y / cellSize)) - half;
 	const float step = std::min(deltaTime, 1.0f / 30.0f);
+	fogTime += step;
 	const FluidFieldSim::StepParams grid{ .gridMin = { gridMin[0], gridMin[1] }, .cellSize = cellSize, .deltaTime = step };
 
 	// Moving actors push the fog; close by, their legs cut it (the contact map round the player)
-	airSources.Update(playerPos, settings.ContactRadius * UNITS_PER_METRE, cellSize * static_cast<float>(half), step, settings.Stir, SHOVE_SPEED * settings.Stir, FluidFieldSim::FogSolver::MAX_MOVERS);
+	airSources.Update(playerPos, settings.ContactRadius * UNITS_PER_METRE, cellSize * static_cast<float>(half), step, settings.Stir, SHOVE_SPEED * settings.Stir, FluidFieldSim::FogSolver::MAX_MOVERS, ground.GetHeat());
 	const int32_t contactHalf = static_cast<int32_t>(FluidFieldSim::FogSolver::CONTACT_RESOLUTION / 2);
 	contactMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FluidFieldSim::FogSolver::CONTACT_CELL)) - contactHalf;
 	contactMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FluidFieldSim::FogSolver::CONTACT_CELL)) - contactHalf;
@@ -297,7 +347,7 @@ namespace
 
 	void UnbindAll(ID3D11DeviceContext* a_context)
 	{
-		ID3D11ShaderResourceView* nullSRVs[10]{};
+		ID3D11ShaderResourceView* nullSRVs[14]{};
 		ID3D11UnorderedAccessView* nullUAVs[2]{};
 		ID3D11SamplerState* nullSamplers[2]{};
 		ID3D11Buffer* nullCB = nullptr;
@@ -328,47 +378,60 @@ namespace
 
 bool FluidFieldGroundFog::EnsureNoise()
 {
-	if (noiseSRV && wrapSampler)
+	if (noiseSRVs[0] && noiseSRVs[1] && noiseSRVs[2] && wrapSampler)
 		return true;
-	// Value noise over an 8-cell lattice that wraps, eased between lattice points
-	constexpr uint32_t SIZE = 64, CELLS = 8, PER_CELL = SIZE / CELLS;
-	const auto hash = [](uint32_t a_x, uint32_t a_y, uint32_t a_z) {
-		uint32_t h = (a_x % CELLS) * 374761393u + (a_y % CELLS) * 668265263u + (a_z % CELLS) * 2147483647u;
+	// Tiling value noise: a lattice of a_cells a side that wraps, eased between lattice points, a seed apiece
+	const auto hash = [](uint32_t a_x, uint32_t a_y, uint32_t a_z, uint32_t a_cells, uint32_t a_seed) {
+		uint32_t h = (a_x % a_cells) * 374761393u + (a_y % a_cells) * 668265263u + (a_z % a_cells) * 2147483647u + a_seed * 2246822519u;
 		h = (h ^ (h >> 13)) * 1274126177u;
 		return static_cast<float>((h ^ (h >> 16)) & 0xFFFF) / 65535.0f;
 	};
 	const auto ease = [](float t) { return t * t * (3.0f - 2.0f * t); };
-	std::vector<uint8_t> texels(SIZE * SIZE * SIZE);
-	for (uint32_t z = 0; z < SIZE; z++) {
-		for (uint32_t y = 0; y < SIZE; y++) {
-			for (uint32_t x = 0; x < SIZE; x++) {
-				const uint32_t cx = x / PER_CELL, cy = y / PER_CELL, cz = z / PER_CELL;
-				const float fx = ease((x % PER_CELL + 0.5f) / PER_CELL), fy = ease((y % PER_CELL + 0.5f) / PER_CELL), fz = ease((z % PER_CELL + 0.5f) / PER_CELL);
-				const auto plane = [&](uint32_t a_z) {
-					const float south = std::lerp(hash(cx, cy, a_z), hash(cx + 1, cy, a_z), fx);
-					const float north = std::lerp(hash(cx, cy + 1, a_z), hash(cx + 1, cy + 1, a_z), fx);
-					return std::lerp(south, north, fy);
-				};
-				texels[(z * SIZE + y) * SIZE + x] = static_cast<uint8_t>(std::clamp(std::lerp(plane(cz), plane(cz + 1), fz), 0.0f, 1.0f) * 255.0f + 0.5f);
-			}
-		}
+	const auto value = [&](uint32_t a_size, uint32_t a_cells, uint32_t a_seed, uint32_t x, uint32_t y, uint32_t z) {
+		const uint32_t perCell = a_size / a_cells;
+		const uint32_t cx = x / perCell, cy = y / perCell, cz = z / perCell;
+		const float fx = ease((x % perCell + 0.5f) / perCell), fy = ease((y % perCell + 0.5f) / perCell), fz = ease((z % perCell + 0.5f) / perCell);
+		const auto plane = [&](uint32_t a_z) {
+			const float south = std::lerp(hash(cx, cy, a_z, a_cells, a_seed), hash(cx + 1, cy, a_z, a_cells, a_seed), fx);
+			const float north = std::lerp(hash(cx, cy + 1, a_z, a_cells, a_seed), hash(cx + 1, cy + 1, a_z, a_cells, a_seed), fx);
+			return std::lerp(south, north, fy);
+		};
+		return std::lerp(plane(cz), plane(cz + 1), fz);
+	};
+	auto* device = globals::d3d::device;
+	// Detail and clumps: 3D, 64³, 8 and 4 lattice cells a side
+	constexpr uint32_t SIZE_3D = 64;
+	for (uint32_t k = 0; k < 2; k++) {
+		const uint32_t cells = k == 0 ? 8 : 4;
+		std::vector<uint8_t> texels(SIZE_3D * SIZE_3D * SIZE_3D);
+		for (uint32_t z = 0; z < SIZE_3D; z++)
+			for (uint32_t y = 0; y < SIZE_3D; y++)
+				for (uint32_t x = 0; x < SIZE_3D; x++)
+					texels[(z * SIZE_3D + y) * SIZE_3D + x] = static_cast<uint8_t>(std::clamp(value(SIZE_3D, cells, k + 1, x, y, z), 0.0f, 1.0f) * 255.0f + 0.5f);
+		const D3D11_TEXTURE3D_DESC desc{ .Width = SIZE_3D, .Height = SIZE_3D, .Depth = SIZE_3D, .MipLevels = 1, .Format = DXGI_FORMAT_R8_UNORM, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+		const D3D11_SUBRESOURCE_DATA data{ .pSysMem = texels.data(), .SysMemPitch = SIZE_3D, .SysMemSlicePitch = SIZE_3D * SIZE_3D };
+		winrt::com_ptr<ID3D11Texture3D> texture;
+		if (FAILED(device->CreateTexture3D(&desc, &data, texture.put())) || FAILED(device->CreateShaderResourceView(texture.get(), nullptr, noiseSRVs[k].put())))
+			return false;
+		Util::SetResourceName(texture.get(), k == 0 ? "FluidField::GroundFogNoise Detail" : "FluidField::GroundFogNoise Clumps");
 	}
-	const D3D11_TEXTURE3D_DESC desc{ .Width = SIZE, .Height = SIZE, .Depth = SIZE, .MipLevels = 1, .Format = DXGI_FORMAT_R8_UNORM, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
-	const D3D11_SUBRESOURCE_DATA data{ .pSysMem = texels.data(), .SysMemPitch = SIZE, .SysMemSlicePitch = SIZE * SIZE };
+	// Banks: 2D, 256², 8 lattice cells and an octave of 32
+	constexpr uint32_t SIZE_2D = 256;
+	std::vector<uint8_t> banks(SIZE_2D * SIZE_2D);
+	for (uint32_t y = 0; y < SIZE_2D; y++)
+		for (uint32_t x = 0; x < SIZE_2D; x++)
+			banks[y * SIZE_2D + x] = static_cast<uint8_t>(std::clamp(value(SIZE_2D, 8, 3, x, y, 0) * 0.7f + value(SIZE_2D, 32, 4, x, y, 0) * 0.3f, 0.0f, 1.0f) * 255.0f + 0.5f);
+	const D3D11_TEXTURE2D_DESC desc{ .Width = SIZE_2D, .Height = SIZE_2D, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R8_UNORM, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+	const D3D11_SUBRESOURCE_DATA data{ .pSysMem = banks.data(), .SysMemPitch = SIZE_2D, .SysMemSlicePitch = 0 };
+	winrt::com_ptr<ID3D11Texture2D> bankTexture;
+	if (FAILED(device->CreateTexture2D(&desc, &data, bankTexture.put())) || FAILED(device->CreateShaderResourceView(bankTexture.get(), nullptr, noiseSRVs[2].put())))
+		return false;
+	Util::SetResourceName(bankTexture.get(), "FluidField::GroundFogNoise Banks");
 	D3D11_SAMPLER_DESC samplerDesc{};
 	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 	samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
 	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-	auto* device = globals::d3d::device;
-	winrt::com_ptr<ID3D11Texture3D> texture;
-	if (FAILED(device->CreateTexture3D(&desc, &data, texture.put())) || FAILED(device->CreateShaderResourceView(texture.get(), nullptr, noiseSRV.put())) ||
-		FAILED(device->CreateSamplerState(&samplerDesc, wrapSampler.put()))) {
-		noiseSRV = nullptr;
-		wrapSampler = nullptr;
-		return false;
-	}
-	Util::SetResourceName(texture.get(), "FluidField::GroundFogNoise");
-	return true;
+	return SUCCEEDED(device->CreateSamplerState(&samplerDesc, wrapSampler.put()));
 }
 
 void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
@@ -395,7 +458,8 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.cellSize = cellSize,
 		.density = settings.FogDensity,
 		.stepCount = STEP_COUNT,
-		.maxDistance = 0.75f * cellSize * static_cast<float>(GRID_RESOLUTION),
+		// To the loaded landscape's edge: settled fog past the simulated grid, fading out where Exponential Height Fog takes over
+		.maxDistance = (FluidFieldSim::GroundTiles::LAND_REACH + 0.5f) * FluidFieldSim::LandscapeCache::CELL_UNITS,
 		.maxDepth = std::max(settings.PoolDepth, settings.GroundThickness),
 		.albedo = { 0.9f * settings.FogBrightness, 0.92f * settings.FogBrightness, 0.95f * settings.FogBrightness },
 		.farDepth = settings.GroundThickness,
@@ -410,7 +474,12 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.contactCell = FluidFieldSim::FogSolver::CONTACT_CELL,
 		.contactMin = { contactMin[0], contactMin[1] },
 		.contactResolution = FluidFieldSim::FogSolver::CONTACT_RESOLUTION,
-		.pad = 0.0f
+		.farDistance = FluidFieldSim::LandscapeDepth::GetSRV() ? std::max(DistantDistance(), 12000.0f) : FAR_DISTANCE,
+		.landCell = { ground.GetLandCell()[0], ground.GetLandCell()[1] },
+		.pad = {},
+		.lodOrigin = {},
+		.hasLod = FluidFieldSim::LandscapeDepth::GetSRV() ? 1u : 0u,
+		.lodPad = 0.0f
 	};
 	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
 	if (!Upload(context, groundFogCB, constants))
@@ -436,7 +505,7 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	ID3D11Buffer* cb = groundFogCB.get();
 	context->CSSetConstantBuffers(0, 1, &cb);
 	BindFrameBuffers(context);
-	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetFarSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRV.get() };
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetFarSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRVs[0].get(), nullptr, nullptr, noiseSRVs[1].get(), noiseSRVs[2].get(), ground.GetLandSRV(), FluidFieldSim::LandscapeDepth::GetSRV() };
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get() };
 	context->CSSetSamplers(0, 2, samplers);

@@ -19,7 +19,7 @@ namespace FluidFieldSim
 		ID3D11ShaderResourceView* tiles = nullptr;      ///< Top height, flags, lower height, flags per 8-unit texel, toroidal
 		ID3D11ShaderResourceView* farHeight = nullptr;  ///< May be null
 		std::int32_t tileMin[2]{};
-		std::array<std::int32_t, 64 * 4> slots{};  ///< Per resident slot: tile x, y, valid, pad
+		std::array<std::int32_t, 256 * 4> slots{};  ///< Per resident slot (16 a side): tile x, y, valid, pad
 		float farScale[2]{}, farOffset[2]{}, farZ[2]{};
 	};
 
@@ -32,9 +32,16 @@ namespace FluidFieldSim
 		float sourceRate = 0.1f;     ///< Per second, toward Ground Thickness
 		float evaporateRate = 3.0f;  ///< Per second, of depth over Pool Depth
 		float fluxDamping = 3.0f;    ///< Per second
-		float confinement = 0.0f;
-		float hollowGain = 0.5f;      ///< Settled depth per unit of hollowness
-		float waterEvaporate = 2.0f;  ///< Per second, of fog over water
+		float confinement = 2.0f;
+		float hollowGain = 0.5f;  ///< Settled depth per unit of hollowness
+		float wind[2]{};          ///< The weather's wind carrying the fog, world units per second
+		float drift = 25.0f;      ///< Ambient drift (slow eddies the fog wanders in), world units per second
+		float time = 0.0f;        ///< Seconds, for the ambient drift
+		float rain = 0.0f;        ///< How hard it rains, 0 to 1
+		/** @brief The precipitation occlusion map (rain only where the sky is open), its projection from the eye; none when null. */
+		ID3D11ShaderResourceView* occlusion = nullptr;
+		float occlusionViewProj[16]{};
+		float eye[3]{};
 	};
 
 	/** @brief What moves through the fog this step: pushers for the sim, capsules for the contact map round contactMin. */
@@ -79,7 +86,7 @@ namespace FluidFieldSim
 			BeginStep(context, grid, layer, ground, movers);
 			wrap("Fog Bed", [&] { Bed(context, ground); });
 			wrap("Fog Splat", [&] { Splat(context); });
-			wrap("Fog Inputs", [&] { Inputs(context); });
+			wrap("Fog Inputs", [&] { Inputs(context, layer); });
 			wrap("Fog Flux", [&] { Flux(context); });
 			wrap("Fog Depth", [&] { Depth(context); });
 			wrap("Fog Contact", [&] { Contact(context); });
@@ -118,24 +125,28 @@ namespace FluidFieldSim
 			std::int32_t prevGridMin[2];
 			float cellSize, deltaTime;
 			std::uint32_t resolution;
-			float gravity, groundThickness, poolDepth, sourceRate, evaporateRate, fluxDamping, confinement, hollowGain, waterEvaporate;
-			std::int32_t slots[64 * 4];
+			float gravity, groundThickness, poolDepth, sourceRate, evaporateRate, fluxDamping, confinement, hollowGain, pad0;
+			std::int32_t slots[256 * 4];
 			std::int32_t tileMin[2];
 			float farScale[2], farOffset[2], farZ[2];
 			std::uint32_t hasFar, moverCount, contactCount;
 			float contactCell;
 			std::int32_t contactMin[2];
 			std::uint32_t contactResolution;
-			float pad;
+			float windX, windY, drift, time;
+			float rain;
+			float occlusionViewProj[16];
+			float eye[3];
+			std::uint32_t hasOcclusion;
 		};
-		static_assert(sizeof(Constants) == 1152);
+		static_assert(sizeof(Constants) == 1248 + 192 * 16);
 
 		static Layer CreateLayer(ID3D11Device* device, std::uint32_t resolution, std::uint32_t slices, DXGI_FORMAT format, const NameFn& name, const char* label);
 		static Buffer CreateMoverBuffer(ID3D11Device* device, const NameFn& name, const char* label);
 		void BeginStep(ID3D11DeviceContext* context, const StepParams& grid, const FogLayerParams& layer, const FogGround& ground, const FogMovers& movers);
 		void Bed(ID3D11DeviceContext* context, const FogGround& ground);
 		void Splat(ID3D11DeviceContext* context);
-		void Inputs(ID3D11DeviceContext* context);
+		void Inputs(ID3D11DeviceContext* context, const FogLayerParams& layer);
 		void Flux(ID3D11DeviceContext* context);
 		void Depth(ID3D11DeviceContext* context);
 		void Contact(ID3D11DeviceContext* context);

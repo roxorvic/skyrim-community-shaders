@@ -27,6 +27,12 @@ namespace FluidFieldSim
 	};
 	static_assert(sizeof(Mover) == 48);
 
+	/** @brief A fire the fog clears round (its heat dries the air): where, and how far round. */
+	struct HeatSource
+	{
+		float x, y, z, radius;
+	};
+
 	/** @brief A solver's grid placement and step. */
 	struct StepParams
 	{

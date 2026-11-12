@@ -5,6 +5,7 @@
 #include "FluidField/AirSources.h"
 #include "FluidField/FogSolver.h"
 #include "FluidField/GroundTiles.h"
+#include "FluidField/LandscapeDepth.h"
 
 /**
  * @brief Ground Fog (D194): a thin heavy fog layer lying on a baked ground round the player, drawn as a volume.
@@ -46,6 +47,7 @@ struct FluidFieldGroundFog : Feature
 		uint FogDetail = 1;             ///< CELL_SIZES index
 		float ContactRadius = 18.0f;    ///< Metres round the player within which legs cut the fog exactly
 		float Stir = 1.0f;              ///< How hard moving actors push the fog
+		float DistantReach = 0.9f;      ///< How far the distant fog reaches, as a share of the LOD terrain's reach
 		uint DebugView = 0;             ///< 1 colours every surface by what the fog's ground takes it for, brighter where fog lies
 	};
 
@@ -63,6 +65,8 @@ struct FluidFieldGroundFog : Feature
 
 	/** @brief Registers the shared loading-screen listener. */
 	virtual void PostPostLoad() override;
+	/** @brief Hooks explosions and listens for shouts (step 6 movers). */
+	virtual void DataLoaded() override;
 
 	/** @brief Brings the ground up to date and steps the fog. */
 	virtual void Prepass() override;
@@ -115,9 +119,14 @@ private:
 		float contactCell;
 		int32_t contactMin[2];
 		uint32_t contactResolution;
-		float pad;
+		float farDistance;
+		int32_t landCell[2];
+		float pad[2];
+		float lodOrigin[2];  ///< The LOD ground map's texel (0, 0) corner, world units
+		uint32_t hasLod;
+		float lodPad;
 	};
-	static_assert(sizeof(GroundFogConstants) == 48 + 64 * 16 + 64);
+	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 96);
 
 	/** @brief Matches GroundDebugCB in GroundDebugCS.hlsl. */
 	struct alignas(16) GroundDebugConstants
@@ -134,14 +143,24 @@ private:
 		int32_t gridMin[2];
 		float pad[2];
 	};
-	static_assert(sizeof(GroundDebugConstants) == 64 * 16 + 64);
+	static_assert(sizeof(GroundDebugConstants) == 256 * 16 + 64);
 
 	FluidFieldSim::GroundTiles ground;
 	FluidFieldSim::FogSolver solver;
+	/** @brief The distant fog's reach this frame, world units (Distant Reach of the drawn landscape's reach). */
+	float DistantDistance() const;
 	FluidFieldSim::AirSources airSources;
 	int32_t contactMin[2]{};  ///< The contact map's placement this frame
 	/** @brief World units a metre, for Contact Radius. */
 	static constexpr float UNITS_PER_METRE = 70.0f;
+	/** @brief The fog's drift at the weather's full wind speed, world units per second. */
+	static constexpr float MAX_WIND_DRIFT = 80.0f;
+	/** @brief The least drift any real wind gives, and the weather's wind value under which it is calm. */
+	static constexpr float MIN_WIND_DRIFT = 15.0f;
+	static constexpr float CALM_WIND = 0.01f;
+	/** @brief How far the LOD fog (past the simulated fog) reaches, world units. */
+	static constexpr float FAR_DISTANCE = 30000.0f;
+	float fogTime = 0.0f;  ///< Seconds stepped, for the ambient drift
 	/** @brief World units per second a running actor shoves the fog aside, at Stir 1. */
 	static constexpr float SHOVE_SPEED = 150.0f;
 	int32_t gridMin[2]{};
@@ -156,8 +175,8 @@ private:
 	winrt::com_ptr<ID3D11Buffer> groundFogCB;
 	winrt::com_ptr<ID3D11Buffer> groundDebugCB;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
-	/** @brief Tiling 3D value noise for the fog's clumps (GroundFogCS), built once, and its wrapping sampler. */
-	winrt::com_ptr<ID3D11ShaderResourceView> noiseSRV;
+	/** @brief Tiling value noise for the fog (GroundFogCS), built once, kept in memory, and its wrapping sampler. */
+	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, 3> noiseSRVs;  ///< Detail and clumps (3D), banks (2D)
 	winrt::com_ptr<ID3D11SamplerState> wrapSampler;
 	bool EnsureNoise();
 	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution

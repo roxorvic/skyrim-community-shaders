@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LandscapeCache.h"
+#include "SolverCommon.h"
 #include "WaterSurfaces.h"
 
 #include <d3d11.h>
@@ -47,6 +48,8 @@ namespace FluidFieldSim
 			float a[3], b[3], c[3];
 			Kind kind;
 			bool steep = false;  ///< Ground too steep to carry fog: it sets the height only
+			bool flat = false;   ///< A rock's face turned up: ground when it lies under an overhang (a mine entrance's floor)
+			bool lean = false;   ///< An underside facing down only a little: one only under a thin top (a lip)
 		};
 
 		/** @brief A world rectangle whose triangles changed (references read in). */
@@ -71,6 +74,8 @@ namespace FluidFieldSim
 
 		/** @brief Scans done since the last Clear; a rectangle is settled once a later scan covered it and nothing is left to read there. */
 		uint32_t GetScanCount() const { return scanCount; }
+		/** @brief Fires round the player at the last scan. */
+		const std::vector<HeatSource>& GetHeat() const { return heat; }
 		bool Settled(const Rect& a_rect, uint32_t a_afterScan) const;
 
 	private:
@@ -93,7 +98,9 @@ namespace FluidFieldSim
 		void Read(RE::TESObjectREFR& a_ref, const LandscapeCache& a_landscape);
 
 		std::unordered_map<uint64_t, std::vector<Triangle>> buckets;
-		std::unordered_map<uint32_t, std::pair<float, float>> seen;                   ///< Form IDs found, and where (dropped with the buckets)
+		std::unordered_map<uint32_t, std::pair<float, float>> seen;  ///< Form IDs found, and where (dropped with the buckets)
+		std::vector<HeatSource> heat;
+		std::size_t loggedHeat = SIZE_MAX;
 		std::deque<Pending> queue;                                                    ///< Found, still to read (or waiting for their 3D)
 		std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> waiting;  ///< Since when a reference waits for its 3D
 		std::vector<Rect> changes;                                                    ///< Every rectangle read in, in order (ChangesSince)
@@ -116,7 +123,7 @@ namespace FluidFieldSim
 		static constexpr float TEXEL = 8.0f;
 		static constexpr float TILE_UNITS = TILE_TEXELS * TEXEL;
 		/** @brief Resident tiles per side (the texture is SLOTS * TILE_TEXELS texels across). */
-		static constexpr int32_t SLOTS = 8;
+		static constexpr int32_t SLOTS = 16;
 		static constexpr uint32_t RESIDENT_TEXELS = SLOTS * TILE_TEXELS;
 		static constexpr float NO_GROUND = -1.0e7f;
 
@@ -159,8 +166,16 @@ namespace FluidFieldSim
 		/** @brief Tile coordinates of the window's south-west tile. */
 		const int32_t* GetTileMin() const { return tileMin; }
 		const std::array<SlotTile, SLOTS * SLOTS>& GetSlots() const { return slots; }
+		const std::vector<HeatSource>& GetHeat() const { return meshes.GetHeat(); }
 		/** @brief The far height map, or null (none for this worldspace, or still loading). */
 		ID3D11ShaderResourceView* GetFarSRV() const { return farSRV.get(); }
+		/** @brief The middle tier: the loaded landscape cells round the player at LAND_TEXEL (height, flags), toroidal (world
+		 * texel t in texel t & (LAND_TEXELS - 1)); valid within LAND_REACH cells of GetLandCell(). */
+		ID3D11ShaderResourceView* GetLandSRV() const { return landSRV.get(); }
+		const int32_t* GetLandCell() const { return landCell; }
+		static constexpr float LAND_TEXEL = 32.0f;
+		static constexpr uint32_t LAND_TEXELS = 1024;
+		static constexpr int32_t LAND_REACH = 2;
 		const FarMap& GetFarMap() const { return farMap; }
 
 		/** @brief Tiles waiting for the worker, and the tiles kept provisional (for the UI). */
@@ -216,6 +231,12 @@ namespace FluidFieldSim
 
 		winrt::com_ptr<ID3D11Texture2D> texture;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
+		winrt::com_ptr<ID3D11Texture2D> landTexture;
+		winrt::com_ptr<ID3D11ShaderResourceView> landSRV;
+		std::unordered_set<uint64_t> landFilled;  ///< Cells rasterized into the land map
+		int32_t landCell[2]{};
+		/** @brief Rasterizes one loaded cell a frame into the land map (the middle tier). */
+		void UpdateLand(ID3D11Device* a_device, ID3D11DeviceContext* a_context, const LandscapeCache& a_landscape, const WaterSurfaces& a_water, float a_playerX, float a_playerY);
 		int32_t tileMin[2]{};
 		std::array<Slot, SLOTS * SLOTS> state{};
 		std::array<SlotTile, SLOTS * SLOTS> slots{};

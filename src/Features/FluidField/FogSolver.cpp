@@ -128,7 +128,14 @@ namespace FluidFieldSim
 		c.fluxDamping = layer.fluxDamping;
 		c.confinement = layer.confinement;
 		c.hollowGain = layer.hollowGain;
-		c.waterEvaporate = layer.waterEvaporate;
+		c.windX = layer.wind[0];
+		c.windY = layer.wind[1];
+		c.drift = layer.drift;
+		c.time = layer.time;
+		c.rain = layer.rain;
+		std::memcpy(c.occlusionViewProj, layer.occlusionViewProj, sizeof(c.occlusionViewProj));
+		std::memcpy(c.eye, layer.eye, sizeof(c.eye));
+		c.hasOcclusion = layer.occlusion ? 1 : 0;
 		std::memcpy(c.slots, ground.slots.data(), sizeof(c.slots));
 		c.tileMin[0] = ground.tileMin[0];
 		c.tileMin[1] = ground.tileMin[1];
@@ -191,9 +198,9 @@ namespace FluidFieldSim
 		Dispatch(context, splatCS.get(), srvs, uavs, pusherCount, 1);
 	}
 
-	void FogSolver::Inputs(ID3D11DeviceContext* context)
+	void FogSolver::Inputs(ID3D11DeviceContext* context, const FogLayerParams& layer)
 	{
-		ID3D11ShaderResourceView* srvs[] = { bed.srv.get(), velocity.srv.get(), flux[0].srv.get() };
+		ID3D11ShaderResourceView* srvs[] = { bed.srv.get(), velocity.srv.get(), flux[0].srv.get(), layer.occlusion };
 		ID3D11UnorderedAccessView* uavs[] = { depth.uav.get(), flux[1].uav.get(), force.uav.get() };
 		Dispatch(context, inputsCS.get(), srvs, uavs, 0, LEVELS);
 	}

@@ -9,9 +9,9 @@
 
 cbuffer GroundDebugCB : register(b0)
 {
-	int4 SlotTiles[64];  // Per resident slot: xy the tile uploaded there, z 1 once valid
-	int2 TileMin;        // The window's south-west tile
-	float2 FarScale;     // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
+	int4 SlotTiles[256];  // Per resident slot: xy the tile uploaded there, z 1 once valid
+	int2 TileMin;         // The window's south-west tile
+	float2 FarScale;      // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
 	float2 FarOffset;
 	float2 FarZ;
 	uint HasFar;
@@ -31,7 +31,7 @@ RWTexture2D<float4> MainRW : register(u0);
 
 static const float TEXEL = 8.0;
 static const int TILE_TEXELS = 128;
-static const int SLOTS = 8;
+static const int SLOTS = 16;
 static const uint FOG_MAY_FORM = 1, ROCK = 2, STEEP = 4, WATER = 8, PROVISIONAL = 16;
 /** A surface this close to the ground's height is the ground. */
 static const float ON_GROUND = 12.0;

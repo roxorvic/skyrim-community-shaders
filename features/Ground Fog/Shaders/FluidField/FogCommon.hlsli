@@ -13,13 +13,13 @@ cbuffer FogCB : register(b0)
 	float Gravity;     // Fog's reduced gravity, world units per second squared
 	float GroundThickness;
 	float PoolDepth;
-	float SourceRate;      // Per second, toward Ground Thickness where fog may form
-	float EvaporateRate;   // Per second, of the depth over Pool Depth
-	float FluxDamping;     // Per second
-	float Confinement;     // Vorticity confinement strength
-	float HollowGain;      // Settled depth added per unit of hollowness
-	float WaterEvaporate;  // Per second, of all fog over water
-	int4 SlotTiles[64];    // Ground tiles: per resident slot, xy the tile there, z 1 once valid
+	float SourceRate;     // Per second, toward Ground Thickness where fog may form
+	float EvaporateRate;  // Per second, of the depth over Pool Depth
+	float FluxDamping;    // Per second
+	float Confinement;    // Vorticity confinement strength
+	float HollowGain;     // Settled depth added per unit of hollowness
+	float Pad0;
+	int4 SlotTiles[256];  // Ground tiles: per resident slot, xy the tile there, z 1 once valid
 	int2 TileMin;
 	float2 FarScale;  // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
 	float2 FarOffset;
@@ -30,14 +30,21 @@ cbuffer FogCB : register(b0)
 	float ContactCell;  // World units per contact map texel
 	int2 ContactMin;    // Contact map: world texel of texel (0, 0)
 	uint ContactResolution;
-	float Pad;
+	float WindX;  // The weather's wind carrying the fog, world units per second
+	float WindY;
+	float Drift;                           // Ambient drift's speed, world units per second
+	float Time;                            // Seconds, for the ambient drift
+	float Rain;                            // How hard it rains, 0 to 1: drops strike the top level
+	row_major float4x4 OcclusionViewProj;  // The precipitation occlusion map's projection, from the eye (Skylighting's use)
+	float3 Eye;
+	uint HasOcclusion;
 };
 
 /** Bed kinds (FogBed z). */
 static const float KIND_GROUND = 0.0, KIND_ROCK = 1.0, KIND_CLOSED = 2.0, KIND_WATER = 3.0;
 /** GroundTiles' texels: 8 units, 128 a tile, 8 tiles a side. */
 static const float TILE_TEXEL = 8.0;
-static const int TILE_SLOTS = 8;
+static const int TILE_SLOTS = 16;
 static const uint TILE_MAY_FORM = 1, TILE_ROCK = 2, TILE_STEEP = 4, TILE_WATER = 8;
 /** Floors more than this apart in height are two levels, not one slope. */
 static const float LEVEL_STEP = 24.0;

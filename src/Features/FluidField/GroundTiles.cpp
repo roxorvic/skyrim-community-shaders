@@ -23,6 +23,15 @@ namespace FluidFieldSim
 		/** @brief Model folders whose every triangle is rock: things standing on the ground, not ground. Mountains too: their
 		 * slabs' flat tops are rock, not ground the fog lies on (MountainTrimSlab, 000A18FE, Riverwood). Registry: fog-v2.md. */
 		constexpr std::array<std::string_view, 6> WALLS = { "\\rocks\\", "\\trees\\", "\\logs\\", "\\stumps\\", "treelog", "\\mountains\\" };
+		/** @brief Things whose floors face up near the ground but hold no fog (it formed inside a boat, Riverwood): solid like rock.
+		 * Tents stay ground (fog in an open tent is fine). Registry: fog-v3.md. */
+		constexpr std::array<std::string_view, 7> HOLLOWS = { "boat", "ship", "cart", "wagon", "furniture\\", "coffin", "trough" };
+		/** @brief Model names of fires: the fog clears round them. */
+		constexpr std::array<std::string_view, 9> FIRES = { "campfire", "firepit", "fireplace", "brazier", "forge", "smelter", "hearth", "fxfire", "fire0" };
+		/** @brief A fire clears this far past its model's edge (the falloff fades on beyond), at least LEAST_HEAT, at most MOST_HEAT. */
+		constexpr float HEAT_MARGIN = 24.0f;
+		constexpr float LEAST_HEAT = 40.0f;
+		constexpr float MOST_HEAT = 400.0f;
 
 		/** @brief A triangle facing up at least this much is ground; less, a wall. Landscape meshes' faces up to TERRAIN_GROUND_FACING
 		 * are ground too, flagged steep (taken for walls, the landscape under them showed through). */
@@ -34,8 +43,12 @@ namespace FluidFieldSim
 		constexpr float TRUNK_FACING = 0.5f;
 		/** @brief Rock standing less than this over the ground is ground (a log's flat base plate, debris lying on the grass). */
 		constexpr float ROCK_RISE = 16.0f;
-		/** @brief A triangle facing down this much is an underside (an overhang's; a curved lip's steeper faces too). */
-		constexpr float UNDERSIDE_FACING = -0.1f;
+		/** @brief A triangle facing down this much is an underside (an overhang's); facing down from LEAN_FACING, only under a
+		 * top less than LIP_THICKNESS over it: a curved lip's steeper faces count, a leaning cliff's face does not (fog drew up
+		 * it, SS 2508; without them a slab's lip had holes, SS 2509). */
+		constexpr float UNDERSIDE_FACING = -0.3f;
+		constexpr float LEAN_FACING = -0.1f;
+		constexpr float LIP_THICKNESS = 120.0f;
 		/** @brief Texels out to which an underside fills the holes in a curved one (faces too steep to count, texel centres
 		 * between its triangles), where the top stands well over the land. */
 		constexpr int UNDERSIDE_FILL = 3;
@@ -49,7 +62,7 @@ namespace FluidFieldSim
 		constexpr float STEEP_RISE = 1.2f * GroundTiles::TEXEL;
 
 		/** @brief Bump when the build changes: older cached tiles are ignored. */
-		constexpr uint32_t CACHE_VERSION = 7;
+		constexpr uint32_t CACHE_VERSION = 11;
 		constexpr uint32_t CACHE_MAGIC = 0x31544746;  // "FGT1"
 
 		/** @brief Read budgets on the main thread, ms: in play, and just after a load (the screen is still fading in). */
@@ -89,9 +102,25 @@ namespace FluidFieldSim
 				return ModelClass::Ignored;
 			if (base->Is(RE::FormType::Tree) || has("\\trees\\"))
 				return ModelClass::Tree;
-			if (std::ranges::any_of(WALLS, has))
+			if (std::ranges::any_of(WALLS, has) || std::ranges::any_of(HOLLOWS, has))
 				return ModelClass::Walls;
 			return path.starts_with("landscape\\") ? ModelClass::Terrain : ModelClass::ByFacing;
+		}
+
+		/** @brief How far round a reference the fog clears if it is a fire (any form with a fire's model), else 0. */
+		float HeatReach(RE::TESObjectREFR& a_ref)
+		{
+			const auto* base = a_ref.GetBaseObject();
+			const auto* model = base ? base->As<RE::TESModel>() : nullptr;
+			if (!model || !model->GetModel())
+				return 0.0f;
+			std::string path = model->GetModel();
+			std::transform(path.begin(), path.end(), path.begin(), [](unsigned char a_c) { return static_cast<char>(std::tolower(a_c)); });
+			if (std::ranges::none_of(FIRES, [&](std::string_view a_part) { return path.find(a_part) != std::string::npos; }))
+				return 0.0f;
+			// The model's own box (its 3D's bounds hold the flames and smoke too), a little past its edge
+			const auto size = a_ref.GetBoundMax() - a_ref.GetBoundMin();
+			return std::clamp(0.5f * std::max(size.x, size.y) * a_ref.GetScale() + HEAT_MARGIN, LEAST_HEAT, MOST_HEAT);
 		}
 
 		/** @brief The cross product's z of two edges: twice the triangle's signed area seen from above. */
@@ -186,11 +215,20 @@ namespace FluidFieldSim
 		// Look for new references every so often (and at once after a Clear)
 		if (framesToScan == 0 || framesToScan-- == 0) {
 			framesToScan = SCAN_INTERVAL;
+			heat.clear();
 			tes->ForEachReferenceInRange(player, a_radius, [&](RE::TESObjectREFR* a_ref) {
+				if (a_ref && !a_ref->IsDisabled())
+					if (const float reach = HeatReach(*a_ref); reach > 0.0f)
+						heat.push_back({ a_ref->GetPositionX(), a_ref->GetPositionY(), a_ref->GetPositionZ(), reach });
 				if (a_ref && Classify(*a_ref) != ModelClass::Ignored && seen.try_emplace(a_ref->GetFormID(), a_ref->GetPositionX(), a_ref->GetPositionY()).second)
 					queue.push_back({ a_ref->GetHandle(), a_ref->GetPositionX(), a_ref->GetPositionY() });
 				return RE::BSContainer::ForEachResult::kContinue;
 			});
+			if (heat.size() != loggedHeat) {
+				loggedHeat = heat.size();
+				logger::info("[Fluid Field] Ground fog: {} fires round the player{}", heat.size(),
+					heat.empty() ? std::string() : std::format(", the first at ({:.0f}, {:.0f}, {:.0f}) clearing {:.0f}", heat[0].x, heat[0].y, heat[0].z, heat[0].radius));
+			}
 			scanCount++;
 			scanCentre[0] = a_centreX;
 			scanCentre[1] = a_centreY;
@@ -299,19 +337,23 @@ namespace FluidFieldSim
 					if ((overLand && cz > landHeight + TRUNK_REACH) || std::abs(facing) > TRUNK_FACING)
 						continue;
 					triangle.kind = Kind::Wall;
-				} else if (modelClass == ModelClass::Walls)
+				} else if (modelClass == ModelClass::Walls) {
 					// A rock overhang's underside too: the floor under it is a second level (MountainTrimSlab ledges, Riverwood)
-					triangle.kind = facing <= UNDERSIDE_FACING ? Kind::Underside : Kind::Wall;
-				else if (facing >= (modelClass == ModelClass::Terrain ? TERRAIN_GROUND_FACING : GROUND_FACING)) {
+					triangle.kind = facing <= LEAN_FACING ? Kind::Underside : Kind::Wall;
+					triangle.lean = facing > UNDERSIDE_FACING;
+					triangle.flat = facing >= GROUND_FACING;
+				} else if (facing >= (modelClass == ModelClass::Terrain ? TERRAIN_GROUND_FACING : GROUND_FACING)) {
 					// Ground only near the landscape: a roof or a canopy is not
 					if (modelClass != ModelClass::Terrain && overLand && cz > landHeight + GROUND_WINDOW)
 						continue;
 					triangle.kind = Kind::Ground;
 					triangle.steep = facing < GROUND_FACING;
-				} else if (facing > UNDERSIDE_FACING)
+				} else if (facing > LEAN_FACING)
 					triangle.kind = Kind::Wall;
-				else
+				else {
 					triangle.kind = Kind::Underside;
+					triangle.lean = facing > UNDERSIDE_FACING;
+				}
 				const float minX = std::min({ triangle.a[0], triangle.b[0], triangle.c[0] }), maxX = std::max({ triangle.a[0], triangle.b[0], triangle.c[0] });
 				const float minY = std::min({ triangle.a[1], triangle.b[1], triangle.c[1] }), maxY = std::max({ triangle.a[1], triangle.b[1], triangle.c[1] });
 				bounds.min[0] = std::min(bounds.min[0], minX);
@@ -341,6 +383,7 @@ namespace FluidFieldSim
 		slots = {};
 		uploads.clear();
 		landCells = 0;
+		landFilled.clear();
 		enteredAt = std::chrono::steady_clock::now();
 		std::scoped_lock lock(mutex);
 		jobs.clear();
@@ -357,9 +400,67 @@ namespace FluidFieldSim
 		}
 		texture = nullptr;
 		srv = nullptr;
+		landTexture = nullptr;
+		landSRV = nullptr;
 		farSRV = nullptr;
 		worldspace.clear();
 		cached.clear();
+	}
+
+	void GroundTiles::UpdateLand(ID3D11Device* a_device, ID3D11DeviceContext* a_context, const LandscapeCache& a_landscape, const WaterSurfaces& a_water, float a_playerX, float a_playerY)
+	{
+		constexpr int32_t PER_CELL = static_cast<int32_t>(LandscapeCache::CELL_UNITS / LAND_TEXEL);
+		if (!landTexture) {
+			const D3D11_TEXTURE2D_DESC desc{ .Width = LAND_TEXELS, .Height = LAND_TEXELS, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32G32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+			if (FAILED(a_device->CreateTexture2D(&desc, nullptr, landTexture.put())) || FAILED(a_device->CreateShaderResourceView(landTexture.get(), nullptr, landSRV.put()))) {
+				landTexture = nullptr;
+				landSRV = nullptr;
+				return;
+			}
+			Util::SetResourceName(landTexture.get(), "FluidField::GroundLand");
+			landFilled.clear();
+		}
+		landCell[0] = static_cast<int32_t>(std::floor(a_playerX / LandscapeCache::CELL_UNITS));
+		landCell[1] = static_cast<int32_t>(std::floor(a_playerY / LandscapeCache::CELL_UNITS));
+		// Cells left behind are forgotten (their texels are rewritten by whichever cell comes into their place)
+		std::erase_if(landFilled, [&](uint64_t a_key) {
+			const auto x = static_cast<int32_t>(a_key >> 32), y = static_cast<int32_t>(a_key & 0xFFFFFFFF);
+			return std::abs(x - landCell[0]) > LAND_REACH || std::abs(y - landCell[1]) > LAND_REACH;
+		});
+		// One new loaded cell a frame, nearest first
+		for (int32_t ring = 0; ring <= LAND_REACH; ring++) {
+			for (int32_t cy = landCell[1] - ring; cy <= landCell[1] + ring; cy++) {
+				for (int32_t cx = landCell[0] - ring; cx <= landCell[0] + ring; cx++) {
+					if (std::max(std::abs(cx - landCell[0]), std::abs(cy - landCell[1])) != ring || landFilled.contains(Key(cx, cy)) || !a_landscape.Find(cx, cy))
+						continue;
+					landFilled.insert(Key(cx, cy));
+					const float originX = static_cast<float>(cx * LandscapeCache::CELL_UNITS), originY = static_cast<float>(cy * LandscapeCache::CELL_UNITS);
+					std::vector<WaterSurfaces::Plane> planes;
+					a_water.CollectPlanes(originX, originY, originX + LandscapeCache::CELL_UNITS, originY + LandscapeCache::CELL_UNITS, planes);
+					std::vector<float> texels(static_cast<std::size_t>(PER_CELL) * PER_CELL * 2);
+					for (int32_t y = 0; y < PER_CELL; y++) {
+						for (int32_t x = 0; x < PER_CELL; x++) {
+							const float px = originX + (x + 0.5f) * LAND_TEXEL, py = originY + (y + 0.5f) * LAND_TEXEL;
+							float height = NO_GROUND;
+							a_landscape.SampleHeight(px, py, height);
+							uint32_t flags = FOG_MAY_FORM;
+							for (const auto& plane : planes) {
+								if (px >= plane.minX && px <= plane.maxX && py >= plane.minY && py <= plane.maxY && plane.height > height) {
+									height = plane.height;
+									flags = WATER;
+								}
+							}
+							texels[(static_cast<std::size_t>(y) * PER_CELL + x) * 2] = height;
+							texels[(static_cast<std::size_t>(y) * PER_CELL + x) * 2 + 1] = static_cast<float>(flags);
+						}
+					}
+					const auto left = static_cast<UINT>((cx * PER_CELL) & (LAND_TEXELS - 1)), top = static_cast<UINT>((cy * PER_CELL) & (LAND_TEXELS - 1));
+					const D3D11_BOX box{ .left = left, .top = top, .front = 0, .right = left + PER_CELL, .bottom = top + PER_CELL, .back = 1 };
+					a_context->UpdateSubresource(landTexture.get(), 0, &box, texels.data(), PER_CELL * 2 * sizeof(float), 0);
+					return;
+				}
+			}
+		}
 	}
 
 	std::size_t GroundTiles::GetQueued() const
@@ -440,6 +541,8 @@ namespace FluidFieldSim
 			Util::SetResourceName(texture.get(), "FluidField::GroundTiles");
 			Util::SetResourceName(srv.get(), "FluidField::GroundTiles SRV");
 		}
+
+		UpdateLand(a_device, a_context, a_landscape, a_water, a_playerX, a_playerY);
 
 		// The window: SLOTS tiles a side, the player in its middle two
 		tileMin[0] = static_cast<int32_t>(std::floor(a_playerX / TILE_UNITS + 0.5f)) - SLOTS / 2;
@@ -698,7 +801,8 @@ namespace FluidFieldSim
 		for (const auto& triangle : a_job.triangles) {
 			if (triangle.kind == GroundMeshes::Kind::Underside)
 				cover(triangle, [&](std::size_t i, float z) {
-					if (z < std::max(heights[i], rock[i]) - 1.0f && z > land[i] + OVERHANG_CLEARANCE)
+					const float top = std::max(heights[i], rock[i]);
+					if (z < top - 1.0f && z > land[i] + OVERHANG_CLEARANCE && !(triangle.lean && top - z > LIP_THICKNESS))
 						under[i] = std::max(under[i], z);
 				});
 		}
@@ -729,7 +833,7 @@ namespace FluidFieldSim
 			cover(triangle, [&](std::size_t i, float z) {
 				if (under[i] <= NO_GROUND || z > under[i] - OVERHANG_CLEARANCE)
 					return;
-				if (triangle.kind == GroundMeshes::Kind::Wall)
+				if (triangle.kind == GroundMeshes::Kind::Wall && !triangle.flat)
 					lowerRock[i] = std::max(lowerRock[i], z);
 				else if (z > lower[i]) {
 					lower[i] = z;

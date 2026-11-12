@@ -14,16 +14,16 @@
 
 cbuffer GroundFogCB : register(b0)
 {
-	int2 GridMin;        // The fog grid: world cell of logical texel (0, 0)
-	uint Resolution;     // Its cells per side, a power of two
-	float CellSize;      // World units per cell
-	float Density;       // Extinction per world unit in the fog
-	uint StepCount;      // Samples along each ray
-	float MaxDistance;   // Rays stop here, world units
-	float MaxDepth;      // Deepest the fog gets (Pool Depth): the band rays are clipped to
-	float3 Albedo;       // Colour of the fog's scattering, times its brightness
-	float FarDepth;      // Settled depth past the grid where fog may form (Ground Thickness)
-	int4 SlotTiles[64];  // Ground tiles: per resident slot, xy the tile there, z 1 once valid
+	int2 GridMin;         // The fog grid: world cell of logical texel (0, 0)
+	uint Resolution;      // Its cells per side, a power of two
+	float CellSize;       // World units per cell
+	float Density;        // Extinction per world unit in the fog
+	uint StepCount;       // Samples along each ray
+	float MaxDistance;    // Rays stop here, world units
+	float MaxDepth;       // Deepest the fog gets (Pool Depth): the band rays are clipped to
+	float3 Albedo;        // Colour of the fog's scattering, times its brightness
+	float FarDepth;       // Settled depth past the grid where fog may form (Ground Thickness)
+	int4 SlotTiles[256];  // Ground tiles: per resident slot, xy the tile there, z 1 once valid
 	int2 TileMin;
 	float2 FarScale;  // Far height map: uv = xy * FarScale + FarOffset, height = lerp(FarZ.x, FarZ.y, texel)
 	float2 FarOffset;
@@ -34,7 +34,12 @@ cbuffer GroundFogCB : register(b0)
 	float ContactCell;   // Contact map: world units a texel, world texel of texel (0, 0), texels a side
 	int2 ContactMin;
 	uint ContactResolution;
-	float Pad;
+	float FarDistance;  // The composite's reach for the sky, world units
+	int2 LandCell;      // The land map's centre cell (GroundTiles: the loaded landscape, LAND_REACH cells round it)
+	float2 Pad;
+	float2 LodOrigin;  // Unused
+	uint HasLod;       // The landscape depth is in (the distant fog)
+	float LodPad;
 };
 
 Texture2D<float> DepthTexture : register(t0);
@@ -44,7 +49,11 @@ Texture2D<float> FarHeight : register(t3);
 Texture2DArray<float4> Bed : register(t4);  // Per level: x height, z kind (2 closed)
 Texture2D<uint> ContactLow : register(t5);  // Lowest and highest point of what stands over each texel (FogContactCS)
 Texture2D<uint> ContactHigh : register(t6);
-Texture3D<float> Noise : register(t7);  // Tiling value noise, NOISE_CELLS lattice cells a side
+Texture3D<float> Noise : register(t7);        // Tiling value noise, 8 lattice cells a side: detail
+Texture3D<float> ClumpNoise : register(t10);  // 4 cells: clumps
+Texture2D<float> BankNoise : register(t11);
+Texture2D<float2> LandMap : register(t12);
+Texture2D<float> LandscapeDepth : register(t13);  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
 SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
 #ifndef COMPOSITE
@@ -75,25 +84,39 @@ static const float NOISE_SPAN = 320.0;
 static const float NOISE_SPAN_UP = 160.0;
 /** Seconds between restarts of each of the noise's two flow phases, fastest flow carrying it, and its rise. */
 static const float FLOW_PERIOD = 2.0;
-static const float MAX_FLOW = 150.0;
-static const float RISE = 6.0;
+static const float MAX_FLOW = 250.0;
+static const float RISE = 12.0;
 /** How much the top rises and falls with the noise in fog Pool Depth deep (puff by depth). */
 static const float BILLOW = 0.45;
 /** How much the top rises at full churn (LIFT_SPEED). */
-static const float LIFT = 0.6;
-static const float LIFT_SPEED = 120.0;
+static const float LIFT = 0.8;
+static const float LIFT_SPEED = 60.0;
 /** Share of the fog's height over which it breaks into clumps, and how deep the clumps' gaps go. */
 static const float CLUMPING = 0.7;
 /** Wisps: how far over the top they stray (times the depth), and their density relative to the fog's. */
-static const float WISP_REACH = 0.6;
-static const float WISP_DENSITY = 0.25;
+static const float WISP_REACH = 1.0;
+static const float WISP_DENSITY = 0.35;
+/** The fog's motion carries the noise this many times as fast, so its drift reads. */
+static const float NOISE_FLOW_GAIN = 6.0;
+/** World units one bank noise tile spans; how much the banks thin and thicken the fog; their drift, world units a second. */
+static const float BANK_SPAN = 8000.0;
+static const float2 BANK_RANGE = float2(0.45, 1.3);
+static const float BANK_DRIFT = 8.0;
+/** Most a ray's end corrects its ground map by, and how far round it the correction reaches, world units. */
+static const float GROUND_FIX = 16.0;
+static const float GROUND_FIX_REACH = 200.0;
+/** The distant fog: the longest slant path through it, in thicknesses; its density as a share of the near fog's (the near
+ * fog's soft top averages about half); how far off the LOD ground a surface may lie and still be it, world units (more
+ * far away, where the map's 128-unit texels average the hills). */
+static const float LOD_PATH = 4.0;
+static const float LOD_DENSITY = 0.5;
 /** The fluff's furthest reach over the deepest fog: the band rays are clipped to. */
 static const float FLUFF_REACH = 1.0 + BILLOW + LIFT + WISP_REACH;
 /** Share of MaxDistance over which the fog fades out at the end of the rays. */
 static const float DISTANCE_FADE = 0.2;
 static const float TILE_TEXEL = 8.0;
-static const int TILE_SLOTS = 8;
-static const uint TILE_MAY_FORM = 1, TILE_ROCK = 2, TILE_STEEP = 4;
+static const int TILE_SLOTS = 16;
+static const uint TILE_MAY_FORM = 1, TILE_ROCK = 2, TILE_STEEP = 4, TILE_WATER = 8;
 /** The lower level's flags carry the gap up to the overhang's underside: flags + gap * GAP_SCALE (GroundTiles). */
 static const float GAP_SCALE = 32.0;
 /** Fog under an overhang stays this far under its underside, fading over it. */
@@ -125,6 +148,34 @@ float HenyeyGreenstein(float cosTheta, float g)
 {
 	const float g2 = g * g;
 	return (1.0 - g2) / (4.0 * Math::PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4), 1.5));
+}
+
+static const float LAND_TEXEL = 32.0;
+static const int LAND_TEXELS = 1024, LAND_REACH = 2;
+
+/** The middle tier where no tile is resident: the loaded landscape, bilinear, and its share fog may form on (not water). */
+float LandGround(float2 xy, out float forming)
+{
+	forming = 0.0;
+	const int2 cell = int2(floor(xy / 4096.0));
+	if (any(abs(cell - LandCell) > LAND_REACH))
+		return NO_GROUND;
+	const float2 t = xy / LAND_TEXEL - 0.5;
+	const int2 base = int2(floor(t));
+	const float2 f = t - float2(base);
+	float height = 0.0, form = 0.0;
+	[unroll] for (uint k = 0; k < 4; k++)
+	{
+		const int2 offset = int2(k & 1, k >> 1);
+		const float2 g = LandMap.Load(int3((base + offset) & (LAND_TEXELS - 1), 0));
+		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y);
+		if (g.x < -1e6)
+			return NO_GROUND;
+		height += g.x * w;
+		form += ((uint(g.y) & TILE_MAY_FORM) ? 1.0 : 0.0) * w;
+	}
+	forming = form;
+	return height;
 }
 
 /** A ground texel (top height, flags, lower height, flags), or NO_GROUND where its tile is not resident yet. */
@@ -178,23 +229,19 @@ float Ground(float3 position, out float forming, out float carries, out float ce
 		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (abs(g.x - reference) < LEVEL_STEP ? 1.0 : 0.0);
 		height += g.x * w;
 		form += ((uint(g.y) & TILE_MAY_FORM) ? 1.0 : 0.0) * w;
-		carry += ((uint(g.y) & (TILE_ROCK | TILE_STEEP)) ? 0.0 : 1.0) * w;
+		carry += ((uint(g.y) & (TILE_ROCK | TILE_STEEP | TILE_WATER)) ? 0.0 : 1.0) * w;
 		weights += w;
 	}
 	const bool resident = nearestTexel.x > NO_GROUND;
-	forming = resident ? form / max(weights, 1e-4) : 1.0;
-	carries = resident ? carry / max(weights, 1e-4) : 1.0;
-	return !resident ? FarGround(position.xy) : weights > 1e-4 ? height / weights :
-	                                                             reference;
+	float landForming;
+	const float land = resident ? NO_GROUND : LandGround(position.xy, landForming);
+	forming = resident ? form / max(weights, 1e-4) : landForming;
+	carries = resident ? carry / max(weights, 1e-4) : landForming;
+	return !resident ? land : weights > 1e-4 ? height / weights :
+	                                           reference;
 }
 
-/** The settled depth past the grid: the far ground's hollows hold more. */
-float SettledFar(float2 xy, float ground)
-{
-	static const float RING = 256.0;
-	const float around = 0.25 * (FarGround(xy + float2(RING, 0)) + FarGround(xy - float2(RING, 0)) + FarGround(xy + float2(0, RING)) + FarGround(xy - float2(0, RING)));
-	return min(FarPoolDepth, FarDepth + max(around - ground, 0.0) * HollowGain);
-}
+float Banks(float2 xy);
 
 /**
  * The fog over ground of the given height (x depth, yz velocity, w churn): the column (bilinear) of each nearest cell's
@@ -206,7 +253,7 @@ float4 FogColumn(float2 xy, float ground, float forming)
 	const float2 c = xy / CellSize - 0.5;
 	const float2 logical = c - float2(GridMin);
 	const float fromEdge = min(min(logical.x, logical.y), min(float(Resolution) - 1.0 - logical.x, float(Resolution) - 1.0 - logical.y));
-	const float settled = HasFar != 0 ? SettledFar(xy, ground) * forming : 0.0;
+	const float settled = FarDepth * forming * Banks(xy);
 	if (fromEdge < 0.0)
 		return float4(settled, 0.0, 0.0, 0.0);
 	const int2 base = int2(floor(c));
@@ -235,16 +282,23 @@ float4 FogColumn(float2 xy, float ground, float forming)
 float FlowNoise(float3 position, float2 velocity)
 {
 	const float speed = length(velocity);
-	const float2 flow = velocity * min(1.0, MAX_FLOW / max(speed, 1e-3)) * FLOW_PERIOD;
+	const float2 flow = velocity * NOISE_FLOW_GAIN * min(1.0, MAX_FLOW / max(speed * NOISE_FLOW_GAIN, 1e-3)) * FLOW_PERIOD;
 	const float time = SharedData::Timer / FLOW_PERIOD;
 	const float phaseA = frac(time), phaseB = frac(time + 0.5);
 	const float3 span = float3(NOISE_SPAN, NOISE_SPAN, NOISE_SPAN_UP);
 	const float3 p = (position - float3(0.0, 0.0, SharedData::Timer * RISE)) / span;
 	const float3 a = p - float3(flow * phaseA, 0.0) / span;
 	const float3 b = p - float3(flow * phaseB, 0.0) / span + 0.37;
-	const float noiseA = Noise.SampleLevel(WrapSampler, a, 0) * 0.65 + Noise.SampleLevel(WrapSampler, a * 2.7 + 0.13, 0) * 0.35;
-	const float noiseB = Noise.SampleLevel(WrapSampler, b, 0) * 0.65 + Noise.SampleLevel(WrapSampler, b * 2.7 + 0.13, 0) * 0.35;
+	// Clumps at the noise's span, detail at a fifth of it
+	const float noiseA = ClumpNoise.SampleLevel(WrapSampler, a, 0) * 0.6 + Noise.SampleLevel(WrapSampler, a * 2.3 + 0.13, 0) * 0.4;
+	const float noiseB = ClumpNoise.SampleLevel(WrapSampler, b, 0) * 0.6 + Noise.SampleLevel(WrapSampler, b * 2.3 + 0.13, 0) * 0.4;
 	return lerp(noiseA, noiseB, abs(phaseA * 2.0 - 1.0));
+}
+
+/** Banks: where the fog lies thicker or thinner over hundreds of metres, drifting slowly. */
+float Banks(float2 xy)
+{
+	return lerp(BANK_RANGE.x, BANK_RANGE.y, BankNoise.SampleLevel(WrapSampler, (xy + SharedData::Timer * BANK_DRIFT) / BANK_SPAN, 0));
 }
 
 /** How much of the fog at a position is left by what stands in it (the contact map): 0 inside, 1 clear of it. */
@@ -260,12 +314,17 @@ float Uncut(float3 position)
 	return 1.0 - smoothstep(-CONTACT_SOFTNESS, 0.0, position.z - bottom) * (1.0 - smoothstep(0.0, CONTACT_SOFTNESS, position.z - top));
 }
 
+/** The surface a ray ends on, and how far its ground map is off there (the landscape is drawn as triangles, sampled
+ * bilinearly): samples near the end take the surface's height (GROUND_FIX). */
+static float3 rayEnd = 0.0;
+static float groundError = 0.0;
+
 /** Fog extinction per world unit at a position, and the sky light reaching it through the fog above. */
 float FogAt(float3 position, out float shading)
 {
 	shading = 1.0;
 	float forming, carries, ceiling;
-	const float ground = Ground(position, forming, carries, ceiling);
+	const float ground = Ground(position, forming, carries, ceiling) + groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
 	const float height = position.z - ground;
 	if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth * FLUFF_REACH)
 		return 0.0;
@@ -286,7 +345,7 @@ float FogAt(float3 position, out float shading)
 	const float body = (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * clumps;
 	const float wisps = WISP_DENSITY * (puff + saturate(column.w / LIFT_SPEED)) * saturate(noise * 4.0 - 2.6) * (1.0 - smoothstep(top, top * (1.0 + WISP_REACH), height));
 	shading = exp(-SELF_SHADING * Density * max(top - height, 0.0));
-	return Density * carries * max(body, wisps) * Uncut(position);
+	return Density * carries * max(body, wisps) * Uncut(position) * Banks(position.xy);
 }
 
 /**
@@ -327,6 +386,34 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 	return float4(inscattering, transmittance);
 }
 
+/** This pixel's landscape distance (LandscapeDepth), set before FogOverRay. */
+static float landscapeDistance = 1e30;
+/** How flat the landscape is at this pixel, 1 flat to 0 steeper than about 50 degrees (no ground fog on a cliff). */
+static float landscapeFlat = 1.0;
+
+/**
+ * The distant fog past the loaded landscape: a layer of Ground Thickness (in banks) on the surface the pixel shows, where
+ * that surface lies on the LOD terrain (not water, not treetops or rock tops). One lookup, no march. Fades in as the near
+ * fog fades out.
+ */
+float4 DistantFog(float depth, float3 direction, float surfaceDistance, float3 light)
+{
+	if (depth >= 1.0 || HasLod == 0)
+		return float4(0.0, 0.0, 0.0, 1.0);
+	const float distance = surfaceDistance;
+	const float weight = smoothstep(MaxDistance * (1.0 - DISTANCE_FADE), MaxDistance, distance) * (1.0 - smoothstep(FarDistance * 0.85, FarDistance, distance));
+	if (weight <= 0.0)
+		return float4(0.0, 0.0, 0.0, 1.0);
+	const float3 surface = FrameBuffer::CameraPosAdjust.xyz + direction * distance;
+	// Landscape where the scene's depth is the landscape's own: trees and rocks stand in front, water lies over its bed
+	const float tolerance = max(16.0, distance * 0.005);
+	const float onGround = (1.0 - smoothstep(tolerance, 2.0 * tolerance, abs(distance - landscapeDistance))) * landscapeFlat;
+	const float thickness = FarDepth * Banks(surface.xy);
+	const float path = min(thickness / max(abs(direction.z), 0.02), LOD_PATH * thickness);
+	const float transmittance = exp(-LOD_DENSITY * Density * path * weight * onGround);
+	return float4((1.0 - transmittance) * light, transmittance);
+}
+
 /** The fog over one view ray to a surface (camera-relative), or to MaxDistance where depth is the sky. */
 float4 FogOverRay(float depth, float2 uv, float2 pixel)
 {
@@ -335,14 +422,27 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	const float surfaceDistance = length(surface);
 	const float3 direction = surface / max(surfaceDistance, 1e-3);
 	const float rayLength = min(depth >= 1.0 ? MaxDistance : surfaceDistance, MaxDistance);
+	const float jitter = Random::InterleavedGradientNoise(pixel, SharedData::FrameCount);
+
+	// Light: the sun scattered toward the eye, and the ambient average
+	const float3 sun = SharedData::DirLightColor.xyz * HenyeyGreenstein(dot(direction, SharedData::DirLightDirection.xyz), PHASE_G) * 4.0 * Math::PI;
+	const float3 ambient = max(float3(SharedData::AmbientSHR.x, SharedData::AmbientSHG.x, SharedData::AmbientSHB.x), 0.0) * 0.886;
+	const float3 light = Albedo * (sun * SUN_SHARE * (1.0 - SharedData::InInterior) + ambient);
+
+	// The LOD fog behind the simulated fog
+	const float4 none = DistantFog(depth, direction, surfaceDistance, light);
 
 	// Clip the ray to the fog band over the ground under the camera and the ray's end
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float3 endPoint = camera + direction * rayLength;
 	float formingA, formingB, carriesA, carriesB, ceilingA, ceilingB;
-	const float bandTop = max(Ground(camera, formingA, carriesA, ceilingA), Ground(endPoint + float3(0.0, 0.0, 1.0), formingB, carriesB, ceilingB)) + MaxDepth * FLUFF_REACH;
+	const float endGround = Ground(endPoint + float3(0.0, 0.0, 1.0), formingB, carriesB, ceilingB);
+	// A surface just over or under the ground map (not a wall or a tree): the map is that far off there
+	rayEnd = endPoint;
+	groundError = depth < 1.0 && abs(endPoint.z - endGround) < GROUND_FIX ? endPoint.z - endGround : 0.0;
+	const float bandTop = max(Ground(camera, formingA, carriesA, ceilingA), endGround) + MaxDepth * FLUFF_REACH;
 	if (rayLength <= 0.0 || min(camera.z, endPoint.z) > bandTop)
-		return float4(0.0, 0.0, 0.0, 1.0);
+		return none;
 	float rayStart = 0.0;
 	float rayEnd = rayLength;
 	if (camera.z > bandTop)
@@ -352,31 +452,33 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	rayStart = clamp(rayStart, 0.0, rayLength);
 	rayEnd = clamp(rayEnd, 0.0, rayLength);
 	if (rayEnd <= rayStart)
-		return float4(0.0, 0.0, 0.0, 1.0);
+		return none;
 	const float span = rayEnd - rayStart;
-
-	const float jitter = Random::InterleavedGradientNoise(pixel, SharedData::FrameCount);
-
-	// Light: the sun scattered toward the eye, and the ambient average
-	const float3 sun = SharedData::DirLightColor.xyz * HenyeyGreenstein(dot(direction, SharedData::DirLightDirection.xyz), PHASE_G) * 4.0 * Math::PI;
-	const float3 ambient = max(float3(SharedData::AmbientSHR.x, SharedData::AmbientSHG.x, SharedData::AmbientSHB.x), 0.0) * 0.886;
-	const float3 light = Albedo * (sun * SUN_SHARE * (1.0 - SharedData::InInterior) + ambient);
 
 	// Both ends can be in the fog (camera and hit ground), so each half marches from its own end with fine first steps
 	const float middle = rayStart + 0.5 * span;
 	const float4 nearHalf = MarchHalf(camera, direction, rayStart, middle, false, jitter, light);
 	const float4 farHalf = MarchHalf(camera, direction, middle, rayEnd, true, jitter, light);
-	return float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
+	const float4 near = float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
+	return float4(near.rgb + near.a * none.rgb, near.a * none.a);
 }
 
-/** Distance from the camera to a pixel's surface (MaxDistance for the sky), as the composite reads it. */
+/** Distance from the camera to a pixel's surface (FarDistance for the sky), as the composite reads it. */
 float SurfaceDistance(float depth, float2 uv)
 {
 	float4 positionCS = mul(FrameBuffer::CameraViewProjInverse, float4(2 * float2(uv.x, -uv.y + 1) - 1, depth, 1));
-	return depth >= 1.0 ? MaxDistance : min(length(positionCS.xyz / positionCS.w), MaxDistance);
+	return depth >= 1.0 ? FarDistance : min(length(positionCS.xyz / positionCS.w), FarDistance);
 }
 
 #ifndef COMPOSITE
+/** The landscape's surface at a full-resolution pixel (LandscapeDepth), camera-relative. */
+float3 LandscapePoint(uint2 pixel, uint2 size)
+{
+	float2 uv = (float2(pixel) + 0.5) * SharedData::BufferDim.zw * FrameBuffer::DynamicResolutionParams2.xy;
+	const float4 positionCS = mul(FrameBuffer::CameraViewProjInverse, float4(2 * float2(uv.x, -uv.y + 1) - 1, LandscapeDepth[pixel], 1));
+	return positionCS.xyz / positionCS.w;
+}
+
 [numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	const uint2 size = uint2(SharedData::BufferDim.xy);
 	const uint2 halfSize = (size + 1) / 2;
@@ -398,6 +500,13 @@ float SurfaceDistance(float depth, float2 uv)
 
 	float2 uv = float2(pixel + 0.5) * SharedData::BufferDim.zw;
 	uv *= FrameBuffer::DynamicResolutionParams2.xy;
+	if (HasLod != 0) {
+		// The landscape here and two pixels across and down: its distance, and its slope from the three
+		const float3 land[3] = { LandscapePoint(pixel, size), LandscapePoint(min(pixel + uint2(2, 0), size - 1), size), LandscapePoint(min(pixel + uint2(0, 2), size - 1), size) };
+		landscapeDistance = LandscapeDepth[pixel] >= 1.0 ? 1e30 : length(land[0]);
+		const float3 normal = cross(land[1] - land[0], land[2] - land[0]);
+		landscapeFlat = smoothstep(0.64, 0.87, abs(normal.z) / max(length(normal), 1e-6));
+	}
 	FogHalf[dispatchID.xy] = FogOverRay(depth, uv, float2(dispatchID.xy));
 	FogHalfDistance[dispatchID.xy] = SurfaceDistance(depth, uv);
 }
