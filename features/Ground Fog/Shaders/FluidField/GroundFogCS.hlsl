@@ -40,6 +40,10 @@ cbuffer GroundFogCB : register(b0)
 	float2 LodOrigin;  // Unused
 	uint HasLod;       // The landscape depth is in (the distant fog)
 	float LodPad;
+	uint HasSunShadow;  // Volumetric Shadows' shared shadow map is in: sun shadows in the fog
+	uint HasSky;        // Skylighting's probes are in: sky light in the fog
+	uint LocalLights;   // Light Limit Fix's lights glowing in the fog: 0 off, 1 the nearest few, 2 all in the cluster
+	float LightPad;
 };
 
 Texture2D<float> DepthTexture : register(t0);
@@ -56,6 +60,15 @@ Texture2D<float2> LandMap : register(t12);
 Texture2D<float> LandscapeDepth : register(t13);  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
 SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
+
+// The lighting CS already has: the sun's shadow (Volumetric Shadows, t18 and t98), the sky's visibility (Skylighting, t14),
+// local lights (Light Limit Fix, t35 to t37); and its colour helpers, which match Linear Lighting
+#include "Common/ColorManagement.hlsli"
+#define SKYLIGHTING_PROBE_REGISTER t14
+#include "Skylighting/Skylighting.hlsli"
+#define VOLUMETRIC_SHADOWS
+#include "Common/ShadowSampling.hlsli"
+#include "LightLimitFix/LightLimitFix.hlsli"
 #ifndef COMPOSITE
 RWTexture2D<float4> FogHalf : register(u0);
 RWTexture2D<float> FogHalfDistance : register(u1);
@@ -65,14 +78,36 @@ Texture2D<float> FogHalfDistanceIn : register(t9);
 RWTexture2D<float4> MainRW : register(u0);
 #endif
 
-/** Henyey-Greenstein g: mist glows a little toward the sun. */
-static const float PHASE_G = 0.25;
+/** Henyey-Greenstein lobes: forward toward the sun, a weaker backward one away from it (silver edges), and the backward
+ * one's share. */
+static const float PHASE_FORWARD = 0.5;
+static const float PHASE_BACKWARD = -0.25;
+static const float PHASE_BACK_SHARE = 0.3;
+/** Light at the bottom of the layer (darker, cooler) and at its top, as a share of the sky light: light scatters in from above. */
+static const float3 BOTTOM_LIGHT = float3(0.78, 0.78, 0.8);
+static const float3 TOP_LIGHT = float3(1.1, 1.1, 1.1);
+/** Fog scatters light many times, washing the sky's colour toward white: the share of the sky's colour kept, and the sun's
+ * share scattered in from every direction (not by the phase, not shadowed). */
+static const float SKY_SATURATION = 0.3;
+static const float SUN_MULTIPLE = 0.06;
+/** Local lights in the fog: their strength; how far their glow reaches past their radius and its blend with their own
+ * falloff (a softer, wider glow); the most one light gives (as a share of its colour). */
+static const float LOCAL_STRENGTH = 0.5;
+static const float GLOW_REACH = 1.5;
+static const float GLOW_SHARE = 0.6;
+static const float GLOW_CAP = 0.6;
+/** Local lights: the nearest few at the low setting, at most this many at the high one. */
+static const uint FEW_LIGHTS = 4;
+static const uint MANY_LIGHTS = 32;
 /** Sun's share of the fog's light: low ground fog is mostly sky-lit. */
 static const float SUN_SHARE = 0.15;
 /** Share of the fog's depth over which its top softens into clear air. */
 static const float TOP_SOFTNESS = 0.8;
 /** How strongly fog above a point shades it from the sky. */
-static const float SELF_SHADING = 1.0;
+static const float SELF_SHADING = 1.65;
+/** The sun's self-shadow: the fog between a point and the sun, along the sun's slant (its height in the sky, at least this). */
+static const float SUN_SELF_SHADING = 1.1;
+static const float LOWEST_SUN = 0.35;
 /** First step length from each end of a ray, world units: finer than the layer is thick. */
 static const float FIRST_STEP = 4.0;
 /** Ground texels more than this apart in height are two levels (a ledge's top and its foot): never blended. */
@@ -319,10 +354,11 @@ float Uncut(float3 position)
 static float3 rayEnd = 0.0;
 static float groundError = 0.0;
 
-/** Fog extinction per world unit at a position, and the sky light reaching it through the fog above. */
-float FogAt(float3 position, out float shading)
+/** Fog extinction per world unit at a position, the depth of fog over it (its self-shadow), and how high in the layer it lies (0 bottom, 1 top). */
+float FogAt(float3 position, out float shading, out float upInLayer)
 {
 	shading = 1.0;
+	upInLayer = 0.0;
 	float forming, carries, ceiling;
 	const float ground = Ground(position, forming, carries, ceiling) + groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
 	const float height = position.z - ground;
@@ -341,10 +377,12 @@ float FogAt(float3 position, out float shading)
 		return 0.0;
 	// Dense at the bottom, breaking into clumps toward the top; a few wisps stray over it
 	const float up = saturate(height / max(top, 1.0));
+	upInLayer = up;
 	const float clumps = lerp(1.0, saturate(noise * 2.2 - 0.6), CLUMPING * up);
 	const float body = (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * clumps;
 	const float wisps = WISP_DENSITY * (puff + saturate(column.w / LIFT_SPEED)) * saturate(noise * 4.0 - 2.6) * (1.0 - smoothstep(top, top * (1.0 + WISP_REACH), height));
-	shading = exp(-SELF_SHADING * Density * max(top - height, 0.0));
+	// The fog's own depth over it, not the lifted top (lifted wisps and clumps are thin: counted whole, wakes went dark)
+	shading = max(min(depth, top) - height, 0.0);
 	return Density * carries * max(body, wisps) * Uncut(position) * Banks(position.xy);
 }
 
@@ -352,7 +390,49 @@ float FogAt(float3 position, out float shading)
  * Marches the ray between two distances with StepCount / 2 steps growing from FIRST_STEP at the start (the far end when
  * a_fromEnd). Returns in-scattered light (rgb) and transmittance (a).
  */
-float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_fromEnd, float jitter, float3 light)
+/** The sun reaching a point (Volumetric Shadows' shadow map), 1 where it is not in. Camera-relative position. */
+float SunVisibility(float3 positionCR)
+{
+	if (HasSunShadow == 0)
+		return 1.0;
+	float detailed;
+	return VolumetricShadows::GetVSMShadow2D(positionCR, detailed);
+}
+
+/** The open sky a point sees (Skylighting's probes), 1 where they are not in. Camera-relative position. */
+float SkyVisibility(float3 positionCR)
+{
+	if (HasSky == 0)
+		return 1.0;
+	return Skylighting::MixDiffuse(Skylighting::EvaluateVisibility(Skylighting::SampleNoBias(positionCR), Skylighting::GetFadeOutFactor(positionCR)));
+}
+
+/** Local lights (Light Limit Fix's clusters) at a camera-relative point seen at uv: the nearest few or all in its cluster. */
+float3 LocalLight(float3 positionCR, float2 uv)
+{
+	uint clusterIndex = 0;
+	if (LocalLights == 0 || !LightLimitFix::GetClusterIndex(uv, length(positionCR), clusterIndex))
+		return 0.0;
+	const LightLimitFix::LightGrid grid = LightLimitFix::lightGrid[clusterIndex];
+	const uint count = min(grid.lightCount, LocalLights == 1 ? FEW_LIGHTS : MANY_LIGHTS);
+	float3 sum = 0.0;
+	[loop] for (uint i = 0; i < count; i++)
+	{
+		const LightLimitFix::Light light = LightLimitFix::lights[LightLimitFix::lightList[grid.offset + i]];
+		const float distance = length(light.positionWS.xyz - positionCR);
+		const float edge = saturate(1.0 - distance / (light.radius * GLOW_REACH));
+		const float glow = edge * edge;
+		const float falloff = min(lerp(LightLimitFix::GetAttenuation(distance, light), glow, GLOW_SHARE), GLOW_CAP);
+		sum += Color::PointLight(light.color) * falloff * LOCAL_STRENGTH;
+	}
+	return sum;
+}
+
+/**
+ * Marches the ray between two distances, as below; a_sun and a_sky are the light per unit visibility (the phase and the
+ * albedo in), shaded per sample. Also sums where along the ray the fog scatters (for the local lights): o_where by weight.
+ */
+float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_fromEnd, float jitter, float3 a_sun, float3 a_sky, inout float4 o_where)
 {
 	const float span = to - from;
 	const uint count = max(StepCount / 2, 1u);
@@ -373,12 +453,20 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 		stepLength *= growth;
 		const float distance = a_fromEnd ? to - along : from + along;
 		const float3 position = camera + direction * distance;
-		float shading;
-		const float extinction = FogAt(position, shading) * (1.0 - smoothstep(MaxDistance * (1.0 - DISTANCE_FADE), MaxDistance, distance));
+		float shading, upInLayer;
+		const float extinction = FogAt(position, shading, upInLayer) * (1.0 - smoothstep(MaxDistance * (1.0 - DISTANCE_FADE), MaxDistance, distance));
 		if (extinction <= 0.0)
 			continue;
 		const float stepTransmittance = exp(-extinction * segment);
-		const float3 scattered = (1.0 - stepTransmittance) * light * shading;
+		const float3 positionCR = position - FrameBuffer::CameraPosAdjust.xyz;
+		// Self-shadow: the sky dimmed by the fog straight above, the sun by the fog toward it along its slant
+		const float above = Density * shading;
+		const float sunShade = exp(-SUN_SELF_SHADING * above / max(SharedData::DirLightDirection.z, LOWEST_SUN));
+		const float skyShade = exp(-SELF_SHADING * above);
+		const float3 light = a_sun * SunVisibility(positionCR) * sunShade + a_sky * SkyVisibility(positionCR) * skyShade * lerp(BOTTOM_LIGHT, TOP_LIGHT, upInLayer);
+		const float3 scattered = (1.0 - stepTransmittance) * light;
+		const float weight = (1.0 - stepTransmittance) * transmittance;
+		o_where += float4(positionCR * weight, weight);
 		// Marching back to front, each step sits in front of everything marched so far
 		inscattering = a_fromEnd ? inscattering * stepTransmittance + scattered : inscattering + transmittance * scattered;
 		transmittance *= stepTransmittance;
@@ -424,10 +512,14 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	const float rayLength = min(depth >= 1.0 ? MaxDistance : surfaceDistance, MaxDistance);
 	const float jitter = Random::InterleavedGradientNoise(pixel, SharedData::FrameCount);
 
-	// Light: the sun scattered toward the eye, and the ambient average
-	const float3 sun = SharedData::DirLightColor.xyz * HenyeyGreenstein(dot(direction, SharedData::DirLightDirection.xyz), PHASE_G) * 4.0 * Math::PI;
-	const float3 ambient = max(float3(SharedData::AmbientSHR.x, SharedData::AmbientSHG.x, SharedData::AmbientSHB.x), 0.0) * 0.886;
-	const float3 light = Albedo * (sun * SUN_SHARE * (1.0 - SharedData::InInterior) + ambient);
+	// Light: the sun scattered toward the eye (forward and backward lobes), and the sky's average, through CS's colour helpers
+	const float cosTheta = dot(direction, SharedData::DirLightDirection.xyz);
+	const float phase = lerp(HenyeyGreenstein(cosTheta, PHASE_FORWARD), HenyeyGreenstein(cosTheta, PHASE_BACKWARD), PHASE_BACK_SHARE) * 4.0 * Math::PI;
+	const float3 sunLight = Albedo * Color::DirectionalLight(SharedData::DirLightColor.xyz) * phase * SUN_SHARE * (1.0 - SharedData::InInterior);
+	const float3 sky = Color::Ambient(max(float3(SharedData::AmbientSHR.x, SharedData::AmbientSHG.x, SharedData::AmbientSHB.x), 0.0) * 0.886);
+	const float3 sunColour = Color::DirectionalLight(SharedData::DirLightColor.xyz) * (1.0 - SharedData::InInterior);
+	const float3 skyLight = Albedo * (lerp(Color::RGBToLuminance(sky).xxx, sky, SKY_SATURATION) + sunColour * SUN_MULTIPLE);
+	const float3 light = sunLight + skyLight;
 
 	// The LOD fog behind the simulated fog
 	const float4 none = DistantFog(depth, direction, surfaceDistance, light);
@@ -457,9 +549,13 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 
 	// Both ends can be in the fog (camera and hit ground), so each half marches from its own end with fine first steps
 	const float middle = rayStart + 0.5 * span;
-	const float4 nearHalf = MarchHalf(camera, direction, rayStart, middle, false, jitter, light);
-	const float4 farHalf = MarchHalf(camera, direction, middle, rayEnd, true, jitter, light);
-	const float4 near = float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
+	float4 where = 0.0;
+	const float4 nearHalf = MarchHalf(camera, direction, rayStart, middle, false, jitter, sunLight, skyLight, where);
+	const float4 farHalf = MarchHalf(camera, direction, middle, rayEnd, true, jitter, sunLight, skyLight, where);
+	float4 near = float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
+	// Local lights: once a ray, where the fog along it scatters most
+	if (LocalLights != 0 && where.w > 1e-4)
+		near.rgb += Albedo * LocalLight(where.xyz / where.w, uv) * (1.0 - near.a);
 	return float4(near.rgb + near.a * none.rgb, near.a * none.a);
 }
 
@@ -513,6 +609,8 @@ float3 LandscapePoint(uint2 pixel, uint2 size)
 #else
 /** Relative distance difference over which a half-resolution texel stops counting for a pixel (an edge between surfaces). */
 static const float EDGE_TOLERANCE = 0.05;
+/** The blur's Gaussian spread, in half-resolution texels squared. */
+static const float BLUR_SPREAD = 1.2;
 
 [numthreads(8, 8, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	const uint2 size = uint2(SharedData::BufferDim.xy);
@@ -523,27 +621,30 @@ static const float EDGE_TOLERANCE = 0.05;
 	uv *= FrameBuffer::DynamicResolutionParams2.xy;
 	const float distance = SurfaceDistance(DepthTexture[dispatchID.xy], uv);
 
-	// Bilinear over the four nearest half-resolution texels, each weighed down by how far its surface lies from this pixel's
+	// A 3 x 3 Gaussian over the nearest half-resolution texels (the march's jitter averages out), each weighed down by how far
+	// its surface lies from this pixel's
 	const int2 halfMax = int2((size + 1) / 2) - 1;
 	const float2 position = (float2(dispatchID.xy) + 0.5) * 0.5 - 0.5;
-	const int2 base = int2(floor(position));
-	const float2 t = position - float2(base);
+	const int2 centre = int2(floor(position + 0.5));
 	float4 fog = 0.0;
 	float weights = 0.0;
 	float nearestGap = 1e30;
 	float4 nearest = float4(0.0, 0.0, 0.0, 1.0);
-	[unroll] for (uint k = 0; k < 4; k++)
+	[unroll] for (int dy = -1; dy <= 1; dy++)
 	{
-		const int2 offset = int2(k & 1, k >> 1);
-		const int2 texel = clamp(base + offset, 0, halfMax);
-		const float4 sample = FogHalfIn[texel];
-		const float gap = abs(FogHalfDistanceIn[texel] - distance) / max(distance, 1.0);
-		const float w = (offset.x ? t.x : 1.0 - t.x) * (offset.y ? t.y : 1.0 - t.y) * saturate(1.0 - gap / EDGE_TOLERANCE);
-		fog += sample * w;
-		weights += w;
-		if (gap < nearestGap) {
-			nearestGap = gap;
-			nearest = sample;
+		[unroll] for (int dx = -1; dx <= 1; dx++)
+		{
+			const int2 texel = clamp(centre + int2(dx, dy), 0, halfMax);
+			const float4 sample = FogHalfIn[texel];
+			const float gap = abs(FogHalfDistanceIn[texel] - distance) / max(distance, 1.0);
+			const float2 offset = float2(centre + int2(dx, dy)) - position;
+			const float w = exp(-dot(offset, offset) / BLUR_SPREAD) * saturate(1.0 - gap / EDGE_TOLERANCE);
+			fog += sample * w;
+			weights += w;
+			if (gap < nearestGap) {
+				nearestGap = gap;
+				nearest = sample;
+			}
 		}
 	}
 	// No texel on this pixel's surface (a thin edge): the closest in distance

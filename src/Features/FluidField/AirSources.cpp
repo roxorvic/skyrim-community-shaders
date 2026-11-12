@@ -88,8 +88,22 @@ namespace FluidFieldSim
 		/** @brief Fires: how fast the fog shoved from them flows, and the share of it cleared each step. */
 		constexpr float HEAT_SHOVE = 150.0f;
 		constexpr float HEAT_CUT = 0.12f;
-		/** @brief A dead body's torso capsule radius at scale 1. */
+		/** @brief A dead body's torso and limb capsule radii at scale 1, and the most bones a body counts. */
 		constexpr float TORSO_RADIUS = 16.0f;
+		constexpr float LIMB_RADIUS = 7.0f;
+		constexpr uint32_t RAGDOLL_BONES = 48;
+
+		/** @brief A skeleton's bone (humanoid "NPC ..." nodes; a creature's by its leg names too). */
+		bool IsSkeletonBone(RE::NiAVObject* a_object)
+		{
+			return a_object && a_object->AsNode() && !a_object->name.empty() && (std::string_view(a_object->name.c_str()).starts_with("NPC ") || IsLegBone(a_object));
+		}
+
+		bool IsTorsoBone(const RE::NiAVObject* a_object)
+		{
+			const std::string_view name(a_object->name.c_str());
+			return name.find("Spine") != std::string_view::npos || name.find("Pelvis") != std::string_view::npos || name.find("Neck") != std::string_view::npos;
+		}
 
 		/** @brief Explosions seen by the hook since the last update: where, how wide, how old. */
 		struct Blast
@@ -286,16 +300,20 @@ namespace FluidFieldSim
 						pushers.push_back({ .from = { previousTip.x, previousTip.y }, .to = { tip.x, tip.y }, .radius = 20.0f * scale, .shove = 0.0f, .velocity = { swing.x * SWING_PUSH * a_strength, swing.y * SWING_PUSH * a_strength }, .cut = 0.0f, .bottom = std::min(previousTip.z, tip.z) - BLADE_RADIUS, .top = std::max(previousTip.z, tip.z) + BLADE_RADIUS, .pad = 0.0f });
 				}
 			}
-			// A dead body (a ragdoll) lies in the fog: its torso cuts too
+			// A dead body (a ragdoll): every bone of its skeleton cuts the fog, and pushes it while it falls
 			if (root && close && actor->IsDead()) {
-				auto* pelvis = root->GetObjectByName("NPC Pelvis [Pelv]");
-				auto* neck = root->GetObjectByName("NPC Neck [Neck]");
-				if (pelvis && neck) {
-					const auto& a = pelvis->world.translate;
-					const auto& b = neck->world.translate;
-					const float r = TORSO_RADIUS * scale;
+				uint32_t bone = 0;
+				RE::BSVisit::TraverseScenegraphObjects(root, [&](RE::NiAVObject* a_object) {
+					auto* parent = a_object->parent;
+					if (!a_object->AsNode() || !parent || !IsSkeletonBone(a_object) || !IsSkeletonBone(parent) || bone >= RAGDOLL_BONES)
+						return RE::BSVisit::BSVisitControl::kContinue;
+					const auto& a = parent->world.translate;
+					const auto& b = a_object->world.translate;
+					const float r = (IsTorsoBone(a_object) ? TORSO_RADIUS : LIMB_RADIUS) * scale;
 					contact(a, b, r, std::min(a.z, b.z) - r, std::max(a.z, b.z) + r);
-				}
+					push(actorKey | (0x80 + bone++), b, r, b.z + r);
+					return RE::BSVisit::BSVisitControl::kContinue;
+				});
 			}
 			// Creatures without a humanoid skeleton, and everyone farther out, by their whole body
 			if (!skeleton) {

@@ -48,6 +48,7 @@ struct FluidFieldGroundFog : Feature
 		float ContactRadius = 18.0f;    ///< Metres round the player within which legs cut the fog exactly
 		float Stir = 1.0f;              ///< How hard moving actors push the fog
 		float DistantReach = 0.9f;      ///< How far the distant fog reaches, as a share of the LOD terrain's reach
+		uint LocalLights = 1;           ///< Torches and fires glowing in the fog: 0 off, 1 the nearest few, 2 all
 		uint DebugView = 0;             ///< 1 colours every surface by what the fog's ground takes it for, brighter where fog lies
 	};
 
@@ -122,11 +123,15 @@ private:
 		float farDistance;
 		int32_t landCell[2];
 		float pad[2];
-		float lodOrigin[2];  ///< The LOD ground map's texel (0, 0) corner, world units
+		float lodOrigin[2];  ///< Unused
 		uint32_t hasLod;
 		float lodPad;
+		uint32_t hasSunShadow;  ///< Volumetric Shadows' shadow map bound (t18, t98)
+		uint32_t hasSky;        ///< Skylighting's probes bound (t14)
+		uint32_t localLights;   ///< Light Limit Fix's lights bound (t35 to t37): the setting, else 0
+		float lightPad;
 	};
-	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 96);
+	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 112);
 
 	/** @brief Matches GroundDebugCB in GroundDebugCS.hlsl. */
 	struct alignas(16) GroundDebugConstants

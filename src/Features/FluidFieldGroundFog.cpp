@@ -1,6 +1,10 @@
 #include "FluidFieldGroundFog.h"
 
 #include "../I18n/I18n.h"
+#include "Deferred.h"
+#include "Features/LightLimitFix.h"
+#include "Features/Skylighting.h"
+#include "Features/VolumetricShadows.h"
 #include "Features/WetnessEffects.h"
 #include "FluidField/Field.h"
 #include "Menu.h"
@@ -25,6 +29,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ContactRadius,
 	Stir,
 	DistantReach,
+	LocalLights,
 	DebugView)
 
 void FluidFieldGroundFog::DrawSettings()
@@ -63,6 +68,11 @@ void FluidFieldGroundFog::DrawSettings()
 		if (ImGui::SliderFloat(T(TKEY("distant_reach"), "Distant Fog Reach"), &reach, 30.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp))
 			settings.DistantReach = reach / 100.0f;
 		tooltip(T(TKEY("distant_reach_tooltip"), "How far the distant fog reaches, as a share of the distant terrain's reach. It lies on the distant terrain, not on water."));
+		static constexpr const char* LIGHT_TIERS[] = { "Off", "Nearest", "All" };
+		int lights = static_cast<int>(settings.LocalLights);
+		if (ImGui::Combo(T(TKEY("local_lights"), "Local Lights"), &lights, LIGHT_TIERS, IM_ARRAYSIZE(LIGHT_TIERS)))
+			settings.LocalLights = static_cast<uint>(lights);
+		tooltip(T(TKEY("local_lights_tooltip"), "Torches, fires and other lights glowing in the fog. Nearest: the few closest lights. All: every light in reach, costing more."));
 		if (FluidFieldSim::LandscapeDepth::GetReach() > 0.0f)
 			ImGui::Text(T(TKEY("distant_reach_now"), "Distant fog reaches %.0f m"), DistantDistance() / 70.0f);
 		bool debugView = settings.DebugView == 1;
@@ -98,6 +108,7 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 	settings.ContactRadius = clamp(settings.ContactRadius, 15.0f, 20.0f, defaults.ContactRadius);
 	settings.Stir = clamp(settings.Stir, 0.0f, 3.0f, defaults.Stir);
 	settings.DistantReach = clamp(settings.DistantReach, 0.3f, 1.0f, defaults.DistantReach);
+	settings.LocalLights = std::min(settings.LocalLights, 2u);
 	settings.DebugView = std::min(settings.DebugView, 1u);
 }
 
@@ -352,6 +363,10 @@ namespace
 		ID3D11SamplerState* nullSamplers[2]{};
 		ID3D11Buffer* nullCB = nullptr;
 		a_context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
+		a_context->CSSetShaderResources(14, 1, nullSRVs);
+		a_context->CSSetShaderResources(18, 1, nullSRVs);
+		a_context->CSSetShaderResources(35, 3, nullSRVs);
+		a_context->CSSetShaderResources(98, 1, nullSRVs);
 		a_context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
 		a_context->CSSetSamplers(0, 2, nullSamplers);
 		a_context->CSSetConstantBuffers(0, 1, &nullCB);
@@ -452,6 +467,20 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	}
 
 	const auto& farMap = ground.GetFarMap();
+	// The lighting CS already has, where those features are in (Volumetric Shadows, Skylighting, Light Limit Fix)
+	auto& volumetricShadows = globals::features::volumetricShadows;
+	auto& skylighting = globals::features::skylighting;
+	auto& lightLimitFix = globals::features::lightLimitFix;
+	ID3D11ShaderResourceView* sunShadowSRV = volumetricShadows.loaded ? volumetricShadows.shadowCopySRV : nullptr;
+	ID3D11ShaderResourceView* directionalShadowSRV = globals::deferred && globals::deferred->directionalShadowLights ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
+	ID3D11ShaderResourceView* skySRV = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
+	ID3D11ShaderResourceView* lightSRVs[3] = {};
+	if (lightLimitFix.loaded && lightLimitFix.lights && lightLimitFix.lightIndexList && lightLimitFix.lightGrid) {
+		lightSRVs[0] = lightLimitFix.lights->srv.get();
+		lightSRVs[1] = lightLimitFix.lightIndexList->srv.get();
+		lightSRVs[2] = lightLimitFix.lightGrid->srv.get();
+	}
+
 	GroundFogConstants constants{
 		.gridMin = { gridMin[0], gridMin[1] },
 		.resolution = GRID_RESOLUTION,
@@ -479,7 +508,11 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.pad = {},
 		.lodOrigin = {},
 		.hasLod = FluidFieldSim::LandscapeDepth::GetSRV() ? 1u : 0u,
-		.lodPad = 0.0f
+		.lodPad = 0.0f,
+		.hasSunShadow = sunShadowSRV && directionalShadowSRV ? 1u : 0u,
+		.hasSky = skySRV ? 1u : 0u,
+		.localLights = lightSRVs[0] && lightSRVs[1] && lightSRVs[2] ? settings.LocalLights : 0u,
+		.lightPad = 0.0f
 	};
 	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
 	if (!Upload(context, groundFogCB, constants))
@@ -509,6 +542,10 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get() };
 	context->CSSetSamplers(0, 2, samplers);
+	context->CSSetShaderResources(14, 1, &skySRV);
+	context->CSSetShaderResources(18, 1, &sunShadowSRV);
+	context->CSSetShaderResources(35, 3, lightSRVs);
+	context->CSSetShaderResources(98, 1, &directionalShadowSRV);
 	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);

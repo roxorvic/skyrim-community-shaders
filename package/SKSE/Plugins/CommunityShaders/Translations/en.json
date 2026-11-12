@@ -1334,6 +1334,8 @@
     "feature.fluid_field_ground_fog.key_feature_1": "Drains downhill and pools in hollows",
     "feature.fluid_field_ground_fog.key_feature_2": "Spills off ledges and flows round rocks",
     "feature.fluid_field_ground_fog.key_feature_3": "Parted by moving actors, cut where their legs pass",
+    "feature.fluid_field_ground_fog.local_lights": "Local Lights",
+    "feature.fluid_field_ground_fog.local_lights_tooltip": "Torches, fires and other lights glowing in the fog. Nearest: the few closest lights. All: every light in reach, costing more.",
     "feature.fluid_field_ground_fog.name": "Ground Fog",
     "feature.fluid_field_ground_fog.pool_depth": "Pool Depth",
     "feature.fluid_field_ground_fog.pool_depth_tooltip": "How deep fog gathers in hollows, in world units.",
