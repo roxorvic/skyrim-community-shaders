@@ -181,6 +181,18 @@ private:
 	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution
 	std::unique_ptr<Texture2D> fogHalfDistance;  ///< Distance to each half-resolution texel's surface
 	bool drawFailed = false;
+	/** @brief The rays' bounds (GroundFogCS's TOP passes): the fog's highest top per 64-unit texel round the player, then
+	 * dilated into fogTop's first mip, with max mips. */
+	static constexpr uint32_t TOP_TEXELS = 512, TOP_MIPS = 7;
+	winrt::com_ptr<ID3D11Texture2D> fogTopRaw, fogTop;
+	winrt::com_ptr<ID3D11ShaderResourceView> fogTopRawSRV, fogTopSRV;
+	winrt::com_ptr<ID3D11UnorderedAccessView> fogTopRawUAV;
+	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, TOP_MIPS> fogTopMipSRVs;
+	std::array<winrt::com_ptr<ID3D11UnorderedAccessView>, TOP_MIPS> fogTopMipUAVs;
+	std::array<winrt::com_ptr<ID3D11ComputeShader>, 3> fogTopCS;  ///< TOP 0, 1, 2
+	bool EnsureFogTop();
+	void ReleaseFogTop();
+	void BuildFogTop(ID3D11DeviceContext* a_context);
 	/** @brief Set by the Reset button on the UI thread, consumed on the render thread. */
 	std::atomic<bool> queuedReset = true;
 };

@@ -46,6 +46,7 @@ cbuffer GroundFogCB : register(b0)
 Texture2D<float> DepthTexture : register(t0);
 Texture2D<float4> GroundTiles : register(t1);  // x top height, y flags, z lower height, w flags
 Texture2DArray<float4> Column : register(t2);  // Per level: x depth, yz velocity, w churn; toroidal
+Texture2D<float> GroundMax : register(t3);     // Per resident tile, its highest top per TOP_TEXEL (GroundTiles::GetMaxSRV)
 Texture2DArray<float4> Bed : register(t4);     // Per level: x height, z kind (2 closed)
 Texture2D<uint> ContactLow : register(t5);     // Lowest and highest point of what stands over each texel (FogContactCS)
 Texture2D<uint> ContactHigh : register(t6);
@@ -53,6 +54,7 @@ Texture3D<float> Noise : register(t7);        // Tiling value noise, 8 lattice c
 Texture3D<float> ClumpNoise : register(t10);  // 4 cells: clumps
 Texture2D<float> BankNoise : register(t11);
 Texture2D<float2> LandMap : register(t12);
+Texture2D<float> FogTop : register(t15);          // The fog's highest top per TOP_TEXEL round the player, toroidal, max mips (TOP passes)
 Texture2D<float> LandscapeDepth : register(t13);  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
 SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
@@ -65,10 +67,10 @@ SamplerState WrapSampler : register(s1);
 #define VOLUMETRIC_SHADOWS
 #include "Common/ShadowSampling.hlsli"
 #include "LightLimitFix/LightLimitFix.hlsli"
-#ifndef COMPOSITE
+#if !defined(COMPOSITE) && !defined(TOP)
 RWTexture2D<float4> FogHalf : register(u0);
 RWTexture2D<float> FogHalfDistance : register(u1);
-#else
+#elif defined(COMPOSITE)
 Texture2D<float4> FogHalfIn : register(t8);
 Texture2D<float> FogHalfDistanceIn : register(t9);
 RWTexture2D<float4> MainRW : register(u0);
@@ -319,6 +321,28 @@ float Uncut(float3 position)
 	return 1.0 - smoothstep(-CONTACT_SOFTNESS, 0.0, position.z - bottom) * (1.0 - smoothstep(0.0, CONTACT_SOFTNESS, position.z - top));
 }
 
+/** The fog top map (TOP passes): texels of TOP_TEXEL, TOP_TEXELS a side round the land map's centre cell, TOP_MIPS max mips. */
+static const float TOP_TEXEL = 64.0;
+static const int TOP_TEXELS = 512;
+static const uint TOP_MIPS = 7;
+static const float TOP_NONE = -1.0e30;
+/** Probes along a ray for its band's top. */
+static const uint TOP_PROBES = 8;
+
+/** World texel of the top map's window's south-west corner. */
+int2 TopMin()
+{
+	const int perCell = int(LAND_CELL / TOP_TEXEL);
+	return LandCell * perCell + perCell / 2 - TOP_TEXELS / 2;
+}
+
+/** The fog's highest top over the mip texel holding xy. */
+float FogTopAt(float2 xy, uint level)
+{
+	const int2 texel = int2(floor(xy / TOP_TEXEL)) >> level;
+	return FogTop.Load(int3(texel & ((TOP_TEXELS >> level) - 1), level));
+}
+
 /** The surface a ray ends on, and how far its ground map is off there (the landscape is drawn as triangles, sampled
  * bilinearly): samples near the end take the surface's height (GROUND_FIX). */
 static float3 rayEnd = 0.0;
@@ -494,16 +518,20 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	// The LOD fog behind the simulated fog
 	const float4 none = DistantFog(depth, direction, surfaceDistance, light);
 
-	// Clip the ray to the fog band over the ground under the camera and the ray's end
+	// Clip the ray to the band under the fog's highest top along it: probes on the mip whose texels span their spacing
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float3 endPoint = camera + direction * rayLength;
-	float formingA, formingB, carriesA, carriesB, ceilingA, ceilingB;
+	float formingB, carriesB, ceilingB;
 	const float endGround = Ground(endPoint + float3(0.0, 0.0, 1.0), formingB, carriesB, ceilingB);
 	// A surface just over or under the ground map (not a wall or a tree): the map is that far off there
 	rayEnd = endPoint;
 	groundError = depth < 1.0 && abs(endPoint.z - endGround) < GROUND_FIX ? endPoint.z - endGround : 0.0;
-	const float bandTop = max(Ground(camera, formingA, carriesA, ceilingA), endGround) + MaxDepth * FLUFF_REACH;
-	if (rayLength <= 0.0 || min(camera.z, endPoint.z) > bandTop)
+	const float probeSpan = rayLength * length(direction.xy) / TOP_PROBES;
+	const uint level = min(uint(ceil(log2(max(probeSpan / TOP_TEXEL, 1.0)))), TOP_MIPS - 1);
+	float bandTop = TOP_NONE;
+	[loop] for (uint p = 0; p <= TOP_PROBES; p++)
+		bandTop = max(bandTop, FogTopAt(camera.xy + direction.xy * (rayLength * p / TOP_PROBES), level));
+	if (rayLength <= 0.0 || bandTop <= TOP_NONE || min(camera.z, endPoint.z) > bandTop)
 		return none;
 	float rayStart = 0.0;
 	float rayEnd = rayLength;
@@ -536,7 +564,88 @@ float SurfaceDistance(float depth, float2 uv)
 	return depth >= 1.0 ? FarDistance : min(length(positionCS.xyz / positionCS.w), FarDistance);
 }
 
-#ifndef COMPOSITE
+#if defined(TOP)
+// The fog top map, for the rays' bounds. TOP 0: each texel's highest fog top: the simulated fog over its cells' beds, and
+// where the settled fog may lie (in the grid's edge band and past it), the highest ground plus the settled fog's deepest;
+// over that, the most the ground map and the ray's end may shift it. TOP 1: dilated a texel (the march's bilinear reach
+// into the neighbours). TOP 2: one max mip from the one before.
+RWTexture2D<float> TopOut : register(u0);
+Texture2D<float> TopIn : register(t16);
+
+#	if TOP == 0
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	if (any(id.xy >= uint(TOP_TEXELS)))
+		return;
+	const int2 topMin = TopMin();
+	const int2 world = topMin + ((int2(id.xy) - topMin) & (TOP_TEXELS - 1));
+	const float2 lo = float2(world) * TOP_TEXEL, hi = lo + TOP_TEXEL;
+	const float2 off = max(max(lo - FrameBuffer::CameraPosAdjust.xy, FrameBuffer::CameraPosAdjust.xy - hi), 0.0);
+	if (length(off) > MaxDistance) {
+		TopOut[id.xy] = TOP_NONE;
+		return;
+	}
+	float top = TOP_NONE;
+	const int2 cell0 = int2(floor(lo / CellSize)), cell1 = int2(floor((hi - 0.01) / CellSize));
+	[loop] for (int y = max(cell0.y, GridMin.y); y <= min(cell1.y, GridMin.y + int(Resolution) - 1); y++)
+	{
+		[loop] for (int x = max(cell0.x, GridMin.x); x <= min(cell1.x, GridMin.x + int(Resolution) - 1); x++)
+		{
+			const uint2 texel = uint2(int2(x, y)) & (Resolution - 1);
+			[unroll] for (uint level = 0; level < 2; level++)
+			{
+				const float4 bed = Bed[uint3(texel, level)];
+				const float depth = Column[uint3(texel, level)].x;
+				if (bed.z != 2.0 && depth > 0.5)
+					top = max(top, bed.x + depth * FLUFF_REACH);
+			}
+		}
+	}
+	// Wholly inside the edge band (FogColumn's fromEdge), only the simulated fog lies here
+	const int edge = int(EDGE_BAND) + 1;
+	if (any(cell0 < GridMin + edge) || any(cell1 > GridMin + int(Resolution) - 1 - edge)) {
+		// A texel lies in one ground tile
+		float ground = TOP_NONE;
+		const int2 tile = world >> 4;
+		const int4 slot = SlotTiles[(tile.y & (TILE_SLOTS - 1)) * TILE_SLOTS + (tile.x & (TILE_SLOTS - 1))];
+		const bool missing = any(tile < TileMin) || any(tile >= TileMin + TILE_SLOTS) || slot.z == 0 || any(slot.xy != tile);
+		if (!missing)
+			ground = GroundMax.Load(int3(world & (TILE_SLOTS * 16 - 1), 0));
+		if (missing && all(abs(int2(floor(lo / LAND_CELL)) - LandCell) <= LAND_REACH)) {
+			const int2 l0 = int2(floor(lo / LAND_TEXEL)), l1 = int2(floor((hi - 0.01) / LAND_TEXEL));
+			[loop] for (int ly = l0.y; ly <= l1.y; ly++)
+			{
+				[loop] for (int lx = l0.x; lx <= l1.x; lx++)
+					ground = max(ground, LandMap.Load(int3(int2(lx, ly) & (LAND_TEXELS - 1), 0)).x);
+			}
+		}
+		if (ground > NO_GROUND)
+			top = max(top, ground + FarDepth * BANK_RANGE.y * FLUFF_REACH);
+	}
+	TopOut[id.xy] = top > TOP_NONE ? top + LEVEL_STEP + GROUND_FIX : TOP_NONE;
+}
+#	elif TOP == 1
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	if (any(id.xy >= uint(TOP_TEXELS)))
+		return;
+	float top = TOP_NONE;
+	[unroll] for (int y = -1; y <= 1; y++)
+	{
+		[unroll] for (int x = -1; x <= 1; x++)
+			top = max(top, TopIn[uint2(int2(id.xy) + int2(x, y)) & (TOP_TEXELS - 1)]);
+	}
+	TopOut[id.xy] = top;
+}
+#	else
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	uint width, height;
+	TopOut.GetDimensions(width, height);
+	if (any(id.xy >= width))
+		return;
+	const uint2 from = id.xy * 2;
+	TopOut[id.xy] = max(max(TopIn[from], TopIn[from + uint2(1, 0)]), max(TopIn[from + uint2(0, 1)], TopIn[from + 1]));
+}
+#	endif
+#elif !defined(COMPOSITE)
 /** The landscape's surface at a full-resolution pixel (LandscapeDepth), camera-relative. */
 float3 LandscapePoint(uint2 pixel, uint2 size)
 {

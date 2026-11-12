@@ -140,6 +140,7 @@ void FluidFieldGroundFog::ClearShaderCache()
 	groundFogCS = nullptr;
 	groundFogCompositeCS = nullptr;
 	groundDebugCS = nullptr;
+	fogTopCS = {};
 	drawFailed = false;
 }
 
@@ -166,6 +167,60 @@ void FluidFieldGroundFog::Release()
 	wrapSampler = nullptr;
 	fogHalf.reset();
 	fogHalfDistance.reset();
+	ReleaseFogTop();
+}
+
+void FluidFieldGroundFog::ReleaseFogTop()
+{
+	fogTopCS = {};
+	fogTopMipSRVs = {};
+	fogTopMipUAVs = {};
+	fogTopRawUAV = nullptr;
+	fogTopRawSRV = nullptr;
+	fogTopSRV = nullptr;
+	fogTopRaw = nullptr;
+	fogTop = nullptr;
+}
+
+bool FluidFieldGroundFog::EnsureFogTop()
+{
+	if (fogTop)
+		return true;
+	auto* device = globals::d3d::device;
+	D3D11_TEXTURE2D_DESC desc{ .Width = TOP_TEXELS, .Height = TOP_TEXELS, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, .CPUAccessFlags = 0, .MiscFlags = 0 };
+	bool ok = SUCCEEDED(device->CreateTexture2D(&desc, nullptr, fogTopRaw.put())) && SUCCEEDED(device->CreateShaderResourceView(fogTopRaw.get(), nullptr, fogTopRawSRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(fogTopRaw.get(), nullptr, fogTopRawUAV.put()));
+	desc.MipLevels = TOP_MIPS;
+	ok = ok && SUCCEEDED(device->CreateTexture2D(&desc, nullptr, fogTop.put())) && SUCCEEDED(device->CreateShaderResourceView(fogTop.get(), nullptr, fogTopSRV.put()));
+	for (uint32_t m = 0; ok && m < TOP_MIPS; m++) {
+		const D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{ .Format = DXGI_FORMAT_R32_FLOAT, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = { .MostDetailedMip = m, .MipLevels = 1 } };
+		const D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{ .Format = DXGI_FORMAT_R32_FLOAT, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D, .Texture2D = { .MipSlice = m } };
+		ok = SUCCEEDED(device->CreateShaderResourceView(fogTop.get(), &srvDesc, fogTopMipSRVs[m].put())) && SUCCEEDED(device->CreateUnorderedAccessView(fogTop.get(), &uavDesc, fogTopMipUAVs[m].put()));
+	}
+	if (!ok) {
+		ReleaseFogTop();
+		return false;
+	}
+	Util::SetResourceName(fogTopRaw.get(), "FluidField::FogTopRaw");
+	Util::SetResourceName(fogTop.get(), "FluidField::FogTop");
+	return true;
+}
+
+void FluidFieldGroundFog::BuildFogTop(ID3D11DeviceContext* a_context)
+{
+	const auto pass = [&](ID3D11ComputeShader* a_shader, ID3D11ShaderResourceView* a_in, ID3D11UnorderedAccessView* a_out, uint32_t a_size) {
+		ID3D11ShaderResourceView* nullSRV = nullptr;
+		ID3D11UnorderedAccessView* nullUAV = nullptr;
+		a_context->CSSetShaderResources(16, 1, &a_in);
+		a_context->CSSetUnorderedAccessViews(0, 1, &a_out, nullptr);
+		a_context->CSSetShader(a_shader, nullptr, 0);
+		a_context->Dispatch((a_size + 7) / 8, (a_size + 7) / 8, 1);
+		a_context->CSSetShaderResources(16, 1, &nullSRV);
+		a_context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+	};
+	pass(fogTopCS[0].get(), nullptr, fogTopRawUAV.get(), TOP_TEXELS);
+	pass(fogTopCS[1].get(), fogTopRawSRV.get(), fogTopMipUAVs[0].get(), TOP_TEXELS);
+	for (uint32_t m = 1; m < TOP_MIPS; m++)
+		pass(fogTopCS[2].get(), fogTopMipSRVs[m - 1].get(), fogTopMipUAVs[m].get(), TOP_TEXELS >> m);
 }
 
 bool FluidFieldGroundFog::EnsureSolver()
@@ -358,7 +413,7 @@ namespace
 		ID3D11SamplerState* nullSamplers[2]{};
 		ID3D11Buffer* nullCB = nullptr;
 		a_context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
-		a_context->CSSetShaderResources(14, 1, nullSRVs);
+		a_context->CSSetShaderResources(14, 3, nullSRVs);
 		a_context->CSSetShaderResources(18, 1, nullSRVs);
 		a_context->CSSetShaderResources(35, 3, nullSRVs);
 		a_context->CSSetShaderResources(98, 1, nullSRVs);
@@ -452,7 +507,10 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	if (!groundFogCS) {
 		groundFogCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", {}, "cs_5_0")));
 		groundFogCompositeCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "COMPOSITE", "" } }, "cs_5_0")));
-		if (!groundFogCS || !groundFogCompositeCS) {
+		constexpr const char* TOP_PASSES[] = { "0", "1", "2" };
+		for (int i = 0; i < 3; i++)
+			fogTopCS[i].attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "TOP", TOP_PASSES[i] } }, "cs_5_0")));
+		if (!groundFogCS || !groundFogCompositeCS || !fogTopCS[0] || !fogTopCS[1] || !fogTopCS[2] || !EnsureFogTop()) {
 			logger::error("[Fluid Field] Ground fog shader failed to compile; the ground fog stays off");
 			groundFogCS = nullptr;
 			groundFogCompositeCS = nullptr;
@@ -524,11 +582,10 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		fogHalfDistance = create(DXGI_FORMAT_R32_FLOAT, "FluidField::GroundFogHalfDistance");
 	}
 
-	globals::profiler->BeginPass("FluidField::Ground Fog");
 	ID3D11Buffer* cb = groundFogCB.get();
 	context->CSSetConstantBuffers(0, 1, &cb);
 	BindFrameBuffers(context);
-	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), nullptr, solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRVs[0].get(), nullptr, nullptr, noiseSRVs[1].get(), noiseSRVs[2].get(), ground.GetLandSRV(), FluidFieldSim::LandscapeDepth::GetSRV() };
+	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetMaxSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRVs[0].get(), nullptr, nullptr, noiseSRVs[1].get(), noiseSRVs[2].get(), ground.GetLandSRV(), FluidFieldSim::LandscapeDepth::GetSRV() };
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
 	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get() };
 	context->CSSetSamplers(0, 2, samplers);
@@ -536,6 +593,12 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	context->CSSetShaderResources(18, 1, &sunShadowSRV);
 	context->CSSetShaderResources(35, 3, lightSRVs);
 	context->CSSetShaderResources(98, 1, &directionalShadowSRV);
+	globals::profiler->BeginPass("FluidField::Fog Top");
+	BuildFogTop(context);
+	globals::profiler->EndPass();
+	globals::profiler->BeginPass("FluidField::Ground Fog");
+	ID3D11ShaderResourceView* topSRV = fogTopSRV.get();
+	context->CSSetShaderResources(15, 1, &topSRV);
 	ID3D11UnorderedAccessView* halfUAVs[] = { fogHalf->uav.get(), fogHalfDistance->uav.get() };
 	context->CSSetUnorderedAccessViews(0, 2, halfUAVs, nullptr);
 	context->CSSetShader(groundFogCS.get(), nullptr, 0);

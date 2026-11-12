@@ -156,6 +156,9 @@ namespace FluidFieldSim
 		void Release();
 
 		ID3D11ShaderResourceView* GetSRV() const { return srv.get(); }
+		/** @brief Per resident tile, as GetSRV: its highest top per 64-unit block (R32F, MAX_PER_TILE a side a tile). */
+		ID3D11ShaderResourceView* GetMaxSRV() const { return maxSRV.get(); }
+		static constexpr uint32_t MAX_PER_TILE = 16;
 		/** @brief Tile coordinates of the window's south-west tile. */
 		const int32_t* GetTileMin() const { return tileMin; }
 		const std::array<SlotTile, SLOTS * SLOTS>& GetSlots() const { return slots; }
@@ -220,6 +223,8 @@ namespace FluidFieldSim
 
 		winrt::com_ptr<ID3D11Texture2D> texture;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
+		winrt::com_ptr<ID3D11Texture2D> maxTexture;
+		winrt::com_ptr<ID3D11ShaderResourceView> maxSRV;
 		winrt::com_ptr<ID3D11Texture2D> landTexture;
 		winrt::com_ptr<ID3D11ShaderResourceView> landSRV;
 		std::unordered_set<uint64_t> landFilled;  ///< Cells rasterized into the land map

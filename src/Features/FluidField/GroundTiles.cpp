@@ -396,6 +396,8 @@ namespace FluidFieldSim
 		}
 		texture = nullptr;
 		srv = nullptr;
+		maxTexture = nullptr;
+		maxSRV = nullptr;
 		landTexture = nullptr;
 		landSRV = nullptr;
 		worldspace.clear();
@@ -494,11 +496,16 @@ namespace FluidFieldSim
 			worker = std::jthread([this](std::stop_token a_stop) { Run(a_stop); });
 		if (!texture) {
 			const D3D11_TEXTURE2D_DESC desc{ .Width = RESIDENT_TEXELS, .Height = RESIDENT_TEXELS, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
-			if (FAILED(a_device->CreateTexture2D(&desc, nullptr, texture.put())) || FAILED(a_device->CreateShaderResourceView(texture.get(), nullptr, srv.put()))) {
+			const D3D11_TEXTURE2D_DESC maxDesc{ .Width = SLOTS * MAX_PER_TILE, .Height = SLOTS * MAX_PER_TILE, .MipLevels = 1, .ArraySize = 1, .Format = DXGI_FORMAT_R32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE, .CPUAccessFlags = 0, .MiscFlags = 0 };
+			if (FAILED(a_device->CreateTexture2D(&desc, nullptr, texture.put())) || FAILED(a_device->CreateShaderResourceView(texture.get(), nullptr, srv.put())) ||
+				FAILED(a_device->CreateTexture2D(&maxDesc, nullptr, maxTexture.put())) || FAILED(a_device->CreateShaderResourceView(maxTexture.get(), nullptr, maxSRV.put()))) {
 				texture = nullptr;
 				srv = nullptr;
+				maxTexture = nullptr;
+				maxSRV = nullptr;
 				return;
 			}
+			Util::SetResourceName(maxTexture.get(), "FluidField::GroundTilesMax");
 			Util::SetResourceName(texture.get(), "FluidField::GroundTiles");
 			Util::SetResourceName(srv.get(), "FluidField::GroundTiles SRV");
 		}
@@ -585,6 +592,18 @@ namespace FluidFieldSim
 			const auto originX = static_cast<UINT>((result.x & (SLOTS - 1)) * TILE_TEXELS), originY = static_cast<UINT>((result.y & (SLOTS - 1)) * TILE_TEXELS);
 			const D3D11_BOX box{ .left = originX, .top = originY, .front = 0, .right = originX + TILE_TEXELS, .bottom = originY + TILE_TEXELS, .back = 1 };
 			a_context->UpdateSubresource(texture.get(), 0, &box, result.texels.data(), TILE_TEXELS * 4 * sizeof(float), 0);
+			// Its highest top per MAX_TEXEL block
+			constexpr uint32_t BLOCK = TILE_TEXELS / MAX_PER_TILE;
+			std::array<float, MAX_PER_TILE * MAX_PER_TILE> highest;
+			highest.fill(NO_GROUND);
+			for (uint32_t y = 0; y < TILE_TEXELS; y++)
+				for (uint32_t x = 0; x < TILE_TEXELS; x++) {
+					float& block = highest[(y / BLOCK) * MAX_PER_TILE + x / BLOCK];
+					block = std::max(block, result.texels[(static_cast<std::size_t>(y) * TILE_TEXELS + x) * 4]);
+				}
+			const auto maxX = static_cast<UINT>((result.x & (SLOTS - 1)) * MAX_PER_TILE), maxY = static_cast<UINT>((result.y & (SLOTS - 1)) * MAX_PER_TILE);
+			const D3D11_BOX maxBox{ .left = maxX, .top = maxY, .front = 0, .right = maxX + MAX_PER_TILE, .bottom = maxY + MAX_PER_TILE, .back = 1 };
+			a_context->UpdateSubresource(maxTexture.get(), 0, &maxBox, highest.data(), MAX_PER_TILE * sizeof(float), 0);
 			slots[slot - state.data()] = { result.x, result.y, 1, 0 };
 			slot->built = true;
 			slot->final = result.settled;
