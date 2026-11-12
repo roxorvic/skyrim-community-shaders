@@ -459,6 +459,27 @@ shows at best as a blocky smudge. Unknown: whether Volumetric Shadows' shadow ma
 - The player's and nearby actors' shadows read in sunlit fog, moving with them (Victor's check at 16:30 clear).
 - Draw time measured before and after.
 
+### 4e. Fog lit and coloured by Volumetric Lighting (added 2026-11-12)
+
+**Problem:** with CS's Volumetric Lighting on, the air shows sun shafts and takes the sun's colour, but our fog keeps
+its own, mostly sky-lit look: it doesn't scatter the sun the way the air round it does (Victor, 2026-11-12, 16:30 clear).
+
+**Do:**
+
+- **Research first:** what Volumetric Lighting computes and exposes (its in-scattered light, its density and colour,
+  and where and when it's available to our draw). Explain to Victor how the fog would take light and colour from it, and
+  the cost, before building anything.
+- When it's on, the fog's sun light and colour follow it; when it's off, the fog keeps its own lighting. Little extra
+  cost: read what Volumetric Lighting already computed rather than lighting the fog again.
+- Fold in the sun's share in the fog (`SUN_SHARE`, `SKY_SATURATION`, `SUN_MULTIPLE`) only as far as needed to match.
+
+**Accept:**
+
+- With Volumetric Lighting on, at 16:30 clear and at dawn: sunlit fog scatters and takes the sun's colour like the air
+  round it, shafts carry into it, and shade stays dim (Victor's check).
+- With it off: the fog looks as before.
+- Draw time measured with it on and off.
+
 ### 5. Ambient drift from a texture (sim optimisation 6)
 
 **Problem:** `FogInputsCS`' `AmbientDrift` evaluates about 64 hash-noise lookups per cell per level per frame.
