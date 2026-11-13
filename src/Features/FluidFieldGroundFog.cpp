@@ -307,18 +307,6 @@ FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 		layer.wind[1] = -std::cos(heading) * speed;
 	}
 	layer.time = fogTime;
-	const auto eye = Util::GetEyePosition();
-	layer.eye[0] = eye.x;
-	layer.eye[1] = eye.y;
-	layer.eye[2] = eye.z;
-	if (const auto* camera = RE::PlayerCamera::GetSingleton(); camera && camera->cameraRoot) {
-		const auto& rotate = camera->cameraRoot->world.rotate;
-		const float x = rotate.entry[0][1], y = rotate.entry[1][1], length = std::sqrt(x * x + y * y);
-		if (length > 1e-4f) {
-			layer.viewDir[0] = x / length;
-			layer.viewDir[1] = y / length;
-		}
-	}
 	// How hard it rains, from Wetness Effects (its puddle ripples read the same)
 	if (globals::features::wetnessEffects.loaded) {
 		const auto wetness = globals::features::wetnessEffects.GetCommonBufferData();
@@ -328,6 +316,10 @@ FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 		if (layer.rain > 0.0f && occlusion.depthSRV) {
 			layer.occlusion = occlusion.depthSRV;
 			std::memcpy(layer.occlusionViewProj, &wetness.OcclusionViewProj, sizeof(layer.occlusionViewProj));
+			const auto eye = Util::GetEyePosition();
+			layer.eye[0] = eye.x;
+			layer.eye[1] = eye.y;
+			layer.eye[2] = eye.z;
 		}
 	}
 	return layer;

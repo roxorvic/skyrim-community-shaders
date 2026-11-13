@@ -34,10 +34,8 @@ cbuffer FogCB : register(b0)
 	float Time;                            // Seconds, for the ambient drift
 	float Rain;                            // How hard it rains, 0 to 1: drops strike the top level
 	row_major float4x4 OcclusionViewProj;  // The precipitation occlusion map's projection, from the eye (Skylighting's use)
-	float3 Eye;                            // The camera
+	float3 Eye;
 	uint HasOcclusion;
-	float2 ViewDir;  // The camera's facing over the ground, normalised
-	float2 Pad1;
 };
 
 /** Bed kinds (FogBed z). */
