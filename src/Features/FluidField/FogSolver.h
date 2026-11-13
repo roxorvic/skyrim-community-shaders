@@ -42,7 +42,6 @@ namespace FluidFieldSim
 		ID3D11ShaderResourceView* occlusion = nullptr;
 		float occlusionViewProj[16]{};
 		float eye[3]{};
-		float viewDir[2]{};  ///< The camera's facing over the ground, normalised (debug tools)
 	};
 
 	/** @brief What moves through the fog this step: pushers for the sim, capsules for the contact map round contactMin. */
@@ -142,10 +141,8 @@ namespace FluidFieldSim
 			float occlusionViewProj[16];
 			float eye[3];
 			std::uint32_t hasOcclusion;
-			float viewDir[2];
-			float pad1[2];
 		};
-		static_assert(sizeof(Constants) == 1248 + 192 * 16);
+		static_assert(sizeof(Constants) == 1232 + 192 * 16);
 
 		static Layer CreateLayer(ID3D11Device* device, std::uint32_t resolution, std::uint32_t slices, DXGI_FORMAT format, const NameFn& name, const char* label);
 		static Buffer CreateMoverBuffer(ID3D11Device* device, const NameFn& name, const char* label);
