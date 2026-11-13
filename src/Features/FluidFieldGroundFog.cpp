@@ -341,8 +341,11 @@ void FluidFieldGroundFog::Prepass()
 	fogReady = false;
 
 	const FluidFieldSim::Field::PrepassScope scope(*this);
-	if (!scope.IsReady() || Util::IsInterior())
+	if (!scope.IsReady() || Util::IsInterior()) {
+		// No distant fog indoors: the extra landscape draws stop (item 8)
+		FluidFieldSim::LandscapeDepth::SetEnabled(false);
 		return;
+	}
 
 	// Every load leaves the player somewhere new
 	if (field.ConsumeLoad(seenLoads)) {
@@ -356,6 +359,9 @@ void FluidFieldGroundFog::Prepass()
 	globals::profiler->BeginPass("FluidField::Fog Ground");
 	ground.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), playerPos.x, playerPos.y, field.GetDeltaTime());
 	FluidFieldSim::LandscapeDepth::SetEnabled(true);
+	// The distant fog fades in from 80% of the near fog's reach (GroundFogCS DISTANCE_FADE): landscape wholly inside that,
+	// less a margin, is never read (item 8)
+	FluidFieldSim::LandscapeDepth::SetNearSkip(0.8f * (FluidFieldSim::GroundTiles::LAND_REACH + 0.5f) * FluidFieldSim::LandscapeCache::CELL_UNITS - 512.0f);
 	globals::profiler->EndPass();
 	const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 	groundMs += (ms - groundMs) * 0.05f;
@@ -379,7 +385,9 @@ void FluidFieldGroundFog::Prepass()
 	const FluidFieldSim::StepParams grid{ .gridMin = { gridMin[0], gridMin[1] }, .cellSize = cellSize, .deltaTime = step };
 
 	// Moving actors push the fog; close by, their legs cut it (the contact map round the player)
+	globals::profiler->BeginPass("FluidField::Fog Movers");
 	airSources.Update(playerPos, settings.ContactRadius * UNITS_PER_METRE, cellSize * static_cast<float>(half), step, settings.Stir, SHOVE_SPEED * settings.Stir, FluidFieldSim::FogSolver::MAX_MOVERS, ground.GetHeat());
+	globals::profiler->EndPass();
 	const int32_t contactHalf = static_cast<int32_t>(FluidFieldSim::FogSolver::CONTACT_RESOLUTION / 2);
 	contactMin[0] = static_cast<int32_t>(std::floor(playerPos.x / FluidFieldSim::FogSolver::CONTACT_CELL)) - contactHalf;
 	contactMin[1] = static_cast<int32_t>(std::floor(playerPos.y / FluidFieldSim::FogSolver::CONTACT_CELL)) - contactHalf;

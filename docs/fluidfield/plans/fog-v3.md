@@ -521,6 +521,10 @@ frames, or derive it from the existing noise textures. Inputs reads it bilinearl
 
 **Accept:** `SolverTest` still passes (all 12 cases), and the per-pass times are measured before and after.
 
+**Outcome (2026-11-12):** the quick part only (the depth pass exits at once for closed beds; Inputs and Flux already did):
+Fog Depth 0.087 to 0.055 ms at Riverwood. The indirect level-1 dispatch is not done: deviation, revisit in the performance
+pass if the numbers ask for it.
+
 ### 7. Cache bones per actor (CPU optimisation 8)
 
 **Problem:** `AirSources` looks bones up by name (`GetObjectByName`) every frame for every nearby actor. The creature-leg
@@ -550,6 +554,11 @@ The second landscape draw is ours alone: `LandscapeDepth`, used only by the dist
 
 **Accept:** the distant fog unchanged (far shore lit, no fog on water, trees or cliffs), and the measured cost before and
 after reported.
+
+**Outcome (2026-11-12):** timed for the first time (a profiler pass round each extra draw): about 0.5 ms GPU at Riverwood,
+after skipping landscape passes wholly within 80% of the near fog's reach, and the pass is off indoors. Not yet checked with
+Terrain Blending on and off. The fog draw read about 0.23 ms higher in the same session, unexplained (per-draw timer, the
+trim, or session noise): settle in the performance pass with a same-session A/B.
 
 ### 9. Interiors and dungeons (review missing 3)
 

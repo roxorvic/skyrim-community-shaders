@@ -33,10 +33,17 @@ float Inflow(int2 cell, uint level, int d)
 	if (any(id.xy >= Resolution))
 		return;
 	const uint level = id.z;
+	// A closed bed (most cells' lower level): nothing flows in or out, so nothing to sum
+	if (Bed[id].z == KIND_CLOSED) {
+		Depth[id] = 0.0;
+		Velocity[id] = 0.0;
+		Column[id] = 0.0;
+		return;
+	}
 	const int2 cell = CellOf(id.xy);
 	const float4 outflow = Flux[id];
 	const float4 inflow = float4(Inflow(cell, level, 0), Inflow(cell, level, 1), Inflow(cell, level, 2), Inflow(cell, level, 3));
-	const float depth = Bed[id].z == KIND_CLOSED ? 0.0 : max(Depth[id] + DeltaTime * (dot(inflow, 1.0.xxxx) - dot(outflow, 1.0.xxxx)), 0.0);
+	const float depth = max(Depth[id] + DeltaTime * (dot(inflow, 1.0.xxxx) - dot(outflow, 1.0.xxxx)), 0.0);
 	Depth[id] = depth;
 	// Mean flow through the east-west and north-south faces, over the depth it carries
 	const float2 through = 0.5 * float2((outflow.x - inflow.x) + (inflow.y - outflow.y), (outflow.z - inflow.z) + (inflow.w - outflow.w));

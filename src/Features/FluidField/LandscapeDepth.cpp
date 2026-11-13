@@ -1,6 +1,7 @@
 #include "LandscapeDepth.h"
 
 #include "Globals.h"
+#include "Profiler.h"
 #include "Utils/Game.h"
 #include "Utils/VersionedRelocation.h"
 
@@ -17,6 +18,7 @@ namespace FluidFieldSim
 		bool inPrepass = false;
 		bool drawn = false;  ///< Something was drawn into it this frame
 		float reach = 0.0f, frameReach = 0.0f;
+		float nearSkip = 0.0f;  ///< Landscape passes wholly within this of the eye are not drawn again (the tiles cover it)
 		RE::NiPoint3 eye{};
 
 		/** @brief The target, sized as the main depth; false if it could not be made. */
@@ -91,6 +93,12 @@ namespace FluidFieldSim
 				auto* triShape = a_pass->geometry->AsTriShape();
 				if (!triShape)
 					return;
+				// The distant fog only reads it past nearSkip: loaded cells wholly inside are left out
+				const auto& bound = a_pass->geometry->worldBound;
+				const float extent = std::hypot(bound.center.x - eye.x, bound.center.y - eye.y) + bound.radius;
+				if (extent < nearSkip)
+					return;
+				globals::profiler->BeginPass("FluidField::Landscape Depth");
 				// The same draw again, the game's state still bound, into the landscape's own depth
 				auto* context = globals::d3d::context;
 				ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
@@ -115,9 +123,9 @@ namespace FluidFieldSim
 				for (UINT i = 0; i < instanceCount; i++)
 					if (instances[i])
 						instances[i]->Release();
+				globals::profiler->EndPass();
 				drawn = true;
-				const auto& bound = a_pass->geometry->worldBound;
-				frameReach = std::max(frameReach, std::hypot(bound.center.x - eye.x, bound.center.y - eye.y) + bound.radius);
+				frameReach = std::max(frameReach, extent);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -144,6 +152,11 @@ namespace FluidFieldSim
 			srv = nullptr;
 			drawn = false;
 		}
+	}
+
+	void LandscapeDepth::SetNearSkip(float a_distance)
+	{
+		nearSkip = a_distance;
 	}
 
 	ID3D11ShaderResourceView* LandscapeDepth::GetSRV()

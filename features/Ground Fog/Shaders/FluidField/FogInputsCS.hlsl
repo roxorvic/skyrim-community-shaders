@@ -9,6 +9,7 @@
 Texture2DArray<float2> Velocity : register(t1);  // Last step's
 Texture2DArray<float4> FluxIn : register(t2);
 Texture2D<float> PrecipOcclusion : register(t3);  // Depth from above; HasOcclusion 0: none
+Texture2D<float2> DriftField : register(t4);      // FogDriftCS's, already times Drift
 SamplerState LinearSampler : register(s0);
 RWTexture2DArray<float> Depth : register(u0);
 RWTexture2DArray<float4> Flux : register(u1);  // Ping-pong: typed loads of RGBA16F are optional on D3D11
@@ -56,38 +57,16 @@ bool Open(int2 cell, float z)
 	return any(uv <= 0.0) || any(uv >= 1.0) || position.z <= PrecipOcclusion.SampleLevel(LinearSampler, uv, 0) + 0.001;
 }
 
-/** Smooth value noise over a lattice, 0 to 1 (the ambient drift's stream function). */
-float StreamNoise(float3 p)
-{
-	const float3 i = floor(p), f = p - i;
-	const float3 u = f * f * (3.0 - 2.0 * f);
-	float corners[8];
-	[unroll] for (uint k = 0; k < 8; k++)
-	{
-		const float3 c = i + float3(k & 1, (k >> 1) & 1, k >> 2);
-		uint h = asuint(int(c.x)) * 374761393u + asuint(int(c.y)) * 668265263u + asuint(int(c.z)) * 2147483647u;
-		h = (h ^ (h >> 13)) * 1274126177u;
-		corners[k] = float((h ^ (h >> 16)) & 0xFFFF) / 65535.0;
-	}
-	const float x0 = lerp(lerp(corners[0], corners[1], u.x), lerp(corners[2], corners[3], u.x), u.y);
-	const float x1 = lerp(lerp(corners[4], corners[5], u.x), lerp(corners[6], corners[7], u.x), u.y);
-	return lerp(x0, x1, u.z);
-}
-
-/** The curl of slowly changing noise at a cell, over eddies SPAN units across. */
-float2 Eddies(int2 cell, float span, float period)
-{
-	static const float STEP = 0.05;
-	const float3 p = float3((float2(cell) + 0.5) * CellSize / span, Time / period + span);
-	const float dx = StreamNoise(p + float3(STEP, 0.0, 0.0)) - StreamNoise(p - float3(STEP, 0.0, 0.0));
-	const float dy = StreamNoise(p + float3(0.0, STEP, 0.0)) - StreamNoise(p - float3(0.0, STEP, 0.0));
-	return float2(dy, -dx) / (2.0 * STEP);
-}
-
-/** The ambient drift at a cell: large slow eddies and smaller quicker ones, so it swirls without piling fog up anywhere. */
+/** The ambient drift at a cell (FogDriftCS's texture, bilinear): slow eddies the fog wanders in. */
 float2 AmbientDrift(int2 cell)
 {
-	return (Eddies(cell, 600.0, 40.0) + 0.6 * Eddies(cell, 200.0, 15.0)) * Drift;
+	const float2 c = (float2(cell) + 0.5) / DRIFT_TEXEL - 0.5;
+	const int2 base = int2(floor(c));
+	const float2 f = c - float2(base);
+	const uint mask = DRIFT_TEXELS - 1;
+	const float2 a = lerp(DriftField[uint2(base) & mask], DriftField[uint2(base + int2(1, 0)) & mask], f.x);
+	const float2 b = lerp(DriftField[uint2(base + int2(0, 1)) & mask], DriftField[uint2(base + 1) & mask], f.x);
+	return lerp(a, b, f.y);
 }
 
 /** 1 on flat ground, SLOPE_SOURCE on a slope steeper than about 20 degrees: fog forms most on flats; slopes keep a thin layer

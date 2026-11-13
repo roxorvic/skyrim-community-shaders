@@ -52,20 +52,26 @@ namespace FluidFieldSim
 			uint32_t lastSeen = 0;  ///< Update counter when last seen
 		};
 
-		/** @brief A creature's leg bones, each with its parent: capsules for the contact map. Valid for this update only. */
-		struct Legs
+		/** @brief An actor's bones the fog reads, found by name once per 3D root and held (NiPointer: they can't dangle);
+		 * looked up again when the root changes. Creature legs (each with its parent) are found on first use. */
+		struct Bones
 		{
-			std::vector<std::pair<const RE::NiAVObject*, const RE::NiAVObject*>> bones;
+			RE::NiPointer<RE::NiAVObject> root;
+			std::array<RE::NiPointer<RE::NiAVObject>, 5> parts;                ///< HUMANOID_PARTS
+			std::array<std::array<RE::NiPointer<RE::NiAVObject>, 3>, 2> legs;  ///< LEGS
+			std::array<RE::NiPointer<RE::NiAVObject>, 2> attach;               ///< WEAPON, SHIELD
+			std::vector<std::pair<RE::NiPointer<RE::NiAVObject>, RE::NiPointer<RE::NiAVObject>>> creatureLegs;
+			bool creatureLegsFound = false;
 			uint32_t lastSeen = 0;
 		};
-		/** @brief The leg bones of an actor's skeleton, found each update. */
-		const Legs& FindLegs(RE::Actor& a_actor, RE::NiAVObject& a_root);
+		/** @brief The actor's cached bones, found again when its 3D root changed. */
+		Bones& BonesOf(RE::Actor& a_actor, RE::NiAVObject& a_root);
 
 		/** @brief Updates between sightings after which an actor's history is dropped. */
 		static constexpr uint32_t FORGET_AFTER = 120;
 
 		std::unordered_map<uint64_t, History> history;  ///< Keyed by actor form ID (high bits) and body part (low byte)
-		std::unordered_map<uint32_t, Legs> legs;        ///< Keyed by actor form ID
+		std::unordered_map<uint32_t, Bones> bones;      ///< Keyed by actor form ID
 		std::vector<Mover> pushers;
 		std::vector<Mover> contacts;
 		/** @brief Each projectile's position at the last update: its real motion (a stuck arrow keeps its flight velocity). */

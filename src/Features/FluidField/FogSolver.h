@@ -70,7 +70,7 @@ namespace FluidFieldSim
 		void ReleaseShaders();
 		void ReleaseResources();
 		bool HasResources() const { return resolution != 0; }
-		bool HasShaders() const { return bedCS && splatCS && inputsCS && fluxCS && depthCS && contactCS; }
+		bool HasShaders() const { return bedCS && splatCS && driftCS && inputsCS && fluxCS && depthCS && contactCS; }
 		std::uint32_t GetResolution() const { return resolution; }
 
 		/** @brief The next step seeds every cell with the settled field. */
@@ -86,6 +86,7 @@ namespace FluidFieldSim
 			BeginStep(context, grid, layer, ground, movers);
 			wrap("Fog Bed", [&] { Bed(context, ground); });
 			wrap("Fog Splat", [&] { Splat(context); });
+			wrap("Fog Drift", [&] { Drift(context, layer); });
 			wrap("Fog Inputs", [&] { Inputs(context, layer); });
 			wrap("Fog Flux", [&] { Flux(context); });
 			wrap("Fog Depth", [&] { Depth(context); });
@@ -149,6 +150,7 @@ namespace FluidFieldSim
 		void BeginStep(ID3D11DeviceContext* context, const StepParams& grid, const FogLayerParams& layer, const FogGround& ground, const FogMovers& movers);
 		void Bed(ID3D11DeviceContext* context, const FogGround& ground);
 		void Splat(ID3D11DeviceContext* context);
+		void Drift(ID3D11DeviceContext* context, const FogLayerParams& layer);
 		void Inputs(ID3D11DeviceContext* context, const FogLayerParams& layer);
 		void Flux(ID3D11DeviceContext* context);
 		void Depth(ID3D11DeviceContext* context);
@@ -158,13 +160,16 @@ namespace FluidFieldSim
 		void Dispatch(ID3D11DeviceContext* context, ID3D11ComputeShader* shader, std::span<ID3D11ShaderResourceView* const> srvs, std::span<ID3D11UnorderedAccessView* const> uavs, std::uint32_t a_groupsX, std::uint32_t a_slices);
 
 		std::uint32_t resolution = 0;
+		/** @brief The ambient drift (FogDriftCS), DRIFT_TEXELS a side, a texel every 4 cells. */
+		static constexpr std::uint32_t DRIFT_TEXELS = 128;
+		Layer drift;
 		Layer bed, drawFloor, depth, velocity, column, force, contactLow, contactHigh;
 		Layer flux[2];  ///< Ping-pong; flux[0] holds the step's result
 		Buffer pushers, contacts;
 		std::uint32_t pusherCount = 0, contactCount = 0;
 		winrt::com_ptr<ID3D11Buffer> constants;
 		winrt::com_ptr<ID3D11SamplerState> sampler;
-		winrt::com_ptr<ID3D11ComputeShader> bedCS, splatCS, inputsCS, fluxCS, depthCS, contactCS;
+		winrt::com_ptr<ID3D11ComputeShader> bedCS, splatCS, driftCS, inputsCS, fluxCS, depthCS, contactCS;
 		std::int32_t prevGridMin[2]{};
 		bool seeded = false;
 	};

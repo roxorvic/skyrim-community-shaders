@@ -153,17 +153,22 @@ namespace FluidFieldSim
 		};
 	}
 
-	const AirSources::Legs& AirSources::FindLegs(RE::Actor& a_actor, RE::NiAVObject& a_root)
+	AirSources::Bones& AirSources::BonesOf(RE::Actor& a_actor, RE::NiAVObject& a_root)
 	{
-		auto& found = legs[a_actor.GetFormID()];
+		auto& found = bones[a_actor.GetFormID()];
 		found.lastSeen = updateCounter;
-		found.bones.clear();
-		RE::BSVisit::TraverseScenegraphObjects(&a_root, [&](RE::NiAVObject* a_object) {
-			// A leg bone and the one above it (hip to knee to foot): the bone's length as a capsule
-			if (IsLegBone(a_object) && a_object->parent && IsLegBone(a_object->parent))
-				found.bones.emplace_back(a_object->parent, a_object);
-			return RE::BSVisit::BSVisitControl::kContinue;
-		});
+		if (found.root.get() == &a_root)
+			return found;
+		found = Bones{};
+		found.root.reset(&a_root);
+		found.lastSeen = updateCounter;
+		for (std::size_t i = 0; i < HUMANOID_PARTS.size(); i++)
+			found.parts[i].reset(a_root.GetObjectByName(HUMANOID_PARTS[i].node));
+		for (std::size_t l = 0; l < LEGS.size(); l++)
+			for (std::size_t k = 0; k < 3; k++)
+				found.legs[l][k].reset(a_root.GetObjectByName(LEGS[l][k]));
+		found.attach[0].reset(a_root.GetObjectByName("WEAPON"));
+		found.attach[1].reset(a_root.GetObjectByName("SHIELD"));
 		return found;
 	}
 
@@ -184,7 +189,7 @@ namespace FluidFieldSim
 		shouts.clear();
 		projectiles.clear();
 		history.clear();
-		legs.clear();
+		bones.clear();
 		pushers.clear();
 		contacts.clear();
 	}
@@ -254,9 +259,10 @@ namespace FluidFieldSim
 			const auto actorPosition = actor->GetPosition();
 			const bool close = candidate.distanceSquared < a_contactReach * a_contactReach;
 			bool skeleton = false;
-			if (root && close) {
+			Bones* cached = root && close ? &BonesOf(*actor, *root) : nullptr;
+			if (cached) {
 				for (std::size_t i = 0; i < HUMANOID_PARTS.size(); i++) {
-					auto* node = root->GetObjectByName(HUMANOID_PARTS[i].node);
+					auto* node = cached->parts[i].get();
 					if (!node)
 						continue;
 					skeleton = true;
@@ -265,13 +271,12 @@ namespace FluidFieldSim
 						push(actorKey | i, position, HUMANOID_PARTS[i].radius * scale, position.z + HUMANOID_PARTS[i].radius * scale);
 				}
 				// The legs as capsules, hip to knee and knee to foot
-				for (const auto& leg : LEGS) {
-					const RE::NiAVObject* bones[3] = { root->GetObjectByName(leg[0]), root->GetObjectByName(leg[1]), root->GetObjectByName(leg[2]) };
+				for (const auto& leg : cached->legs) {
 					for (int k = 0; k < 2; k++) {
-						if (!bones[k] || !bones[k + 1])
+						if (!leg[k] || !leg[k + 1])
 							continue;
-						const auto& a = bones[k]->world.translate;
-						const auto& b = bones[k + 1]->world.translate;
+						const auto& a = leg[k]->world.translate;
+						const auto& b = leg[k + 1]->world.translate;
 						const float r = LEG_RADIUS * scale;
 						contact(a, b, r, std::min(a.z, b.z) - r, std::max(a.z, b.z) + r);
 					}
@@ -279,9 +284,9 @@ namespace FluidFieldSim
 			}
 			// A drawn weapon close by: the blade cuts, its swing pushes (D194 step 6)
 			const auto* state = actor->AsActorState();
-			if (root && close && state && state->IsWeaponDrawn()) {
+			if (cached && state && state->IsWeaponDrawn()) {
 				for (const char* attach : { "WEAPON", "SHIELD" }) {
-					auto* node = root->GetObjectByName(attach);
+					auto* node = cached->attach[attach[0] == 'W' ? 0 : 1].get();
 					if (!node || node->worldBound.radius < 8.0f)
 						continue;
 					const auto& grip = node->world.translate;
@@ -322,10 +327,18 @@ namespace FluidFieldSim
 				const float radius = std::max(0.5f * std::max(boundMax.x - boundMin.x, boundMax.y - boundMin.y) * scale, MIN_BODY_RADIUS);
 				const float top = feet + std::max(boundMax.z - boundMin.z, 40.0f) * scale;
 				push(actorKey | 0xFF, actorPosition, radius, top);
-				const Legs* creatureLegs = close && root ? &FindLegs(*actor, *root) : nullptr;
-				if (creatureLegs && !creatureLegs->bones.empty()) {
+				if (cached && !cached->creatureLegsFound) {
+					cached->creatureLegsFound = true;
+					RE::BSVisit::TraverseScenegraphObjects(root, [&](RE::NiAVObject* a_object) {
+						// A leg bone and the one above it (hip to knee to foot): the bone's length as a capsule
+						if (IsLegBone(a_object) && a_object->parent && IsLegBone(a_object->parent))
+							cached->creatureLegs.emplace_back(RE::NiPointer<RE::NiAVObject>(a_object->parent), RE::NiPointer<RE::NiAVObject>(a_object));
+						return RE::BSVisit::BSVisitControl::kContinue;
+					});
+				}
+				if (cached && !cached->creatureLegs.empty()) {
 					const float r = CREATURE_LEG_RADIUS * scale;
-					for (const auto& [upper, lower] : creatureLegs->bones) {
+					for (const auto& [upper, lower] : cached->creatureLegs) {
 						const auto& a = upper->world.translate;
 						const auto& b = lower->world.translate;
 						contact(a, b, r, std::min(a.z, b.z) - r, std::max(a.z, b.z) + r);
@@ -418,7 +431,7 @@ namespace FluidFieldSim
 			pushers.push_back({ .from = { fire.x, fire.y }, .to = { fire.x, fire.y }, .radius = fire.radius, .shove = HEAT_SHOVE, .velocity = {}, .cut = HEAT_CUT, .bottom = fire.z - 200.0f, .top = fire.z + 200.0f, .pad = 0.0f });
 		}
 
-		std::erase_if(legs, [&](const auto& a_entry) { return updateCounter - a_entry.second.lastSeen > FORGET_AFTER; });
+		std::erase_if(bones, [&](const auto& a_entry) { return updateCounter - a_entry.second.lastSeen > FORGET_AFTER; });
 		std::erase_if(projectiles, [&](const auto& a_entry) { return updateCounter - a_entry.second.second > 1; });
 		for (auto it = history.begin(); it != history.end();) {
 			if (updateCounter - it->second.lastSeen > FORGET_AFTER)

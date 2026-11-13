@@ -42,6 +42,7 @@ namespace FluidFieldSim
 	{
 		ReleaseResources();
 		bed = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R32G32B32A32_FLOAT, name, "Bed");
+		drift = CreateLayer(device, DRIFT_TEXELS, 1, DXGI_FORMAT_R16G16_FLOAT, name, "Drift");
 		drawFloor = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R32G32_FLOAT, name, "Draw Floor");
 		depth = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R32_FLOAT, name, "Depth");
 		velocity = CreateLayer(device, a_resolution, LEVELS, DXGI_FORMAT_R16G16_FLOAT, name, "Velocity");
@@ -68,6 +69,7 @@ namespace FluidFieldSim
 	{
 		bedCS.attach(compile(L"FogBedCS.hlsl"));
 		splatCS.attach(compile(L"FogSplatCS.hlsl"));
+		driftCS.attach(compile(L"FogDriftCS.hlsl"));
 		inputsCS.attach(compile(L"FogInputsCS.hlsl"));
 		fluxCS.attach(compile(L"FogFluxCS.hlsl"));
 		depthCS.attach(compile(L"FogDepthCS.hlsl"));
@@ -85,7 +87,7 @@ namespace FluidFieldSim
 
 	void FogSolver::ReleaseResources()
 	{
-		bed = drawFloor = depth = velocity = column = force = contactLow = contactHigh = flux[0] = flux[1] = {};
+		bed = drift = drawFloor = depth = velocity = column = force = contactLow = contactHigh = flux[0] = flux[1] = {};
 		pushers = contacts = {};
 		constants = nullptr;
 		sampler = nullptr;
@@ -196,9 +198,17 @@ namespace FluidFieldSim
 		Dispatch(context, splatCS.get(), srvs, uavs, pusherCount, 1);
 	}
 
+	void FogSolver::Drift(ID3D11DeviceContext* context, const FogLayerParams& layer)
+	{
+		if (layer.drift <= 0.0f)
+			return;
+		ID3D11UnorderedAccessView* uavs[] = { drift.uav.get() };
+		Dispatch(context, driftCS.get(), {}, uavs, (DRIFT_TEXELS / 8) * (DRIFT_TEXELS / 8), 1);
+	}
+
 	void FogSolver::Inputs(ID3D11DeviceContext* context, const FogLayerParams& layer)
 	{
-		ID3D11ShaderResourceView* srvs[] = { bed.srv.get(), velocity.srv.get(), flux[0].srv.get(), layer.occlusion };
+		ID3D11ShaderResourceView* srvs[] = { bed.srv.get(), velocity.srv.get(), flux[0].srv.get(), layer.occlusion, drift.srv.get() };
 		ID3D11UnorderedAccessView* uavs[] = { depth.uav.get(), flux[1].uav.get(), force.uav.get() };
 		Dispatch(context, inputsCS.get(), srvs, uavs, 0, LEVELS);
 	}

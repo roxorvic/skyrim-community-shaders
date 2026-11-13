@@ -19,6 +19,9 @@ namespace FluidFieldSim
 		static void SetEnabled(bool a_enabled);
 		/** @brief The landscape's depth this frame (as the main depth), or null. */
 		static ID3D11ShaderResourceView* GetSRV();
+		/** @brief Landscape passes wholly within this distance of the eye are not drawn into it (the distant fog doesn't
+		 * read them there). */
+		static void SetNearSkip(float a_distance);
 		/** @brief How far the landscape drawn this frame reaches from the eye, world units (0 until drawn). */
 		static float GetReach();
 	};

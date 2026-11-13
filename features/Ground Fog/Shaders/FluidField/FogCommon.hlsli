@@ -49,6 +49,16 @@ static const float LEVEL_STEP = 24.0;
 /** Movers' pushes and cuts are summed as fixed point (InterlockedAdd). */
 static const float FORCE_SCALE = 256.0;
 
+/** The ambient drift's texture (FogDriftCS): a texel every DRIFT_TEXEL cells, DRIFT_TEXELS a side, toroidal. */
+static const int DRIFT_TEXEL = 4;
+static const int DRIFT_TEXELS = 128;
+
+/** World drift texel of the drift texture's texel (0, 0) window corner. */
+int2 DriftMin()
+{
+	return GridMin >> 2;
+}
+
 /** Toroidal texel of a world cell. */
 uint2 TexelOf(int2 cell)
 {
