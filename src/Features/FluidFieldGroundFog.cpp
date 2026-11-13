@@ -4,6 +4,7 @@
 #include "Deferred.h"
 #include "Features/LightLimitFix.h"
 #include "Features/Skylighting.h"
+#include "Features/VolumetricLighting.h"
 #include "Features/VolumetricShadows.h"
 #include "Features/WetnessEffects.h"
 #include "FluidField/Field.h"
@@ -165,6 +166,7 @@ void FluidFieldGroundFog::Release()
 	linearSampler = nullptr;
 	noiseSRVs = {};
 	wrapSampler = nullptr;
+	shadowSampler = nullptr;
 	fogHalf.reset();
 	fogHalfDistance.reset();
 	ReleaseFogTop();
@@ -207,7 +209,6 @@ bool FluidFieldGroundFog::EnsureFogTop()
 	}
 	D3D11_TEXTURE2D_DESC lightDesc{ .Width = GRID_RESOLUTION, .Height = GRID_RESOLUTION, .MipLevels = 1, .ArraySize = 2, .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .SampleDesc = { 1, 0 }, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, .CPUAccessFlags = 0, .MiscFlags = 0 };
 	ok = ok && SUCCEEDED(device->CreateTexture2D(&lightDesc, nullptr, drawA.put())) && SUCCEEDED(device->CreateShaderResourceView(drawA.get(), nullptr, drawASRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(drawA.get(), nullptr, drawAUAV.put()));
-	lightDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 	ok = ok && SUCCEEDED(device->CreateTexture2D(&lightDesc, nullptr, drawB.put())) && SUCCEEDED(device->CreateShaderResourceView(drawB.get(), nullptr, drawBSRV.put())) && SUCCEEDED(device->CreateUnorderedAccessView(drawB.get(), nullptr, drawBUAV.put()));
 	lightDesc.Width = lightDesc.Height = TOP_TEXELS;
 	lightDesc.ArraySize = 1;
@@ -430,15 +431,15 @@ namespace
 	{
 		ID3D11ShaderResourceView* nullSRVs[14]{};
 		ID3D11UnorderedAccessView* nullUAVs[3]{};
-		ID3D11SamplerState* nullSamplers[2]{};
+		ID3D11SamplerState* nullSamplers[3]{};
 		ID3D11Buffer* nullCB = nullptr;
 		a_context->CSSetShaderResources(0, static_cast<UINT>(std::size(nullSRVs)), nullSRVs);
-		a_context->CSSetShaderResources(14, 9, nullSRVs);
+		a_context->CSSetShaderResources(14, 10, nullSRVs);
 		a_context->CSSetShaderResources(18, 1, nullSRVs);
 		a_context->CSSetShaderResources(35, 3, nullSRVs);
 		a_context->CSSetShaderResources(98, 1, nullSRVs);
 		a_context->CSSetUnorderedAccessViews(0, 3, nullUAVs, nullptr);
-		a_context->CSSetSamplers(0, 2, nullSamplers);
+		a_context->CSSetSamplers(0, 3, nullSamplers);
 		a_context->CSSetConstantBuffers(0, 1, &nullCB);
 		a_context->CSSetConstantBuffers(12, 1, &nullCB);
 		a_context->CSSetShader(nullptr, nullptr, 0);
@@ -516,7 +517,12 @@ bool FluidFieldGroundFog::EnsureNoise()
 	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 	samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
 	samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
-	return SUCCEEDED(device->CreateSamplerState(&samplerDesc, wrapSampler.put()));
+	if (FAILED(device->CreateSamplerState(&samplerDesc, wrapSampler.put())))
+		return false;
+	samplerDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
+	samplerDesc.AddressU = samplerDesc.AddressV = samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+	samplerDesc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+	return SUCCEEDED(device->CreateSamplerState(&samplerDesc, shadowSampler.put()));
 }
 
 void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
@@ -545,6 +551,8 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	auto& lightLimitFix = globals::features::lightLimitFix;
 	ID3D11ShaderResourceView* sunShadowSRV = volumetricShadows.loaded ? volumetricShadows.shadowCopySRV : nullptr;
 	ID3D11ShaderResourceView* directionalShadowSRV = globals::deferred && globals::deferred->directionalShadowLights ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
+	// 4d: the game's sun shadow cascades (actors in them), as Skylighting captures them for its probes
+	ID3D11ShaderResourceView* sceneShadowSRV = skylighting.loaded ? skylighting.shadowCascadeSRV : nullptr;
 	ID3D11ShaderResourceView* skySRV = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
 	ID3D11ShaderResourceView* lightSRVs[3] = {};
 	if (lightLimitFix.loaded && lightLimitFix.lights && lightLimitFix.lightIndexList && lightLimitFix.lightGrid) {
@@ -552,6 +560,10 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		lightSRVs[1] = lightLimitFix.lightIndexList->srv.get();
 		lightSRVs[2] = lightLimitFix.lightGrid->srv.get();
 	}
+
+	// 4e: with Volumetric Lighting on, the fog's sun takes its colour, phase and strength (the weather's, as SkySync reads them)
+	static const auto* volumetricLighting = reinterpret_cast<const RE::BSVolumetricLightingRenderData*>(REL::RelocationID(527719, 414629).address() - offsetof(RE::BSVolumetricLightingRenderData, color));
+	const bool vlOn = globals::features::volumetricLighting.loaded && globals::game::bEnableVolumetricLighting && *globals::game::bEnableVolumetricLighting;
 
 	GroundFogConstants constants{
 		.gridMin = { gridMin[0], gridMin[1] },
@@ -567,20 +579,22 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.slotTiles = {},
 		.tileMin = { ground.GetTileMin()[0], ground.GetTileMin()[1] },
 		.landCell = { ground.GetLandCell()[0], ground.GetLandCell()[1] },
-		.landPad = 0.0f,
+		.vlMix = vlOn ? volumetricLighting->customColor.contribution : 0.0f,
 		.hollowGain = MakeLayer().hollowGain,
 		.farPoolDepth = std::max(settings.PoolDepth, settings.GroundThickness),
 		.contactCell = FluidFieldSim::FogSolver::CONTACT_CELL,
 		.contactMin = { contactMin[0], contactMin[1] },
 		.contactResolution = FluidFieldSim::FogSolver::CONTACT_RESOLUTION,
 		.farDistance = FluidFieldSim::LandscapeDepth::GetSRV() ? std::max(DistantDistance(), 12000.0f) : FAR_DISTANCE,
-		.lodOrigin = {},
+		.vlPhase = { vlOn ? volumetricLighting->phaseFunction.scattering : 0.0f, vlOn ? volumetricLighting->phaseFunction.contribution : 0.0f },
 		.hasLod = FluidFieldSim::LandscapeDepth::GetSRV() ? 1u : 0u,
-		.lodPad = 0.0f,
+		.vlIntensity = vlOn ? volumetricLighting->intensity : 0.0f,
 		.hasSunShadow = sunShadowSRV && directionalShadowSRV ? 1u : 0u,
 		.hasSky = skySRV ? 1u : 0u,
 		.localLights = lightSRVs[0] && lightSRVs[1] && lightSRVs[2] ? settings.LocalLights : 0u,
-		.lightPad = 0.0f
+		.hasSceneShadow = sceneShadowSRV && directionalShadowSRV ? 1u : 0u,
+		.vlColour = { volumetricLighting->color.red, volumetricLighting->color.green, volumetricLighting->color.blue },
+		.hasVL = vlOn ? 1u : 0u
 	};
 	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
 	if (!Upload(context, groundFogCB, constants))
@@ -607,8 +621,9 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	BindFrameBuffers(context);
 	ID3D11ShaderResourceView* srvs[] = { a_depth, ground.GetSRV(), solver.GetColumnSRV(), ground.GetMaxSRV(), solver.GetBedSRV(), solver.GetContactLowSRV(), solver.GetContactHighSRV(), noiseSRVs[0].get(), nullptr, nullptr, noiseSRVs[1].get(), noiseSRVs[2].get(), ground.GetLandSRV(), FluidFieldSim::LandscapeDepth::GetSRV() };
 	context->CSSetShaderResources(0, static_cast<UINT>(std::size(srvs)), srvs);
-	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get() };
-	context->CSSetSamplers(0, 2, samplers);
+	ID3D11SamplerState* samplers[] = { linearSampler.get(), wrapSampler.get(), shadowSampler.get() };
+	context->CSSetSamplers(0, 3, samplers);
+	context->CSSetShaderResources(23, 1, &sceneShadowSRV);
 	context->CSSetShaderResources(14, 1, &skySRV);
 	context->CSSetShaderResources(18, 1, &sunShadowSRV);
 	context->CSSetShaderResources(35, 3, lightSRVs);

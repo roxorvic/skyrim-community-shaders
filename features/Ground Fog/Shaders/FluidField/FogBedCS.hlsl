@@ -40,6 +40,9 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 	float top = -1e30;
 	uint topFlags = 0;
 	float known = 0.0, forming = 0.0, water = 0.0;
+	// The draw's top floor: the mean of its texels that are not rock or log tops (the draw ignores those: their own
+	// surfaces hide the fog behind them, and the 8-unit map caught them in stripes), and their share that carries fog
+	float groundSum = 0.0, groundCount = 0.0, groundCarries = 0.0;
 	[loop] for (int y = t0.y; y <= t1.y; y++)
 	{
 		[loop] for (int x = t0.x; x <= t1.x; x++)
@@ -50,6 +53,11 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 			if (g.x < -1e6)
 				continue;
 			known += 1.0;
+			if (!(uint(g.y) & TILE_ROCK)) {
+				groundSum += g.x;
+				groundCount += 1.0;
+				groundCarries += (uint(g.y) & (TILE_STEEP | TILE_WATER)) ? 0.0 : 1.0;
+			}
 			forming += (uint(g.y) & TILE_MAY_FORM) ? 1.0 : 0.0;
 			water += (uint(g.y) & TILE_WATER) ? 1.0 : 0.0;
 			if (g.x > top) {
@@ -61,9 +69,8 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 	float lower = -1e30;
 	uint lowerFlags = 0;
 	float lowerCount = 0.0, lowerForming = 0.0, lowerWater = 0.0;
-	// The draw's floors: each level's mean over its texels (the top's: those within a level of it), and their share that
-	// carries fog (not rock, steep or water)
-	float topSum = 0.0, topCount = 0.0, topCarries = 0.0, lowerSum = 0.0, lowerCarries = 0.0;
+	// The draw's lower floor: the mean over its texels, and their share that carries fog (not rock, steep or water)
+	float lowerSum = 0.0, lowerCarries = 0.0;
 	[loop] for (int y2 = t0.y; y2 <= t1.y; y2++)
 	{
 		[loop] for (int x2 = t0.x; x2 <= t1.x; x2++)
@@ -73,11 +80,6 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 			const float4 g = GroundTiles.Load(int3(int2(x2, y2) & (TILE_SLOTS * 128 - 1), 0));
 			if (g.x < -1e6)
 				continue;
-			if (g.x > top - LEVEL_STEP) {
-				topSum += g.x;
-				topCount += 1.0;
-				topCarries += (uint(g.y) & (TILE_ROCK | TILE_STEEP | TILE_WATER)) ? 0.0 : 1.0;
-			}
 			// This texel's floor under the cell's top: its own lower level, or its top a level down
 			const bool own = g.z > -1e6;
 			const float floorHeight = own ? g.z : g.x;
@@ -100,7 +102,7 @@ float4 MakeBed(float height, uint flags, float count, float forming, float water
 	float2 topFloor;
 	if (known > 0.0) {
 		topBed = MakeBed(top, topFlags, known, forming, water);
-		topFloor = float2(topSum / max(topCount, 1.0), topCarries / max(topCount, 1.0));
+		topFloor = groundCount > 0.0 ? float2(groundSum / groundCount, groundCarries / groundCount) : float2(NO_FLOOR, 0.0);
 	} else {
 		float landForming, landWater;
 		const float land = HasLand != 0 ? LandHeight(LandMap, LandCell, (float2(cell) + 0.5) * CellSize, landForming, landWater) : LAND_NONE;

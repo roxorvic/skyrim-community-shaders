@@ -112,22 +112,24 @@ private:
 		FluidFieldSim::GroundTiles::SlotTile slotTiles[FluidFieldSim::GroundTiles::SLOTS * FluidFieldSim::GroundTiles::SLOTS];
 		int32_t tileMin[2];
 		int32_t landCell[2];
-		float landPad;
+		float vlMix;  ///< Volumetric Lighting's own colour's share over the sun's (4e)
 		float hollowGain;
 		float farPoolDepth;
 		float contactCell;
 		int32_t contactMin[2];
 		uint32_t contactResolution;
 		float farDistance;
-		float lodOrigin[2];  ///< Unused
+		float vlPhase[2];  ///< Volumetric Lighting's phase: its scattering (anisotropy) and contribution (4e)
 		uint32_t hasLod;
-		float lodPad;
-		uint32_t hasSunShadow;  ///< Volumetric Shadows' shadow map bound (t18, t98)
-		uint32_t hasSky;        ///< Skylighting's probes bound (t14)
-		uint32_t localLights;   ///< Light Limit Fix's lights bound (t35 to t37): the setting, else 0
-		float lightPad;
+		float vlIntensity;
+		uint32_t hasSunShadow;    ///< Volumetric Shadows' shadow map bound (t18, t98)
+		uint32_t hasSky;          ///< Skylighting's probes bound (t14)
+		uint32_t localLights;     ///< Light Limit Fix's lights bound (t35 to t37): the setting, else 0
+		uint32_t hasSceneShadow;  ///< The game's sun shadow cascades bound (t23): actors' shadows near the camera (4d)
+		float vlColour[3];        ///< Volumetric Lighting's own colour (4e)
+		uint32_t hasVL;           ///< Volumetric Lighting is on: the fog's sun takes its colour, phase and strength
 	};
-	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 80);
+	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 96);
 
 	/** @brief Matches GroundDebugCB in GroundDebugCS.hlsl. */
 	struct alignas(16) GroundDebugConstants
@@ -177,6 +179,7 @@ private:
 	/** @brief Tiling value noise for the fog (GroundFogCS), built once, kept in memory, and its wrapping sampler. */
 	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, 3> noiseSRVs;  ///< Detail and clumps (3D), banks (2D)
 	winrt::com_ptr<ID3D11SamplerState> wrapSampler;
+	winrt::com_ptr<ID3D11SamplerState> shadowSampler;  ///< Comparison, for the game's sun shadow cascades (4d)
 	bool EnsureNoise();
 	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution
 	std::unique_ptr<Texture2D> fogHalfDistance;  ///< Distance to each half-resolution texel's surface
@@ -192,7 +195,7 @@ private:
 	std::array<winrt::com_ptr<ID3D11UnorderedAccessView>, TOP_MIPS> fogTopMipUAVs;
 	std::array<winrt::com_ptr<ID3D11ComputeShader>, 4> fogTopCS;  ///< TOP 0 to 3
 	/** @brief Items 3 and 4 (TOP 3): per cell and level (as the column), all the march reads there: drawA (floor, depth,
-	 * velocity, RGBA32F) and drawB (churn, carrying share, sun and sky visibility, RGBA16F); and the light per top map
+	 * velocity) and drawB (churn, carrying share, settled depth, sun and sky visibility packed), both RGBA32F; and the light per top map
 	 * texel past the grid (lightFar, RG8). */
 	winrt::com_ptr<ID3D11Texture2D> drawA, drawB, lightFar;
 	winrt::com_ptr<ID3D11ShaderResourceView> drawASRV, drawBSRV, lightFarSRV;

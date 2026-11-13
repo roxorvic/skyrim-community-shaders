@@ -214,8 +214,12 @@ namespace FluidFieldSim
 			heat.clear();
 			tes->ForEachReferenceInRange(player, a_radius, [&](RE::TESObjectREFR* a_ref) {
 				if (a_ref && !a_ref->IsDisabled())
-					if (const float reach = HeatReach(*a_ref); reach > 0.0f)
-						heat.push_back({ a_ref->GetPositionX(), a_ref->GetPositionY(), a_ref->GetPositionZ(), reach });
+					if (const float reach = HeatReach(*a_ref); reach > 0.0f) {
+						// Round its model's middle, not its origin (a forge's is at one end, its glowing pit at the other)
+						const auto* model = a_ref->Get3D();
+						const RE::NiPoint3 centre = model ? model->worldBound.center : a_ref->GetPosition();
+						heat.push_back({ centre.x, centre.y, a_ref->GetPositionZ(), reach });
+					}
 				if (a_ref && Classify(*a_ref) != ModelClass::Ignored && seen.try_emplace(a_ref->GetFormID(), a_ref->GetPositionX(), a_ref->GetPositionY()).second)
 					queue.push_back({ a_ref->GetHandle(), a_ref->GetPositionX(), a_ref->GetPositionY() });
 				return RE::BSContainer::ForEachResult::kContinue;

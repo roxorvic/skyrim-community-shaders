@@ -26,21 +26,23 @@ cbuffer GroundFogCB : register(b0)
 	float FarDepth;       // Settled depth past the grid where fog may form (Ground Thickness)
 	int4 SlotTiles[256];  // Ground tiles: per resident slot, xy the tile there, z 1 once valid
 	int2 TileMin;
-	int2 LandCell;  // The land map's centre cell (LandMap.hlsli)
-	float LandPad;
+	int2 LandCell;       // The land map's centre cell (LandMap.hlsli)
+	float VLMix;         // Volumetric Lighting's own colour's share over the sun's (4e)
 	float HollowGain;    // Settled depth per unit of hollowness (FogInputsCS)
 	float FarPoolDepth;  // Pool Depth, for the settled depth past the grid
 	float ContactCell;   // Contact map: world units a texel, world texel of texel (0, 0), texels a side
 	int2 ContactMin;
 	uint ContactResolution;
 	float FarDistance;  // The composite's reach for the sky, world units
-	float2 LodOrigin;   // Unused
+	float2 VLPhase;     // Volumetric Lighting's phase: scattering (anisotropy), contribution
 	uint HasLod;        // The landscape depth is in (the distant fog)
-	float LodPad;
-	uint HasSunShadow;  // Volumetric Shadows' shared shadow map is in: sun shadows in the fog
-	uint HasSky;        // Skylighting's probes are in: sky light in the fog
-	uint LocalLights;   // Light Limit Fix's lights glowing in the fog: 0 off, 1 the nearest few, 2 all in the cluster
-	float LightPad;
+	float VLIntensity;
+	uint HasSunShadow;    // Volumetric Shadows' shared shadow map is in: sun shadows in the fog
+	uint HasSky;          // Skylighting's probes are in: sky light in the fog
+	uint LocalLights;     // Light Limit Fix's lights glowing in the fog: 0 off, 1 the nearest few, 2 all in the cluster
+	uint HasSceneShadow;  // The game's sun shadow cascades are in (t23): actors' shadows near the camera (4d)
+	float3 VLColour;      // Volumetric Lighting's own colour
+	uint HasVL;           // Volumetric Lighting is on: the fog's sun takes its colour, phase and strength
 };
 
 Texture2D<float> DepthTexture : register(t0);
@@ -56,12 +58,14 @@ Texture2D<float> BankNoise : register(t11);
 Texture2D<float2> LandMap : register(t12);
 Texture2D<float> FogTop : register(t15);  // The fog's highest top per TOP_TEXEL round the player, toroidal, max mips (TOP passes)
 Texture2D<float> LandscapeDepth : register(t13);
-Texture2DArray<float4> DrawA : register(t19);      // Per cell and level, toroidal as Column (TOP 3): x mean floor, y depth, zw velocity
-Texture2DArray<float4> DrawB : register(t21);      // Likewise: x churn, y share that carries fog, z sun and w sky visibility
-Texture2D<float2> LightFar : register(t20);        // Sun and sky visibility per TOP_TEXEL past the grid, toroidal as FogTop
-Texture2DArray<float2> DrawFloor : register(t22);  // The solver's per-level mean floor and carrying share (FogBedCS), for TOP 3  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
+Texture2DArray<float4> DrawA : register(t19);  // Per cell and level, toroidal as Column (TOP 3): x mean floor, y depth, zw velocity
+Texture2DArray<float4> DrawB : register(t21);  // Likewise: x churn, y share that carries fog, z settled depth, w light (PackLight)
+Texture2D<float2> LightFar : register(t20);    // Sun and sky visibility per TOP_TEXEL past the grid, toroidal as FogTop
+Texture2DArray<float2> DrawFloor : register(t22);
+Texture2DArray<float> SunShadowMap : register(t23);  // The game's sun shadow cascades, actors in them (Skylighting captures them)  // The solver's per-level mean floor and carrying share (FogBedCS), for TOP 3  // The depth of the landscape alone (LandscapeDepth), as DepthTexture  // The loaded landscape: x height, y flags (fog may form, water), 32 units a texel   // 2D, 8 cells and 32: banks, near and far
 SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
+SamplerComparisonState ShadowSampler : register(s2);
 
 // The lighting CS already has: the sun's shadow (Volumetric Shadows, t18 and t98), the sky's visibility (Skylighting, t14),
 // local lights (Light Limit Fix, t35 to t37); and its colour helpers, which match Linear Lighting
@@ -101,8 +105,15 @@ static const float GLOW_CAP = 0.6;
 /** Local lights: the nearest few at the low setting, at most this many at the high one. */
 static const uint FEW_LIGHTS = 4;
 static const uint MANY_LIGHTS = 32;
-/** Sun's share of the fog's light: low ground fog is mostly sky-lit. */
-static const float SUN_SHARE = 0.15;
+/** Sun's share of the fog's light: low ground fog is mostly sky-lit; more with Volumetric Lighting on, per its intensity (4e). */
+static const float SUN_SHARE = 0.17;
+static const float VL_SUN_SHARE = 0.2;
+/** Share of the sky light a sun shadow also takes from the fog, so shadows (actors', trees') read in it (4d). */
+static const float SHADOW_SKY = 0.2;
+/** Within this of the camera, world units (12.5 m), samples read the sun's shadow map themselves (4d). */
+static const float NEAR_SHADOW = 875.0;
+/** Depth bias for the game's shadow cascades (Exponential Height Fog's default). */
+static const float SCENE_SHADOW_BIAS = 0.002;
 /** Share of the fog's depth over which its top softens into clear air. */
 static const float TOP_SOFTNESS = 0.8;
 /** How strongly fog above a point shades it from the sky. */
@@ -276,6 +287,19 @@ float FogTopAt(float2 xy, uint level)
 
 float Banks(float2 xy);
 
+/** Sun and sky visibility in one float (DrawB.w): 8 bits each, exact in a float's mantissa. */
+float PackLight(float2 light)
+{
+	const float2 q = round(saturate(light) * 255.0);
+	return q.x * 256.0 + q.y;
+}
+
+float2 UnpackLight(float packed)
+{
+	const float sun = floor(packed / 256.0);
+	return float2(sun, packed - sun * 256.0) / 255.0;
+}
+
 /**
  * The fog over ground of the given height (x depth, yz velocity, w churn): the column (bilinear) of each nearest cell's
  * level whose floor is that ground's (D195; cells a level away left out), handing over to the settled depth at the grid's
@@ -307,7 +331,7 @@ float4 FogColumn(float2 xy, float ground, float forming, out float2 o_light)
 		const float floorHeight = level == 1 ? lower.x : top.x;
 		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (floorHeight - ground < LEVEL_STEP && ground - floorHeight < LEVEL_STEP ? 1.0 : 0.0);
 		column += Column[uint3(texel, level)] * w;
-		light += DrawB[uint3(texel, level)].zw * w;
+		light += UnpackLight(DrawB[uint3(texel, level)].w) * w;
 		weights += w;
 	}
 	const float4 simulated = weights > 1e-4 ? column / weights : 0.0;
@@ -365,8 +389,9 @@ static const float NO_FLOOR = -1.0e6;
  * nearest 8-unit ground texel (sharp ledges), and the cells' floors, fog and light bilinear on that level (cells a level
  * away left out). Returns the column as FogColumn; false in o_inside past the interior (the exact path is used there).
  */
-float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float o_carries, out float o_ceiling, out float2 o_light)
+float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float o_carries, out float o_ceiling, out float2 o_light, out float o_settled)
 {
+	o_settled = 0.0;
 	o_ground = NO_GROUND;
 	o_carries = 0.0;
 	o_ceiling = 1e30;
@@ -377,14 +402,51 @@ float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float
 	o_inside = fromEdge >= EDGE_BAND;
 	if (!o_inside)
 		return 0.0;
-	const float4 nearest = Texel(int2(round(position.xy / TILE_TEXEL - 0.5)));
+	// The floor under it: of the four nearest texels' levels, the highest at or under it (a single nearest texel flipped
+	// texel by texel under a log's or rock's curved side: combs). Rock and log tops are left out (the 8-unit map caught
+	// logs in stripes): under one with no floor under it, the bare landscape. Fog lies round and under them as the sim
+	// has it; their own surfaces hide any behind them
+	const int2 t0 = int2(floor(position.xy / TILE_TEXEL - 0.5));
+	float2 g = float2(NO_GROUND, 0.0);
+	float landUnder = NO_GROUND, landUnderForming = 0.0;
+	bool landRead = false;
+	uint level = 0;
+	bool resident = false;
+	[unroll] for (uint n = 0; n < 4; n++)
+	{
+		const float4 texel = Texel(t0 + int2(n & 1, n >> 1));
+		if (texel.x <= NO_GROUND)
+			continue;
+		resident = true;
+		const float slack = 0.5 * LEVEL_STEP;
+		const bool rockTop = (uint(texel.y) & TILE_ROCK) != 0;
+		if (!rockTop && texel.x <= position.z + slack && texel.x > g.x) {
+			g = float2(texel.x, 0.0);
+			level = 0;
+			o_ceiling = 1e30;
+		}
+		if (texel.z > NO_GROUND && texel.z <= position.z + slack && texel.z > g.x) {
+			g = float2(texel.z, 0.0);
+			level = 1;
+			o_ceiling = texel.z + floor(texel.w / GAP_SCALE);
+		}
+		if (rockTop && texel.z <= NO_GROUND) {
+			if (!landRead) {
+				landUnder = LandGround(position.xy, landUnderForming);
+				landRead = true;
+			}
+			if (landUnder > NO_GROUND && landUnder <= position.z + slack && landUnder > g.x) {
+				g = float2(landUnder, 0.0);
+				level = 0;
+				o_ceiling = 1e30;
+			}
+		}
+	}
 	float landForming = 0.0;
-	const bool resident = nearest.x > NO_GROUND;
-	const float2 g = resident ? LevelUnder(nearest, position.z) : float2(LandGround(position.xy, landForming), 0.0);
+	if (!resident)
+		g = float2(LandGround(position.xy, landForming), 0.0);
 	if (g.x <= NO_GROUND || position.z - g.x > MaxDepth * FLUFF_REACH + LEVEL_STEP)
 		return 0.0;
-	const uint level = resident && nearest.z > NO_GROUND && g.x == nearest.z ? 1 : 0;
-	o_ceiling = level == 1 ? nearest.z + floor(nearest.w / GAP_SCALE) : 1e30;
 	const int2 base = int2(floor(c));
 	const float2 f = c - float2(base);
 	const uint mask = Resolution - 1;
@@ -396,11 +458,14 @@ float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float
 		const int2 offset = int2(k & 1, k >> 1);
 		const uint3 texel = uint3(uint2(base + offset) & mask, level);
 		const float4 a = DrawA[texel];
-		const float w = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) * (a.x > NO_FLOOR && abs(a.x - g.x) < LEVEL_STEP ? 1.0 : 0.0);
+		const float bilinear = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y);
+		// Cells under rocks and logs come filled from their ground neighbours (the cell pass); one with no floor at all on
+		// this level holds no fog. One a level away is dropped (ledges stay sharp)
+		const float w = bilinear * (a.x > NO_FLOOR && abs(a.x - g.x) < LEVEL_STEP ? 1.0 : 0.0);
 		const float4 b = DrawB[texel];
 		floorSum += a.x * w;
 		column += float4(a.y, a.zw, b.x) * w;
-		extra += float4(b.y, b.zw, 0.0) * w;
+		extra += float4(b.y, b.z, UnpackLight(b.w)) * w;
 		weights += w;
 	}
 	if (weights <= 1e-4) {
@@ -409,7 +474,8 @@ float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float
 	}
 	o_ground = floorSum / weights;
 	o_carries = extra.x / weights;
-	o_light = extra.yz / weights;
+	o_settled = extra.y / weights;
+	o_light = extra.zw / weights;
 	return column / weights;
 }
 
@@ -422,10 +488,12 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 	o_light = 1.0;
 	bool inside = false;
 	float ground = NO_GROUND, carries = 0.0, ceiling = 1e30;
-	float4 column = CellFog(position, inside, ground, carries, ceiling, o_light);
+	float settled = 0.0;
+	float4 column = CellFog(position, inside, ground, carries, ceiling, o_light, settled);
 	if (!inside) {
 		float forming = 0.0;
 		ground = Ground(position, forming, carries, ceiling);
+		settled = FarDepth * forming;
 		const float height = position.z - ground - groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
 		if (ground <= NO_GROUND || height < 0.0 || height > MaxDepth * FLUFF_REACH)
 			return 0.0;
@@ -449,12 +517,13 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 		return 0.0;
 	// Dense at the bottom, breaking into clumps toward the top; a few wisps stray over it
 	const float up = saturate(height / max(top, 1.0));
-	upInLayer = up;
+	upInLayer = saturate(height / max(max(top, settled), 1.0));
 	const float clumps = lerp(1.0, saturate(noise * 2.2 - 0.6), CLUMPING * up);
 	const float body = (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * clumps;
 	const float wisps = WISP_DENSITY * (puff + saturate(column.w / LIFT_SPEED)) * saturate(noise * 4.0 - 2.6) * (1.0 - smoothstep(top, top * (1.0 + WISP_REACH), height));
-	// The fog's own depth over it, not the lifted top (lifted wisps and clumps are thin: counted whole, wakes went dark)
-	shading = max(min(depth, top) - height, 0.0);
+	// The fog's own depth over it, not the lifted top (lifted wisps and clumps are thin: counted whole, wakes went dark);
+	// 4c: at least the undisturbed fog's (the settled depth), so a wake or stir is shaded as the fog round it, not lit up
+	shading = max(max(min(depth, top), settled) - height, 0.0);
 	return Density * carries * max(body, wisps) * Uncut(position) * Banks(position.xy);
 }
 
@@ -469,6 +538,33 @@ float SunVisibility(float3 positionCR)
 		return 1.0;
 	float detailed;
 	return VolumetricShadows::GetVSMShadow2D(positionCR, detailed);
+}
+
+/**
+ * The sun reaching a camera-relative point by the game's own shadow cascades (actors in them, unlike Volumetric Shadows'
+ * map), as Exponential Height Fog samples them; 1 past them.
+ */
+float SceneSunVisibility(float3 positionCR)
+{
+	const DirectionalShadowLightData data = DirectionalShadowLights[0];
+	const float shadowDepth = SharedData::GetScreenDepth(FrameBuffer::GetShadowDepth(positionCR));
+	if (shadowDepth >= data.EndSplitDistances.y)
+		return 1.0;
+	const uint cascade = shadowDepth > data.EndSplitDistances.x ? 1 : 0;
+	const float3 positionLS = mul(data.ShadowProj[cascade], float4(positionCR + FrameBuffer::CameraPosAdjust.xyz, 1.0)).xyz;
+	if (any(positionLS.xy < 0.0) || any(positionLS.xy > 1.0))
+		return 1.0;
+	uint width, height, slices;
+	SunShadowMap.GetDimensions(width, height, slices);
+	const float2 texel = 1.0 / float2(max(width, 1u), max(height, 1u));
+	const float compare = positionLS.z - SCENE_SHADOW_BIAS;
+	float shadow = 4.0 * SunShadowMap.SampleCmpLevelZero(ShadowSampler, float3(positionLS.xy, cascade), compare);
+	[unroll] for (uint k = 0; k < 4; k++)
+	{
+		const float2 offset = float2(k < 2 ? (k == 0 ? 1.0 : -1.0) : 0.0, k >= 2 ? (k == 2 ? 1.0 : -1.0) : 0.0) * texel;
+		shadow += SunShadowMap.SampleCmpLevelZero(ShadowSampler, float3(positionLS.xy + offset, cascade), compare);
+	}
+	return shadow / 8.0;
 }
 
 /** The open sky a point sees (Skylighting's probes), 1 where they are not in. Camera-relative position. */
@@ -532,11 +628,15 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 			continue;
 		const float stepTransmittance = exp(-extinction * segment);
 		const float3 positionCR = position - FrameBuffer::CameraPosAdjust.xyz;
+		// 4d: near the camera the shadow map itself, so actors' shadows show (the per-cell light is 16 units)
+		const float near = 1.0 - smoothstep(NEAR_SHADOW * 0.8, NEAR_SHADOW, distance);
+		if (near > 0.0 && HasSceneShadow != 0)
+			visibility.x = lerp(visibility.x, min(visibility.x, SceneSunVisibility(positionCR)), near);
 		// Self-shadow: the sky dimmed by the fog straight above, the sun by the fog toward it along its slant
 		const float above = Density * shading;
 		const float sunShade = exp(-SUN_SELF_SHADING * above / max(SharedData::DirLightDirection.z, LOWEST_SUN));
 		const float skyShade = exp(-SELF_SHADING * above);
-		const float3 light = a_sun * visibility.x * sunShade + a_sky * visibility.y * skyShade * lerp(BOTTOM_LIGHT, TOP_LIGHT, upInLayer);
+		const float3 light = a_sun * visibility.x * sunShade + a_sky * visibility.y * skyShade * lerp(1.0 - SHADOW_SKY, 1.0, visibility.x) * lerp(BOTTOM_LIGHT, TOP_LIGHT, upInLayer);
 		const float3 scattered = (1.0 - stepTransmittance) * light;
 		const float weight = (1.0 - stepTransmittance) * transmittance;
 		o_where += float4(positionCR * weight, weight);
@@ -587,10 +687,19 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 
 	// Light: the sun scattered toward the eye (forward and backward lobes), and the sky's average, through CS's colour helpers
 	const float cosTheta = dot(direction, SharedData::DirLightDirection.xyz);
-	const float phase = lerp(HenyeyGreenstein(cosTheta, PHASE_FORWARD), HenyeyGreenstein(cosTheta, PHASE_BACKWARD), PHASE_BACK_SHARE) * 4.0 * Math::PI;
-	const float3 sunLight = Albedo * Color::DirectionalLight(SharedData::DirLightColor.xyz) * phase * SUN_SHARE * (1.0 - SharedData::InInterior);
+	float phase = lerp(HenyeyGreenstein(cosTheta, PHASE_FORWARD), HenyeyGreenstein(cosTheta, PHASE_BACKWARD), PHASE_BACK_SHARE) * 4.0 * Math::PI;
+	float3 sunColour = Color::DirectionalLight(SharedData::DirLightColor.xyz) * (1.0 - SharedData::InInterior);
+	float sunShare = SUN_SHARE;
+	if (HasVL != 0) {
+		// 4e: as Volumetric Lighting scatters the sun (its phase, ISVolumetricLightingGenerateCS's; its colour; its strength)
+		const float g = VLPhase.x;
+		const float vlPhase = (1.0 - g * g) / max(1.0 + cosTheta * g, 1e-3);
+		phase = lerp(phase, vlPhase, VLPhase.y);
+		sunColour = lerp(sunColour, Color::DirectionalLight(VLColour) * Color::RGBToLuminance(sunColour) / max(Color::RGBToLuminance(Color::DirectionalLight(VLColour)), 1e-3), VLMix);
+		sunShare += VL_SUN_SHARE * VLIntensity;
+	}
+	const float3 sunLight = Albedo * sunColour * phase * sunShare;
 	const float3 sky = Color::Ambient(max(float3(SharedData::AmbientSHR.x, SharedData::AmbientSHG.x, SharedData::AmbientSHB.x), 0.0) * 0.886);
-	const float3 sunColour = Color::DirectionalLight(SharedData::DirLightColor.xyz) * (1.0 - SharedData::InInterior);
 	const float3 skyLight = Albedo * (lerp(Color::RGBToLuminance(sky).xxx, sky, SKY_SATURATION) + sunColour * SUN_MULTIPLE);
 	const float3 light = sunLight + skyLight;
 
@@ -602,9 +711,11 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	const float3 endPoint = camera + direction * rayLength;
 	float formingB, carriesB, ceilingB;
 	const float endGround = Ground(endPoint + float3(0.0, 0.0, 1.0), formingB, carriesB, ceilingB);
-	// A surface just over or under the ground map (not a wall or a tree): the map is that far off there
+	// The landscape just over or under the ground map (its triangles against the map's texels): the map is that far off
+	// there. Only on the landscape: on a log or rock near the ground it flipped texel by texel along their edges (combs)
 	rayEnd = endPoint;
-	groundError = depth < 1.0 && abs(endPoint.z - endGround) < GROUND_FIX ? endPoint.z - endGround : 0.0;
+	const bool onLandscape = HasLod == 0 || abs(surfaceDistance - landscapeDistance) < max(16.0, surfaceDistance * 0.005);
+	groundError = depth < 1.0 && onLandscape && abs(endPoint.z - endGround) < GROUND_FIX ? endPoint.z - endGround : 0.0;
 	const float probeSpan = rayLength * length(direction.xy) / TOP_PROBES;
 	const uint level = min(uint(ceil(log2(max(probeSpan / TOP_TEXEL, 1.0)))), TOP_MIPS - 1);
 	float bandTop = TOP_NONE;
@@ -751,8 +862,43 @@ float2 LightAt(float3 world)
 		const float4 column = Column[texel];
 		const float2 drawFloor = DrawFloor[texel];
 		const bool open = bed.z != 2.0 && drawFloor.x > NO_FLOOR;
+		const float settled = bed.z == 0.0 ? FarDepth * bed.y : 0.0;
+		// A top-level cell under a rock or log (the sim keeps fog out of it whole; floorless where wholly covered): filled
+		// from the ground cells round it, radially weighted, so the march's 2 x 2 blend never steps at a log's foot (its
+		// edge traced the cell grid); the log's own surface draws the edge
+		if (level == 0 && bed.z != 2.0 && (bed.z == 1.0 || drawFloor.x <= NO_FLOOR)) {
+			float4 fill = 0.0, fillB = 0.0;
+			float floorFill = 0.0, weights = 0.0;
+			[unroll] for (int ky = -1; ky <= 1; ky++)
+			{
+				[unroll] for (int kx = -1; kx <= 1; kx++)
+				{
+					if (kx == 0 && ky == 0)
+						continue;
+					const uint3 other = uint3(uint2(cell + int2(kx, ky)) & (Resolution - 1), 0);
+					const float4 otherBed = Bed[other];
+					const float2 otherFloor = DrawFloor[other];
+					if (otherBed.z != 0.0 || otherFloor.x <= NO_FLOOR)
+						continue;
+					const float w = kx != 0 && ky != 0 ? 0.5 : 1.0;
+					const float4 otherColumn = Column[other];
+					fill += otherColumn * w;
+					fillB += float4(otherFloor.y, FarDepth * otherBed.y, 0.0, 0.0) * w;
+					floorFill += otherFloor.x * w;
+					weights += w;
+				}
+			}
+			if (weights > 0.0) {
+				fill /= weights;
+				fillB /= weights;
+				floorFill /= weights;
+				DrawAOut[texel] = float4(open ? drawFloor.x : floorFill, fill.xyz);
+				DrawBOut[texel] = float4(fill.w, fillB.x, fillB.y, PackLight(fill.x > 0.5 ? LightAt(float3(centre, floorFill + 0.5 * fill.x)) : 1.0));
+				continue;
+			}
+		}
 		DrawAOut[texel] = float4(open ? drawFloor.x : -1.0e7, column.xyz);
-		DrawBOut[texel] = float4(column.w, drawFloor.y, open && column.x > 0.5 ? LightAt(float3(centre, bed.x + 0.5 * column.x)) : 1.0);
+		DrawBOut[texel] = float4(column.w, drawFloor.y, settled, PackLight(open && column.x > 0.5 ? LightAt(float3(centre, bed.x + 0.5 * column.x)) : 1.0));
 	}
 	const int2 topMin = TopMin();
 	const int2 world = topMin + ((int2(id.xy) - topMin) & (TOP_TEXELS - 1));

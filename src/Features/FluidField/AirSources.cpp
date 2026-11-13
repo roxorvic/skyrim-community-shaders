@@ -408,13 +408,14 @@ namespace FluidFieldSim
 		}
 		std::erase_if(shouts, [](const auto& a_shout) { return a_shout.second <= 0.0f; });
 
-		// Fires: their heat dries the air, so the fog clears round them; a gentle outward push churns the edge, which lifts it
+		// Fires: their heat dries the air, so the fog clears round them (down to well under a fire on a raised base, a forge); a
+		// gentle outward push churns the edge, which lifts it
 		for (const auto& fire : a_heat) {
 			if (pushers.size() >= a_maxMovers)
 				break;
 			if (std::abs(fire.x - a_playerPos.x) > a_outerReach || std::abs(fire.y - a_playerPos.y) > a_outerReach)
 				continue;
-			pushers.push_back({ .from = { fire.x, fire.y }, .to = { fire.x, fire.y }, .radius = fire.radius, .shove = HEAT_SHOVE, .velocity = {}, .cut = HEAT_CUT, .bottom = fire.z - 100.0f, .top = fire.z + 200.0f, .pad = 0.0f });
+			pushers.push_back({ .from = { fire.x, fire.y }, .to = { fire.x, fire.y }, .radius = fire.radius, .shove = HEAT_SHOVE, .velocity = {}, .cut = HEAT_CUT, .bottom = fire.z - 200.0f, .top = fire.z + 200.0f, .pad = 0.0f });
 		}
 
 		std::erase_if(legs, [&](const auto& a_entry) { return updateCounter - a_entry.second.lastSeen > FORGET_AFTER; });
