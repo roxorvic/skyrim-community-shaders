@@ -31,6 +31,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Stir,
 	DistantReach,
 	LocalLights,
+	Samples,
 	DebugView)
 
 void FluidFieldGroundFog::DrawSettings()
@@ -74,6 +75,9 @@ void FluidFieldGroundFog::DrawSettings()
 		if (ImGui::Combo(T(TKEY("local_lights"), "Local Lights"), &lights, LIGHT_TIERS, IM_ARRAYSIZE(LIGHT_TIERS)))
 			settings.LocalLights = static_cast<uint>(lights);
 		tooltip(T(TKEY("local_lights_tooltip"), "Torches, fires and other lights glowing in the fog. Nearest: the few closest lights. All: every light in reach, costing more."));
+		static constexpr uint MIN_SAMPLES = 12, MAX_SAMPLES = 64;
+		ImGui::SliderScalar(T(TKEY("samples"), "Samples"), ImGuiDataType_U32, &settings.Samples, &MIN_SAMPLES, &MAX_SAMPLES, "%u", ImGuiSliderFlags_AlwaysClamp);
+		tooltip(T(TKEY("samples_tooltip"), "Samples along each view ray through the fog. More: finer shadow edges and wakes, but the fog costs more, roughly in proportion."));
 		if (FluidFieldSim::LandscapeDepth::GetReach() > 0.0f)
 			ImGui::Text(T(TKEY("distant_reach_now"), "Distant fog reaches %.0f m"), DistantDistance() / 70.0f);
 		bool debugView = settings.DebugView == 1;
@@ -110,6 +114,7 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 	settings.Stir = clamp(settings.Stir, 0.0f, 3.0f, defaults.Stir);
 	settings.DistantReach = clamp(settings.DistantReach, 0.3f, 1.0f, defaults.DistantReach);
 	settings.LocalLights = std::min(settings.LocalLights, 2u);
+	settings.Samples = std::clamp(settings.Samples, 12u, 64u);
 	settings.DebugView = std::min(settings.DebugView, 1u);
 }
 
@@ -140,6 +145,7 @@ void FluidFieldGroundFog::ClearShaderCache()
 	solverFailed = false;
 	groundFogCS = nullptr;
 	groundFogCompositeCS = nullptr;
+	groundFogTemporalCS = nullptr;
 	groundDebugCS = nullptr;
 	fogTopCS = {};
 	drawFailed = false;
@@ -169,6 +175,10 @@ void FluidFieldGroundFog::Release()
 	shadowSampler = nullptr;
 	fogHalf.reset();
 	fogHalfDistance.reset();
+	fogHistory = {};
+	fogHistoryDistance = {};
+	historyValid = false;
+	groundFogTemporalCS = nullptr;
 	ReleaseFogTop();
 }
 
@@ -297,6 +307,18 @@ FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 		layer.wind[1] = -std::cos(heading) * speed;
 	}
 	layer.time = fogTime;
+	const auto eye = Util::GetEyePosition();
+	layer.eye[0] = eye.x;
+	layer.eye[1] = eye.y;
+	layer.eye[2] = eye.z;
+	if (const auto* camera = RE::PlayerCamera::GetSingleton(); camera && camera->cameraRoot) {
+		const auto& rotate = camera->cameraRoot->world.rotate;
+		const float x = rotate.entry[0][1], y = rotate.entry[1][1], length = std::sqrt(x * x + y * y);
+		if (length > 1e-4f) {
+			layer.viewDir[0] = x / length;
+			layer.viewDir[1] = y / length;
+		}
+	}
 	// How hard it rains, from Wetness Effects (its puddle ripples read the same)
 	if (globals::features::wetnessEffects.loaded) {
 		const auto wetness = globals::features::wetnessEffects.GetCommonBufferData();
@@ -306,10 +328,6 @@ FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 		if (layer.rain > 0.0f && occlusion.depthSRV) {
 			layer.occlusion = occlusion.depthSRV;
 			std::memcpy(layer.occlusionViewProj, &wetness.OcclusionViewProj, sizeof(layer.occlusionViewProj));
-			const auto eye = Util::GetEyePosition();
-			layer.eye[0] = eye.x;
-			layer.eye[1] = eye.y;
-			layer.eye[2] = eye.z;
 		}
 	}
 	return layer;
@@ -533,10 +551,11 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	if (!groundFogCS) {
 		groundFogCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", {}, "cs_5_0")));
 		groundFogCompositeCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "COMPOSITE", "" } }, "cs_5_0")));
+		groundFogTemporalCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "TEMPORAL", "" } }, "cs_5_0")));
 		constexpr const char* TOP_PASSES[] = { "0", "1", "2", "3" };
 		for (int i = 0; i < 4; i++)
 			fogTopCS[i].attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\FluidField\\GroundFogCS.hlsl", { { "TOP", TOP_PASSES[i] } }, "cs_5_0")));
-		if (!groundFogCS || !groundFogCompositeCS || !fogTopCS[0] || !fogTopCS[1] || !fogTopCS[2] || !fogTopCS[3] || !EnsureFogTop()) {
+		if (!groundFogCS || !groundFogCompositeCS || !groundFogTemporalCS || !fogTopCS[0] || !fogTopCS[1] || !fogTopCS[2] || !fogTopCS[3] || !EnsureFogTop()) {
 			logger::error("[Fluid Field] Ground fog shader failed to compile; the ground fog stays off");
 			groundFogCS = nullptr;
 			groundFogCompositeCS = nullptr;
@@ -565,12 +584,23 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	static const auto* volumetricLighting = reinterpret_cast<const RE::BSVolumetricLightingRenderData*>(REL::RelocationID(527719, 414629).address() - offsetof(RE::BSVolumetricLightingRenderData, color));
 	const bool vlOn = globals::features::volumetricLighting.loaded && globals::game::bEnableVolumetricLighting && *globals::game::bEnableVolumetricLighting;
 
+	// Last frame's fog is no use after a cut (a load, a teleport, a big jump)
+	{
+		const auto eye = Util::GetEyePosition();
+		const float dx = eye.x - lastEye[0], dy = eye.y - lastEye[1], dz = eye.z - lastEye[2];
+		if (dx * dx + dy * dy + dz * dz > 500.0f * 500.0f)
+			historyValid = false;
+		lastEye[0] = eye.x;
+		lastEye[1] = eye.y;
+		lastEye[2] = eye.z;
+	}
+
 	GroundFogConstants constants{
 		.gridMin = { gridMin[0], gridMin[1] },
 		.resolution = GRID_RESOLUTION,
 		.cellSize = cellSize,
 		.density = settings.FogDensity,
-		.stepCount = STEP_COUNT,
+		.stepCount = settings.Samples,
 		// To the loaded landscape's edge: settled fog past the simulated grid, fading out where Exponential Height Fog takes over
 		.maxDistance = (FluidFieldSim::GroundTiles::LAND_REACH + 0.5f) * FluidFieldSim::LandscapeCache::CELL_UNITS,
 		.maxDepth = std::max(settings.PoolDepth, settings.GroundThickness),
@@ -594,7 +624,9 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.localLights = lightSRVs[0] && lightSRVs[1] && lightSRVs[2] ? settings.LocalLights : 0u,
 		.hasSceneShadow = sceneShadowSRV && directionalShadowSRV ? 1u : 0u,
 		.vlColour = { volumetricLighting->color.red, volumetricLighting->color.green, volumetricLighting->color.blue },
-		.hasVL = vlOn ? 1u : 0u
+		.hasVL = vlOn ? 1u : 0u,
+		.hasHistory = historyValid ? 1u : 0u,
+		.historyPad = {}
 	};
 	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
 	if (!Upload(context, groundFogCB, constants))
@@ -614,6 +646,14 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		};
 		fogHalf = create(DXGI_FORMAT_R16G16B16A16_FLOAT, "FluidField::GroundFogHalf");
 		fogHalfDistance = create(DXGI_FORMAT_R32_FLOAT, "FluidField::GroundFogHalfDistance");
+		for (auto& history : fogHistory)
+			history = create(DXGI_FORMAT_R16G16B16A16_FLOAT, "FluidField::GroundFogHistory");
+		for (auto& history : fogHistoryDistance)
+			history = create(DXGI_FORMAT_R32_FLOAT, "FluidField::GroundFogHistoryDistance");
+		historyValid = false;
+		constants.hasHistory = 0;
+		if (!Upload(context, groundFogCB, constants))
+			return;
 	}
 
 	ID3D11Buffer* cb = groundFogCB.get();
@@ -654,7 +694,22 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 
 	ID3D11UnorderedAccessView* nullUAVs[2]{};
 	context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
-	ID3D11ShaderResourceView* halfSRVs[] = { fogHalf->srv.get(), fogHalfDistance->srv.get() };
+	// 4a/4b: blended over frames into this frame's history, which the composite lays over the scene
+	const uint32_t previous = historyIndex, current = historyIndex ^ 1;
+	ID3D11ShaderResourceView* nowSRVs[] = { fogHalf->srv.get(), fogHalfDistance->srv.get() };
+	context->CSSetShaderResources(8, 2, nowSRVs);
+	ID3D11ShaderResourceView* historySRVs[] = { fogHistory[previous]->srv.get(), fogHistoryDistance[previous]->srv.get() };
+	context->CSSetShaderResources(24, 2, historySRVs);
+	ID3D11UnorderedAccessView* historyUAVs[] = { fogHistory[current]->uav.get(), fogHistoryDistance[current]->uav.get() };
+	context->CSSetUnorderedAccessViews(0, 2, historyUAVs, nullptr);
+	context->CSSetShader(groundFogTemporalCS.get(), nullptr, 0);
+	context->Dispatch((dispatch.x + 1) / 2, (dispatch.y + 1) / 2, 1);
+	context->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+	ID3D11ShaderResourceView* noHistory[2]{};
+	context->CSSetShaderResources(24, 2, noHistory);
+	historyIndex = current;
+	historyValid = true;
+	ID3D11ShaderResourceView* halfSRVs[] = { fogHistory[current]->srv.get(), fogHistoryDistance[current]->srv.get() };
 	context->CSSetShaderResources(8, 2, halfSRVs);
 	context->CSSetUnorderedAccessViews(0, 1, &a_main, nullptr);
 	context->CSSetShader(groundFogCompositeCS.get(), nullptr, 0);

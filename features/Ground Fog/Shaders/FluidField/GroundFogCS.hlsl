@@ -43,6 +43,8 @@ cbuffer GroundFogCB : register(b0)
 	uint HasSceneShadow;  // The game's sun shadow cascades are in (t23): actors' shadows near the camera (4d)
 	float3 VLColour;      // Volumetric Lighting's own colour
 	uint HasVL;           // Volumetric Lighting is on: the fog's sun takes its colour, phase and strength
+	uint HasHistory;      // Last frame's fog is valid to blend with (TEMPORAL)
+	float3 HistoryPad;
 };
 
 Texture2D<float> DepthTexture : register(t0);
@@ -75,7 +77,7 @@ SamplerComparisonState ShadowSampler : register(s2);
 #define VOLUMETRIC_SHADOWS
 #include "Common/ShadowSampling.hlsli"
 #include "LightLimitFix/LightLimitFix.hlsli"
-#if !defined(COMPOSITE) && !defined(TOP)
+#if !defined(COMPOSITE) && !defined(TOP) && !defined(TEMPORAL)
 RWTexture2D<float4> FogHalf : register(u0);
 RWTexture2D<float> FogHalfDistance : register(u1);
 #elif defined(COMPOSITE)
@@ -112,6 +114,8 @@ static const float VL_SUN_SHARE = 0.2;
 static const float SHADOW_SKY = 0.2;
 /** Within this of the camera, world units (12.5 m), samples read the sun's shadow map themselves (4d). */
 static const float NEAR_SHADOW = 875.0;
+/** Most a near sample's shadow taps spread, world units: wider, its five taps split into five copies of an edge. */
+static const float SHADOW_SPREAD = 32.0;
 /** Depth bias for the game's shadow cascades (Exponential Height Fog's default). */
 static const float SCENE_SHADOW_BIAS = 0.002;
 /** Share of the fog's depth over which its top softens into clear air. */
@@ -544,7 +548,7 @@ float SunVisibility(float3 positionCR)
  * The sun reaching a camera-relative point by the game's own shadow cascades (actors in them, unlike Volumetric Shadows'
  * map), as Exponential Height Fog samples them; 1 past them.
  */
-float SceneSunVisibility(float3 positionCR)
+float SceneSunVisibility(float3 positionCR, float a_spread)
 {
 	const DirectionalShadowLightData data = DirectionalShadowLights[0];
 	const float shadowDepth = SharedData::GetScreenDepth(FrameBuffer::GetShadowDepth(positionCR));
@@ -556,7 +560,10 @@ float SceneSunVisibility(float3 positionCR)
 		return 1.0;
 	uint width, height, slices;
 	SunShadowMap.GetDimensions(width, height, slices);
-	const float2 texel = 1.0 / float2(max(width, 1u), max(height, 1u));
+	// The taps spread over a_spread world units (the march's step there), at least a texel: a sparse march's samples each
+	// stand for their whole step, so a shadow's edge fades across it instead of striping (seen moving: TAA can't hide it)
+	const float3 across = mul(data.ShadowProj[cascade], float4(positionCR + FrameBuffer::CameraPosAdjust.xyz + float3(a_spread, a_spread, 0.0), 1.0)).xyz;
+	const float2 texel = max(1.0 / float2(max(width, 1u), max(height, 1u)), abs(across.xy - positionLS.xy) * 0.5);
 	const float compare = positionLS.z - SCENE_SHADOW_BIAS;
 	float shadow = 4.0 * SunShadowMap.SampleCmpLevelZero(ShadowSampler, float3(positionLS.xy, cascade), compare);
 	[unroll] for (uint k = 0; k < 4; k++)
@@ -631,7 +638,7 @@ float4 MarchHalf(float3 camera, float3 direction, float from, float to, bool a_f
 		// 4d: near the camera the shadow map itself, so actors' shadows show (the per-cell light is 16 units)
 		const float near = 1.0 - smoothstep(NEAR_SHADOW * 0.8, NEAR_SHADOW, distance);
 		if (near > 0.0 && HasSceneShadow != 0)
-			visibility.x = lerp(visibility.x, min(visibility.x, SceneSunVisibility(positionCR)), near);
+			visibility.x = lerp(visibility.x, min(visibility.x, SceneSunVisibility(positionCR, min(segment, SHADOW_SPREAD))), near);
 		// Self-shadow: the sky dimmed by the fog straight above, the sun by the fog toward it along its slant
 		const float above = Density * shading;
 		const float sunShade = exp(-SUN_SELF_SHADING * above / max(SharedData::DirLightDirection.z, LOWEST_SUN));
@@ -917,6 +924,59 @@ float2 LightAt(float3 world)
 	LightFarOut[id.xy] = farLight;
 }
 #	endif
+#elif defined(TEMPORAL)
+// 4a/4b: this frame's half-resolution fog blended with last frame's, reprojected by the surface each texel shows: the
+// march's jitter averages out over frames while the camera moves too (the game's TAA can't resolve it then: stripes).
+// Last frame's is clamped to the range round this frame's texel (no ghosting) and dropped across a depth edge.
+Texture2D<float4> FogNow : register(t8);
+Texture2D<float> FogNowDistance : register(t9);
+Texture2D<float4> FogHistory : register(t24);
+Texture2D<float> FogHistoryDistance : register(t25);
+RWTexture2D<float4> FogOut : register(u0);
+RWTexture2D<float> FogOutDistance : register(u1);
+
+/** This frame's weight when last frame's is valid (about the last 6 frames count). */
+static const float BLEND_NEW = 0.15;
+
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {
+	const uint2 size = uint2(SharedData::BufferDim.xy);
+	const uint2 halfSize = (size + 1) / 2;
+	if (any(id.xy >= halfSize))
+		return;
+	const float4 now = FogNow[id.xy];
+	const float distance = FogNowDistance[id.xy];
+	FogOutDistance[id.xy] = distance;
+	float4 result = now;
+	if (HasHistory != 0) {
+		// The surface this texel shows, camera-relative, and where it was on screen last frame
+		float2 uv = (float2(id.xy * 2) + 1.0) * SharedData::BufferDim.zw * FrameBuffer::DynamicResolutionParams2.xy;
+		const float4 farPoint = mul(FrameBuffer::CameraViewProjInverse, float4(2 * float2(uv.x, -uv.y + 1) - 1, 1.0, 1));
+		const float3 direction = normalize(farPoint.xyz / farPoint.w);
+		const float3 previousPosition = direction * distance + FrameBuffer::CameraPosAdjust.xyz - FrameBuffer::CameraPreviousPosAdjust.xyz;
+		const float4 previousClip = mul(FrameBuffer::CameraPreviousViewProjUnjittered, float4(previousPosition, 1.0));
+		const float2 historyUV = previousClip.xy / previousClip.w * float2(0.5, -0.5) + 0.5;
+		if (previousClip.w > 0.0 && all(historyUV > 0.0) && all(historyUV < 1.0)) {
+			const int2 historyTexel = clamp(int2(historyUV * float2(halfSize)), 0, int2(halfSize) - 1);
+			const float historyDistance = FogHistoryDistance[historyTexel];
+			// Not across a depth edge (another surface was there)
+			if (abs(historyDistance - length(previousPosition)) < 0.05 * max(distance, 1.0) + 16.0) {
+				float4 lo = now, hi = now;
+				[unroll] for (int y = -1; y <= 1; y++)
+				{
+					[unroll] for (int x = -1; x <= 1; x++)
+					{
+						const float4 n = FogNow[clamp(int2(id.xy) + int2(x, y), 0, int2(halfSize) - 1)];
+						lo = min(lo, n);
+						hi = max(hi, n);
+					}
+				}
+				const float4 history = clamp(FogHistory[historyTexel], lo, hi);
+				result = lerp(history, now, BLEND_NEW);
+			}
+		}
+	}
+	FogOut[id.xy] = result;
+}
 #elif !defined(COMPOSITE)
 /** The landscape's surface at a full-resolution pixel (LandscapeDepth), camera-relative. */
 float3 LandscapePoint(uint2 pixel, uint2 size)

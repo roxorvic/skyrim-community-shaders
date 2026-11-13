@@ -137,6 +137,8 @@ namespace FluidFieldSim
 		std::memcpy(c.occlusionViewProj, layer.occlusionViewProj, sizeof(c.occlusionViewProj));
 		std::memcpy(c.eye, layer.eye, sizeof(c.eye));
 		c.hasOcclusion = layer.occlusion ? 1 : 0;
+		c.viewDir[0] = layer.viewDir[0];
+		c.viewDir[1] = layer.viewDir[1];
 		std::memcpy(c.slots, ground.slots.data(), sizeof(c.slots));
 		c.tileMin[0] = ground.tileMin[0];
 		c.tileMin[1] = ground.tileMin[1];

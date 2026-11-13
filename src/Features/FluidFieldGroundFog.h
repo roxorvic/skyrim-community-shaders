@@ -49,6 +49,7 @@ struct FluidFieldGroundFog : Feature
 		float Stir = 1.0f;              ///< How hard moving actors push the fog
 		float DistantReach = 0.9f;      ///< How far the distant fog reaches, as a share of the LOD terrain's reach
 		uint LocalLights = 1;           ///< Torches and fires glowing in the fog: 0 off, 1 the nearest few, 2 all
+		uint Samples = 24;              ///< Samples along each view ray (more: finer shadow edges, more cost)
 		uint DebugView = 0;             ///< 1 colours every surface by what the fog's ground takes it for, brighter where fog lies
 	};
 
@@ -94,9 +95,6 @@ private:
 	void DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
 	void DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
 
-	/** @brief Samples along each pixel's ray. */
-	static constexpr uint32_t STEP_COUNT = 24;
-
 	/** @brief Matches GroundFogCB in GroundFogCS.hlsl. */
 	struct alignas(16) GroundFogConstants
 	{
@@ -128,8 +126,10 @@ private:
 		uint32_t hasSceneShadow;  ///< The game's sun shadow cascades bound (t23): actors' shadows near the camera (4d)
 		float vlColour[3];        ///< Volumetric Lighting's own colour (4e)
 		uint32_t hasVL;           ///< Volumetric Lighting is on: the fog's sun takes its colour, phase and strength
+		uint32_t hasHistory;      ///< Last frame's fog is valid to blend with (the TEMPORAL pass)
+		float historyPad[3];
 	};
-	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 96);
+	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 112);
 
 	/** @brief Matches GroundDebugCB in GroundDebugCS.hlsl. */
 	struct alignas(16) GroundDebugConstants
@@ -183,6 +183,13 @@ private:
 	bool EnsureNoise();
 	std::unique_ptr<Texture2D> fogHalf;          ///< In-scattered light (rgb) and transmittance (a), half resolution
 	std::unique_ptr<Texture2D> fogHalfDistance;  ///< Distance to each half-resolution texel's surface
+	/** @brief 4a/4b: the half-resolution fog blended over frames (GroundFogCS TEMPORAL), ping-ponged, so the march's
+	 * jitter averages out while the camera moves too (the game's TAA cannot resolve it then: stripes). */
+	std::array<std::unique_ptr<Texture2D>, 2> fogHistory, fogHistoryDistance;
+	uint32_t historyIndex = 0;
+	bool historyValid = false;
+	float lastEye[3]{};
+	winrt::com_ptr<ID3D11ComputeShader> groundFogTemporalCS;
 	bool drawFailed = false;
 	/** @brief The rays' bounds (GroundFogCS's TOP passes): the fog's highest top per 64-unit texel round the player, then
 	 * dilated into fogTop's first mip, with max mips. */
