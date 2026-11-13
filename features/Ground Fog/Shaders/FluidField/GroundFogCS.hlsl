@@ -118,6 +118,9 @@ static const float NEAR_SHADOW = 875.0;
 static const float SHADOW_SPREAD = 32.0;
 /** Depth bias for the game's shadow cascades (Exponential Height Fog's default). */
 static const float SCENE_SHADOW_BIAS = 0.002;
+/** Density at the fog's bottom and at its top, against its mean: thick near the ground, thin and see-through above. */
+static const float BOTTOM_DENSITY = 1.5;
+static const float TOP_DENSITY = 0.45;
 /** Share of the fog's depth over which its top softens into clear air. */
 static const float TOP_SOFTNESS = 0.8;
 /** How strongly fog above a point shades it from the sky. */
@@ -483,6 +486,59 @@ float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float
 	return column / weights;
 }
 
+/** Within this of the camera, world units (15 m), rain drops dent the fog (4f): this share of the ripples' drops, each
+ * this many times a ripple's size (at their size, every drop, the dents were too many and too faint). */
+static const float RAIN_REACH = 1050.0;
+static const float RAIN_SHARE = 0.4;
+/** A hole's size against a ripple's (its spread, from small to large), and how long it lasts, seconds (Wetness Effects'
+ * ripples last 0.5 s: holes that short closed too fast). Fog's own, not Wetness Effects' settings. */
+static const float2 RAIN_HOLE_SIZE = float2(1.0, 2.8);
+static const float RAIN_HOLE_LIFE = 1.2;
+
+/**
+ * 4f: how much fog rain leaves at a position: a small hole over each live drop of Wetness Effects' rain, where and when
+ * its ripples show (the same hash as its GetRainDrops: 4-unit squares, each with its own timer), growing with the ring
+ * and closing as it fades. ground: the surface under it (the hash takes its height, as the ripples take theirs).
+ */
+float RainHoles(float3 position, float ground)
+{
+	const float rain = SharedData::wetnessEffectsSettings.Raining;
+	if (rain <= 0.0 || !SharedData::wetnessEffectsSettings.EnableRipples || distance(position, FrameBuffer::CameraPosAdjust.xyz) > RAIN_REACH)
+		return 1.0;
+	static const float UINT_TO_FLOAT = 1.0 / 4294967295.0;
+	float2 gridUV = position.xy * SharedData::wetnessEffectsSettings.RaindropGridSizeRcp;
+	const int2 grid = int2(floor(gridUV));
+	gridUV -= float2(grid);
+	float left = 1.0;
+	[unroll] for (int i = -1; i <= 1; i++)
+	{
+		[unroll] for (int j = -1; j <= 1; j++)
+		{
+			const int2 gridCurr = grid + int2(i, j);
+			const float tOffset = float(Random::iqint3(asuint(gridCurr))) * UINT_TO_FLOAT;
+			const float now = SharedData::wetnessEffectsSettings.Time * SharedData::wetnessEffectsSettings.RaindropIntervalRcp + tOffset + ground * 0.001;
+			// This interval's drop and the last one's: a hole outlives the interval its drop fell in
+			[unroll] for (uint back = 0; back < 2; back++)
+			{
+				const uint timestep = uint(now) - back;
+				const float age = (now - float(uint(now))) + float(back);  // Intervals since the drop fell
+				const uint3 hash = Random::pcg3d(uint3(asuint(gridCurr), timestep));
+				const float3 floatHash = float3(hash) * UINT_TO_FLOAT;
+				if (floatHash.z >= SharedData::wetnessEffectsSettings.RaindropChance || float((hash.x ^ hash.y) & 0xFFFF) / 65535.0 >= RAIN_SHARE)
+					continue;
+				const float holeT = age / max(RAIN_HOLE_LIFE * SharedData::wetnessEffectsSettings.RaindropIntervalRcp, 1e-3);  // age in intervals, life in seconds
+				if (holeT >= 1.0)
+					continue;
+				const float size = lerp(RAIN_HOLE_SIZE.x, RAIN_HOLE_SIZE.y, float(Random::iqint3(hash.yz)) * UINT_TO_FLOAT);
+				const float radius = size * SharedData::wetnessEffectsSettings.RippleRadius * lerp(0.35, 1.0, saturate(holeT * 4.0));
+				const float d = length(float2(i, j) + floatHash.xy - gridUV);
+				left = min(left, lerp(smoothstep(radius * 0.5, radius, d), 1.0, holeT * holeT));
+			}
+		}
+	}
+	return lerp(1.0, left, saturate(rain * 2.0));
+}
+
 /** Fog extinction per world unit at a position, the depth of fog over it (its self-shadow), how high in the layer it lies
  * (0 bottom, 1 top), and its sun and sky visibility. */
 float FogAt(float3 position, out float shading, out float upInLayer, out float2 o_light)
@@ -523,12 +579,12 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 	const float up = saturate(height / max(top, 1.0));
 	upInLayer = saturate(height / max(max(top, settled), 1.0));
 	const float clumps = lerp(1.0, saturate(noise * 2.2 - 0.6), CLUMPING * up);
-	const float body = (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * clumps;
+	const float body = (1.0 - smoothstep(top * (1.0 - TOP_SOFTNESS), top, height)) * clumps * lerp(BOTTOM_DENSITY, TOP_DENSITY, smoothstep(0.0, 1.0, up));
 	const float wisps = WISP_DENSITY * (puff + saturate(column.w / LIFT_SPEED)) * saturate(noise * 4.0 - 2.6) * (1.0 - smoothstep(top, top * (1.0 + WISP_REACH), height));
 	// The fog's own depth over it, not the lifted top (lifted wisps and clumps are thin: counted whole, wakes went dark);
 	// 4c: at least the undisturbed fog's (the settled depth), so a wake or stir is shaded as the fog round it, not lit up
 	shading = max(max(min(depth, top), settled) - height, 0.0);
-	return Density * carries * max(body, wisps) * Uncut(position) * Banks(position.xy);
+	return Density * carries * max(body, wisps) * Uncut(position) * Banks(position.xy) * RainHoles(position, ground);
 }
 
 /**
