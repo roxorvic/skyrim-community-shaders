@@ -480,6 +480,25 @@ its own, mostly sky-lit look: it doesn't scatter the sun the way the air round i
 - With it off: the fog looks as before.
 - Draw time measured with it on and off.
 
+### 4f. Rain dents where the rain decals land (added 2026-11-12)
+
+**Problem:** the sim's rain dents are random per 16-unit cell, so they don't match Wetness Effects' splashes and ripples on
+the ground (Victor's shot SS 2548). Wetness Effects doesn't spawn decals: its shader places one possible drop per
+4-unit grid square from a hash of the square and the time (`GetRainDrops`, `RaindropGridSize`, `RaindropChance`,
+interval, lifetime), too fine for the sim's cells.
+
+**Do:**
+
+- In the draw, within about 15 m of the camera while it rains: each fog sample checks the same drop hash as the decals;
+  over a live splash, a small hole in the fog that fades with the splash's own lifetime. The sim's per-cell rain
+  thinning stays.
+- Explain the exact change before making it.
+
+**Accept:**
+
+- In rain, fog dents appear at the decals' splash spots, at the same moments (Victor's check).
+- Draw time measured in rain, before and after.
+
 ### 5. Ambient drift from a texture (sim optimisation 6)
 
 **Problem:** `FogInputsCS`' `AmbientDrift` evaluates about 64 hash-noise lookups per cell per level per frame.
