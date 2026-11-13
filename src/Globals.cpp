@@ -25,6 +25,7 @@
 #include "Features/LODBlending.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
+#include "Features/PBRWater.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/PostProcessing.h"
 #include "Features/ProceduralSun.h"
@@ -94,6 +95,7 @@ namespace globals
 		TerrainHelper terrainHelper{};
 		TerrainShadows terrainShadows{};
 		UnifiedWater unifiedWater{};
+		PBRWater pbrWater{};
 		VolumetricLighting volumetricLighting{};
 		WaterEffects waterEffects{};
 		PerformanceOverlay performanceOverlay{};

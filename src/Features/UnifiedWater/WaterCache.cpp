@@ -2,6 +2,7 @@
 
 #include <BS_thread_pool.hpp>
 #include <cmath>
+#include <limits>
 
 #include "Utils/WinApi.h"
 
@@ -92,6 +93,43 @@ WaterCache::InstructionResult WaterCache::GetInstructions(const RE::TESWorldSpac
 	result.cache = currentCache;
 	result.instructions = currentCache->GetInstructions(lodLevel, x, y);
 	return result;
+}
+
+bool WaterCache::GetCoverage(const RE::TESWorldSpace* worldSpace, Coverage& out)
+{
+	std::scoped_lock lock(currentCacheMutex);
+
+	if (!worldSpace || !SetCurrentWorldSpaceLocked(worldSpace) || !currentCache || currentCache->instructions.empty())
+		return false;
+
+	const auto& bounds = currentCache->header.bounds;
+	if (bounds.maxX < bounds.minX || bounds.maxY < bounds.minY)
+		return false;
+
+	out.minX = bounds.minX;
+	out.minY = bounds.minY;
+	out.width = static_cast<uint32_t>(bounds.maxX - bounds.minX + 1);
+	out.height = static_cast<uint32_t>(bounds.maxY - bounds.minY + 1);
+	out.water.assign(static_cast<size_t>(out.width) * out.height, 0);
+	out.level.assign(static_cast<size_t>(out.width) * out.height, std::numeric_limits<float>::quiet_NaN());
+
+	// LOD4 (index 0) holds one instruction per water cell; larger sizes are handled for robustness.
+	for (const auto& chunk : currentCache->instructions[0]) {
+		for (const auto& instruction : chunk) {
+			const int32_t size = static_cast<int32_t>(std::max(instruction.size, 1u));
+			for (int32_t dy = 0; dy < size; ++dy) {
+				for (int32_t dx = 0; dx < size; ++dx) {
+					const int32_t x = instruction.x + dx - out.minX;
+					const int32_t y = instruction.y + dy - out.minY;
+					if (x >= 0 && y >= 0 && x < static_cast<int32_t>(out.width) && y < static_cast<int32_t>(out.height)) {
+						out.water[static_cast<size_t>(y) * out.width + x] = 1;
+						out.level[static_cast<size_t>(y) * out.width + x] = instruction.waterHeight;
+					}
+				}
+			}
+		}
+	}
+	return true;
 }
 
 std::vector<WaterCache::Instruction>* WaterCache::RuntimeCache::GetInstructions(const int32_t lodLevel, const int32_t x, const int32_t y)

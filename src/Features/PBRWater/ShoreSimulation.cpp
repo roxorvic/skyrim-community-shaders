@@ -1,0 +1,246 @@
+#include "ShoreSimulation.h"
+#include "Profiling.h"
+
+#include "Utils/D3D.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace
+{
+	std::unique_ptr<Texture2D> CreateStateTexture(DXGI_FORMAT format, const char* name, uint32_t size = ShoreSimulation::GridSize)
+	{
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = size;
+		desc.Height = size;
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = format;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+		srvDesc.Format = format;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = format;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+
+		auto texture = std::make_unique<Texture2D>(desc, name);
+		texture->CreateSRV(srvDesc);
+		texture->CreateUAV(uavDesc);
+		return texture;
+	}
+}
+
+void ShoreSimulation::SetupResources()
+{
+	wet[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet0");
+	wet[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::SwashWet1");
+	foam[0] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam0", FoamGridSize);
+	foam[1] = CreateStateTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, "PBRWater::ShoreFoam1", FoamGridSize);
+	stage = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashStage", FoamGridSize);
+	prep = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::SwashPrep", FoamGridSize);
+	swe[0] = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Swash0", FoamGridSize);
+	swe[1] = CreateStateTexture(DXGI_FORMAT_R32G32B32A32_FLOAT, "PBRWater::Swash1", FoamGridSize);
+	simCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<SimCB>(), "PBRWater::SwashCB");
+	ClearShaderCache();
+	Reset();
+}
+
+void ShoreSimulation::ClearShaderCache()
+{
+	simCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\ShoreSimCS.hlsl", {}, "cs_5_0")));
+	ready = simCS && wet[0] && wet[1] && simCB;
+	if (!simCS)
+		logger::warn("[PBR Water] Swash shader failed to compile; the swash leaves no wet sand behind");
+	foamCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\ShoreFoamCS.hlsl", {}, "cs_5_0")));
+	stepCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashStepCS.hlsl", {}, "cs_5_0")));
+	outCS.attach(reinterpret_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\PBRWater\\SwashOutCS.hlsl", {}, "cs_5_0")));
+	foamReady = foamCS && stepCS && outCS && foam[0] && foam[1] && stage && prep && swe[0] && swe[1] && simCB;
+	if (!foamReady)
+		logger::warn("[PBR Water] Shore foam or swash shaders failed to compile; the surf leaves no foam behind and the swash is analytic");
+}
+
+void ShoreSimulation::Reset()
+{
+	hasOrigin = false;
+	auto context = globals::d3d::context;
+	const float dry[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	for (uint32_t i = 0; i < 2; ++i) {
+		if (wet[i])
+			context->ClearUnorderedAccessViewFloat(wet[i]->uav.get(), dry);
+		if (foam[i])
+			context->ClearUnorderedAccessViewFloat(foam[i]->uav.get(), dry);
+		if (swe[i])
+			context->ClearUnorderedAccessViewFloat(swe[i]->uav.get(), dry);
+	}
+	foamHasOrigin = false;
+}
+
+void ShoreSimulation::Update(float cameraX, float cameraY, float dt, const Settings& settings)
+{
+	if (!ready)
+		return;
+	auto context = globals::d3d::context;
+
+	const float newTexelSize = std::max(settings.extent, 1024.0f) / GridSize;
+	if (newTexelSize != texelSize) {
+		texelSize = newTexelSize;
+		hasOrigin = false;
+	}
+
+	// Whole texels, so scrolling never resamples (and never smears) the state.
+	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / texelSize)) - GridSize / 2;
+	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / texelSize)) - GridSize / 2;
+	if (!hasOrigin || std::abs(newOriginX - originTexelX) >= GridSize || std::abs(newOriginY - originTexelY) >= GridSize) {
+		Reset();
+		originTexelX = newOriginX;
+		originTexelY = newOriginY;
+		hasOrigin = true;
+	}
+
+	SimCB cb{};
+	cb.shiftX = static_cast<int32_t>(newOriginX - originTexelX);
+	cb.shiftY = static_cast<int32_t>(newOriginY - originTexelY);
+	cb.gridSize = GridSize;
+	// A long hitch must not dry the sand in one step.
+	cb.dt = std::clamp(dt, 0.0f, 0.1f);
+	cb.originX = static_cast<float>(newOriginX) * texelSize;
+	cb.originY = static_cast<float>(newOriginY) * texelSize;
+	cb.texelSize = texelSize;
+	cb.dryRate = std::max(settings.dryRate, 0.0f);
+	simCB->Update(cb);
+
+	PBRWaterProfiling::Scope pass("PBRWater::ShoreWetness");
+	const uint32_t next = current ^ 1;
+	ID3D11ShaderResourceView* srv = wet[current]->srv.get();
+	ID3D11UnorderedAccessView* uav = wet[next]->uav.get();
+	ID3D11Buffer* cbs[1] = { simCB->CB() };
+	context->CSSetShader(simCS.get(), nullptr, 0);
+	context->CSSetShaderResources(0, 1, &srv);
+	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+	context->CSSetConstantBuffers(0, 1, cbs);
+	context->Dispatch(GridSize / 8, GridSize / 8, 1);
+
+	ID3D11ShaderResourceView* nullSrv = nullptr;
+	ID3D11UnorderedAccessView* nullUav = nullptr;
+	ID3D11Buffer* nullCb = nullptr;
+	context->CSSetShaderResources(0, 1, &nullSrv);
+	context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+	context->CSSetConstantBuffers(0, 1, &nullCb);
+	context->CSSetShader(nullptr, nullptr, 0);
+
+	current = next;
+	originTexelX = newOriginX;
+	originTexelY = newOriginY;
+}
+
+void ShoreSimulation::UpdateFoam(float cameraX, float cameraY, float dt)
+{
+	if (!foamReady)
+		return;
+	auto context = globals::d3d::context;
+
+	// Whole texels, so scrolling never resamples (and never smears) the foam and the swash.
+	const int64_t newOriginX = static_cast<int64_t>(std::floor(cameraX / FoamTexelSize)) - FoamGridSize / 2;
+	const int64_t newOriginY = static_cast<int64_t>(std::floor(cameraY / FoamTexelSize)) - FoamGridSize / 2;
+	bool fresh = false;
+	if (!foamHasOrigin || std::abs(newOriginX - foamOriginX) >= FoamGridSize || std::abs(newOriginY - foamOriginY) >= FoamGridSize) {
+		const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		for (auto& texture : foam)
+			context->ClearUnorderedAccessViewFloat(texture->uav.get(), clear);
+		// The swash scrolls in with the water at rest (the first step shifts it out of the grid), but the foam pass reads the
+		// last state at its own coordinates: cleared, so the old place's sheet and velocities are not carried to the new one.
+		for (auto& texture : swe)
+			context->ClearUnorderedAccessViewFloat(texture->uav.get(), clear);
+		foamOriginX = newOriginX;
+		foamOriginY = newOriginY;
+		foamHasOrigin = true;
+		fresh = true;
+	}
+
+	SimCB cb{};
+	cb.shiftX = static_cast<int32_t>(newOriginX - foamOriginX);
+	cb.shiftY = static_cast<int32_t>(newOriginY - foamOriginY);
+	cb.gridSize = FoamGridSize;
+	// A long hitch must not carry the foam off in one step.
+	cb.dt = std::clamp(dt, 0.0f, 0.1f);
+	cb.originX = static_cast<float>(newOriginX) * FoamTexelSize;
+	cb.originY = static_cast<float>(newOriginY) * FoamTexelSize;
+	cb.texelSize = FoamTexelSize;
+	simCB->Update(cb);
+
+	ID3D11Buffer* cbs[1] = { simCB->CB() };
+	context->CSSetConstantBuffers(0, 1, cbs);
+	const UINT groups = FoamGridSize / 8;
+	ID3D11ShaderResourceView* nullSrvs[3] = {};
+	ID3D11UnorderedAccessView* nullUavs[2] = {};
+
+	// The surf's foam, and what the waves bring the swash this frame.
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::ShoreFoam");
+		ID3D11ShaderResourceView* srvs[2] = { foam[foamCurrent]->srv.get(), swe[sweCurrent]->srv.get() };
+		ID3D11UnorderedAccessView* uavs[2] = { stage->uav.get(), prep->uav.get() };
+		context->CSSetShader(foamCS.get(), nullptr, 0);
+		context->CSSetShaderResources(0, 2, srvs);
+		context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+		context->Dispatch(groups, groups, 1);
+		context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+	}
+
+	// The swash: explicit steps within the shallow water's stability limit (CFL: uprushes of up to 9 m/s over water 2 m
+	// deep, 9 + 4.4 m/s, across 17 cm cells, with the four faces' fluxes adding up, takes 3.5 ms at a Courant number of 0.25
+	// per axis). The first step of the frame takes the grid's scroll; a fresh grid starts with the water at rest.
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::SwashStep");
+		constexpr float maxStep = 0.0035f;  // s
+		const float stepDt = std::clamp(dt, 0.0f, 10.0f * maxStep);
+		const uint32_t steps = std::max(1u, static_cast<uint32_t>(std::ceil(stepDt / maxStep)));
+		context->CSSetShader(stepCS.get(), nullptr, 0);
+		for (uint32_t i = 0; i < steps; ++i) {
+			SimCB stepCb = cb;
+			stepCb.dt = stepDt / static_cast<float>(steps);
+			if (i > 0)
+				stepCb.shiftX = stepCb.shiftY = 0;
+			else if (fresh)
+				stepCb.shiftX = static_cast<int32_t>(FoamGridSize) * 4;
+			simCB->Update(stepCb);
+			const uint32_t next = sweCurrent ^ 1;
+			ID3D11ShaderResourceView* srvs[3] = { swe[sweCurrent]->srv.get(), prep->srv.get(), stage->srv.get() };
+			ID3D11UnorderedAccessView* uav = swe[next]->uav.get();
+			context->CSSetShaderResources(0, 3, srvs);
+			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+			context->Dispatch(groups, groups, 1);
+			context->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+			context->CSSetShaderResources(0, 3, nullSrvs);
+			sweCurrent = next;
+		}
+		lastSwashSteps = steps;
+	}
+
+	// Packed for the draws.
+	{
+		PBRWaterProfiling::Scope pass("PBRWater::SwashOut");
+		const uint32_t next = foamCurrent ^ 1;
+		ID3D11ShaderResourceView* srvs[3] = { stage->srv.get(), swe[sweCurrent]->srv.get(), prep->srv.get() };
+		ID3D11UnorderedAccessView* uav = foam[next]->uav.get();
+		context->CSSetShader(outCS.get(), nullptr, 0);
+		context->CSSetShaderResources(0, 3, srvs);
+		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		context->Dispatch(groups, groups, 1);
+		foamCurrent = next;
+	}
+
+	ID3D11Buffer* nullCb = nullptr;
+	context->CSSetShaderResources(0, 3, nullSrvs);
+	context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+	context->CSSetConstantBuffers(0, 1, &nullCb);
+	context->CSSetShader(nullptr, nullptr, 0);
+
+	foamOriginX = newOriginX;
+	foamOriginY = newOriginY;
+}

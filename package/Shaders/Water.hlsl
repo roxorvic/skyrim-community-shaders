@@ -101,9 +101,11 @@ PS_OUTPUT main(PS_INPUT input)
 #		undef VERTEX_ALPHA_DEPTH
 #		undef WATER_EFFECTS
 #		undef WETNESS_EFFECTS
+// Falls keep their own shading: no PBR Water (its tessellation, outputs and shading) in this technique
+#		undef PBR_WATER
 #	endif
 
-#	if defined(VSHADER)
+#	if defined(VSHADER) || defined(HSHADER) || defined(DSHADER)
 struct VS_INPUT
 {
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(STENCIL) || defined(SIMPLE)
@@ -182,9 +184,37 @@ struct VS_OUTPUT
 	float3 FallPrevious: TEXCOORD17;     // its place a frame ago (camera-relative, the previous camera's): the motion vectors
 	float FallClip: SV_ClipDistance0;
 #	endif
+#	if defined(PBR_WATER) && !defined(STENCIL)
+	float4 WaveParam: TEXCOORD9;      // xyz undisplaced camera-relative position, w wave damping (flow)
+	float2 SurfaceNoise: TEXCOORD10;  // x sediment patches (TurbidityPatches), y wind gust factor (WindGust)
+	float3 Barycentric: TEXCOORD11;
+	float2 FlowVelocity: TEXCOORD13;  // the river current (units/s, PBRWater::FlowVelocity), 0 on still water
+#	endif
+#	if defined(PBR_WATER)
+	float4 ShoreState: TEXCOORD12;  // x swash tip, y swash mark (units above the still water), z waves without the swash (units above the still water), w still water level (camera-relative z; DisplaceSurface)
+#	endif
 };
 
-#	ifdef VSHADER
+#	if defined(PBR_WATER)
+#		include "PBRWater/PBRWater.hlsli"
+// Draws that may be tessellated. LOD water is never tessellated (it is far away and flat).
+#		if defined(SPECULAR) || defined(UNDERWATER) || defined(SIMPLE) || defined(STENCIL)
+#			define PBRW_TESSELLATION
+#		endif
+#		if defined(STENCIL)
+#			define PBRW_RAW_COLOR WorldPosition
+#		else
+#			define PBRW_RAW_COLOR WPosition
+#		endif
+#		define PBR_WATER_SPACING PBRWater::Draw0.x
+// Tessellated and stencil/colour passes must rasterise identical depth: forbid reassociation.
+#		define PBRW_PRECISE precise
+#	else
+#		define PBR_WATER_SPACING 0.0
+#		define PBRW_PRECISE
+#	endif
+
+#	if defined(VSHADER) || defined(HSHADER) || defined(DSHADER)
 
 cbuffer PerTechnique : register(b0)
 {
@@ -275,15 +305,79 @@ VS_OUTPUT main(uint vertexID : SV_VertexID)
 	return vsout;
 }
 #		else
-VS_OUTPUT main(VS_INPUT input)
+#			if defined(PBR_WATER)
+SamplerState FlowMapSamplerVS : register(s8);
+Texture2D<float4> FlowMapTexVS : register(t8);
+
+/// Inverse of the linear (rotation/scale) part of a world matrix: maps world offsets to model space.
+float3x3 InverseLinear(float4x4 m)
+{
+	float3x3 a = (float3x3)m;
+	float3 c0 = cross(a[1], a[2]);
+	float3 c1 = cross(a[2], a[0]);
+	float3 c2 = cross(a[0], a[1]);
+	float det = dot(a[0], c0);
+	return transpose(float3x3(c0, c1, c2)) / det;
+}
+
+/**
+ * River current flattens the open-water waves. The worldspace flowmap is looked up by world position,
+ * not by mesh UVs: the stencil pass (depth and motion vectors) is compiled without FLOWMAP and must
+ * displace the surface exactly like the colour pass, and neighbouring meshes must agree on shared edges.
+ * The same sample gives the current the waves are carried along (PBRWater::FlowPhases).
+ */
+float GetWaveFlowDamping(float3 positionWS, out float2 velocity)
+{
+	velocity = 0.0;
+	if (PBRWater::Flow0.x == 0.0)
+		return 1.0;
+	float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
+	float4 flow = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
+	velocity = PBRWater::FlowVelocity(flow);
+	return 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
+}
+#			endif
+
+/**
+ * The complete water vertex program. Runs in the vertex shader for regular draws and in the
+ * domain shader for every tessellated vertex, so both paths produce bit-identical attributes.
+ * @param spacing local vertex spacing in world units (for wave Nyquist filtering)
+ */
+VS_OUTPUT WaterVertex(VS_INPUT input, float spacing)
 {
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
 
 	vsout.NormalsScale = NormalsScale;
 
-	float4 inputPosition = float4(input.Position.xyz, 1.0);
-	float4 worldPos = mul(World, inputPosition);
-	float4 worldViewPos = mul(WorldViewProj, inputPosition);
+	PBRW_PRECISE float4 inputPosition = float4(input.Position.xyz, 1.0);
+	PBRW_PRECISE float4 previousInputPosition = inputPosition;
+	PBRW_PRECISE float4 scrollWorldPos = mul(World, inputPosition);
+
+#			if defined(PBR_WATER)
+	{
+		float2 flowVelocity;
+		float flowDamping = GetWaveFlowDamping(scrollWorldPos.xyz, flowVelocity);
+#				if defined(STENCIL)
+		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, flowVelocity, spacing, true);
+#				else
+		PBRWater::SurfaceDisplacement surface = PBRWater::DisplaceSurface(scrollWorldPos.xyz, flowDamping, flowVelocity, spacing, false);
+#				endif
+		float3x3 worldToModel = InverseLinear(World);
+		previousInputPosition.xyz += mul(worldToModel, surface.previous);
+		inputPosition.xyz += mul(worldToModel, surface.current);
+		vsout.ShoreState = surface.shore;
+#				if !defined(STENCIL)
+		vsout.WaveParam = float4(scrollWorldPos.xyz, flowDamping);
+		vsout.FlowVelocity = flowVelocity;
+		float2 absXY = scrollWorldPos.xy + FrameBuffer::CameraPosAdjust.xy;
+		vsout.SurfaceNoise = PBRWater::SurfaceNoise(absXY);
+		vsout.Barycentric = 1.0 / 3.0;
+#				endif
+	}
+#			endif
+
+	PBRW_PRECISE float4 worldPos = mul(World, inputPosition);
+	PBRW_PRECISE float4 worldViewPos = mul(WorldViewProj, inputPosition);
 
 	float heightMult = min((1.0 / 10000.0) * max(worldViewPos.z - 70000, 0), 1);
 
@@ -297,7 +391,7 @@ VS_OUTPUT main(VS_INPUT input)
 
 #			if defined(STENCIL)
 	vsout.WorldPosition = worldPos;
-	vsout.PreviousWorldPosition = mul(PreviousWorld, inputPosition);
+	vsout.PreviousWorldPosition = mul(PreviousWorld, previousInputPosition);
 #			else
 
 #				if !defined(UNIFIED_WATER)
@@ -311,7 +405,7 @@ VS_OUTPUT main(VS_INPUT input)
 
 #				if defined(LOD)
 	float4 posAdjust =
-		ObjectUV.x ? 0.0 : (QPosAdjust.xyxy + worldPos.xyxy) / NormalsScale.xxyy;
+		ObjectUV.x ? 0.0 : (QPosAdjust.xyxy + scrollWorldPos.xyxy) / NormalsScale.xxyy;
 
 	vsout.TexCoord1.xyzw = NormalsScroll0 + posAdjust;
 #				else
@@ -319,7 +413,7 @@ VS_OUTPUT main(VS_INPUT input)
 	vsout.MPosition.xyzw = inputPosition.xyzw;
 #					endif
 
-	float2 posAdjust = worldPos.xy + QPosAdjust.xy;
+	float2 posAdjust = scrollWorldPos.xy + QPosAdjust.xy;
 
 	float2 scrollAdjust1 = posAdjust / NormalsScale.xx;
 	float2 scrollAdjust2 = posAdjust / NormalsScale.yy;
@@ -413,6 +507,90 @@ VS_OUTPUT main(VS_INPUT input)
 }
 #		endif  // FLUID_FIELD_FALLS
 
+#	endif  // VSHADER || HSHADER || DSHADER
+
+#	if defined(PBR_WATER) && defined(PBRW_TESSELLATION) && (defined(VSHADER) || defined(HSHADER) || defined(DSHADER))
+// ============================================================================
+// Tessellation (VS -> HS -> tessellator -> DS -> [GS] -> PS)
+//
+// While a draw is tessellated the vertex shader only forwards the raw vertex. The domain shader
+// re-runs WaterVertex() on each generated vertex, so every permutation (including STENCIL, which
+// writes the water mask and motion vectors) gets exactly the attributes a regular draw would.
+// The hull/domain/geometry shaders are compiled per descriptor alongside the vertex shader, which
+// keeps the stage signatures matched for every permutation.
+// ============================================================================
+
+/// Forwards the vertex inputs through VS_OUTPUT fields that exist in every tessellated permutation.
+VS_OUTPUT PackControlPoint(VS_INPUT input)
+{
+	VS_OUTPUT o = (VS_OUTPUT)0;
+	o.HPosition = float4(input.Position.xyz, 1.0);
+#		if defined(NORMAL_TEXCOORD)
+	o.NormalsScale.xy = input.TexCoord0.xy;
+#		endif
+#		if defined(VC)
+	o.PBRW_RAW_COLOR = input.Color;
+#		endif
+	return o;
+}
+
+VS_INPUT UnpackControlPoint(VS_OUTPUT cp)
+{
+	VS_INPUT v = (VS_INPUT)0;
+	v.Position = float4(cp.HPosition.xyz, 1.0);
+#		if defined(NORMAL_TEXCOORD)
+	v.TexCoord0 = cp.NormalsScale.xy;
+#		endif
+#		if defined(VC)
+	v.Color = cp.PBRW_RAW_COLOR;
+#		endif
+	return v;
+}
+
+struct HS_CONSTANT_OUTPUT
+{
+	float Edge[3] : SV_TessFactor;
+	float Inside: SV_InsideTessFactor;
+};
+#	endif
+
+#	if defined(VSHADER) && !defined(FLUID_FIELD_FALLS)
+VS_OUTPUT main(VS_INPUT input)
+{
+#		if defined(PBR_WATER) && defined(PBRW_TESSELLATION)
+	if (PBRWater::Tess0.x > 0.5)
+		return PackControlPoint(input);
+#		endif
+	return WaterVertex(input, PBR_WATER_SPACING);
+}
+#	endif
+
+#	if defined(PBR_WATER) && defined(PBRW_TESSELLATION) && (defined(HSHADER) || defined(DSHADER))
+#		include "PBRWater/Tessellation.hlsli"
+#	endif
+
+#	if defined(DSHADER) && defined(PBRW_TESSELLATION)
+[domain("tri")] VS_OUTPUT main(HS_CONSTANT_OUTPUT patchConstants, float3 barycentric : SV_DomainLocation, const OutputPatch<VS_OUTPUT, 3> patch) {
+	VS_INPUT corners[3] = { UnpackControlPoint(patch[0]), UnpackControlPoint(patch[1]), UnpackControlPoint(patch[2]) };
+	VS_INPUT v = PBRWater::InterpolateVertex(corners, barycentric);
+	return WaterVertex(v, PBRWater::TessellatedSpacing(mul(World, float4(v.Position.xyz, 1.0)).xyz));
+}
+#	endif
+
+#	if defined(GSHADER)
+	// Only bound for the wireframe debug view: tags each triangle corner with its barycentric.
+	[maxvertexcount(3)] void main(triangle VS_OUTPUT input[3], inout TriangleStream<VS_OUTPUT> stream)
+{
+	[unroll] for (uint i = 0; i < 3; i++)
+	{
+		VS_OUTPUT v = input[i];
+#		if defined(PBR_WATER) && !defined(STENCIL)
+		v.Barycentric = float3(i == 0, i == 1, i == 2);
+#		endif
+		stream.Append(v);
+	}
+	stream.RestartStrip();
+}
 #	endif
 
 typedef VS_OUTPUT PS_INPUT;
@@ -542,6 +720,10 @@ float4 GetWaterPlane()
 #		endif
 
 #		include "Common/ShadowSampling.hlsli"
+
+#		if defined(PBR_WATER)
+#			include "PBRWater/Shading.hlsli"
+#		endif
 
 #		if defined(SIMPLE) || defined(UNDERWATER) || defined(LOD) || defined(SPECULAR)
 float GetWaterFogFade()
@@ -785,12 +967,38 @@ struct WaterNormalData
 {
 	float3 normal;
 	float4 rippleInfo;  // xyz = scaled ripple normal (normalized normal * intensity), w = splash effect intensity
+#			if defined(PBR_WATER)
+	float detailVariance;  // slope variance the mip filter averaged out of the normal maps (Toksvig), at their blended amplitude
+#			endif
 };
+
+#			if defined(PBR_WATER)
+/**
+ * Toksvig (2005): a mip-filtered normal map texel averages normals that point different ways, so the decoded
+ * normal comes out shorter than 1. Its shortening gives the slope variance the filter removed,
+ * (1 - |n|) / |n|, which the roughness takes over so distant detail turns into gloss instead of aliasing.
+ * A magnified map shortens its normals too, between texels, where nothing was filtered away: that share is
+ * dropped (PBRWater::MinifiedShare).
+ * @param n   decoded tangent-space normal before normalisation
+ * @param map the normal map it was sampled from, at `uv` with the material mip bias
+ */
+float ToksvigVariance(float3 n, Texture2D<float4> map, float2 uv)
+{
+	float width, height;
+	map.GetDimensions(width, height);
+	float2 texels = float2(width, height) * exp2(SharedData::MipBias);
+	float len = length(n);
+	return max(0.0, (1.0 - len) / max(len, 1e-3)) * PBRWater::MinifiedShare(ddx_fine(uv) * texels, ddy_fine(uv) * texels);
+}
+#			endif
 
 WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float depth, float wetnessOcclusion)
 {
 	WaterNormalData result;
 	result.rippleInfo = float4(0, 0, 0, 0);
+#			if defined(PBR_WATER)
+	result.detailVariance = 0.0;
+#			endif
 
 	float3 normalScalesRcp = rcp(input.NormalsScale.xyz);
 
@@ -881,9 +1089,13 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	baseNormalParallax = flowmapParallaxOffset.xy * normalScalesRcp.x;
 #				endif
 	float3 normals1 = FLUID_LAYER(Normals01Tex, Normals01Sampler, input.TexCoord1.xy, baseNormalParallax, x).xyz * 2.0 + float3(-1, -1, -2);
+	float2 baseNormalUv = input.TexCoord1.xy + baseNormalParallax;
 #			endif  // End of FLOWMAP block
 
 #			if !defined(FLOWMAP)
+#				if defined(PBR_WATER)
+	float2 baseNormalUv = input.TexCoord1.xy;
+#				endif
 #				if defined(WATER_PARALLAX)
 	float3 normals1 = FLUID_LAYER(Normals01Tex, Normals01Sampler, input.TexCoord1.xy, parallaxOffset.xy * normalScalesRcp.x, x).xyz * 2.0 + float3(-1, -1, -2);
 #				else
@@ -894,6 +1106,9 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				ifdef DISABLE_FLOWMAP_NORMALS
 	// FLOWMAP NORMALS DISABLED: Using only base normals (flow system still active for ripples/splashes)
 	float3 finalNormal = normalize(normals1 + float3(0, 0, 1));
+#					if defined(PBR_WATER)
+	result.detailVariance = ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv);
+#					endif
 #				else
 	// FLOWMAP NORMALS ENABLED: Blending flow-based normals with base normals
 #					if defined(FLUID_FIELD)
@@ -905,6 +1120,9 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #						endif
 #					else
 	float3 finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), flowmapNormal, distanceFactor));
+#					endif
+#					if defined(PBR_WATER)
+	result.detailVariance = ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv) * (1.0 - distanceFactor) * (1.0 - distanceFactor);
 #					endif
 #				endif
 #			elif !defined(LOD)
@@ -924,6 +1142,19 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #				else
 	float3 finalNormal = normalize(lerp(float3(0, 0, 1), blendedNormal, normalsDepthFactor));
 #				endif
+#				if defined(PBR_WATER)
+	{
+		// The maps' slopes enter the blend with their amplitudes over its z of about 1 + a.y + a.z (normals1 is
+		// stored offset by -1 in z); the depth fade scales the slopes once more.
+		float3 a = normalsAmplitude.xyz;
+		float blendZ = 1.0 + a.y + a.z;
+		float variance = (a.x * a.x * ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv) + a.y * a.y * ToksvigVariance(normals2, Normals02Tex, input.TexCoord1.zw) + a.z * a.z * ToksvigVariance(normals3, Normals03Tex, input.TexCoord2.xy)) / (blendZ * blendZ);
+#					if !defined(UNDERWATER)
+		variance *= normalsDepthFactor * normalsDepthFactor;
+#					endif
+		result.detailVariance = variance;
+	}
+#				endif
 
 #				if defined(FLOWMAP)
 	float normalBlendFactor =
@@ -938,13 +1169,22 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #						endif
 #					endif
 	finalNormal = normalize(lerp(normals1 + float3(0, 0, 1), normalize(lerp(finalNormal, flowmapNormal, normalBlendFactor)), distanceFactor));
+#					if defined(PBR_WATER)
+	result.detailVariance = lerp(ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv), result.detailVariance * (1.0 - normalBlendFactor) * (1.0 - normalBlendFactor), distanceFactor);
+#					endif
 #				endif
 #			else
 	float3 finalNormal =
 		normalize(float3(0, 0, 1) + normalsAmplitude.xxx * normals1);
+#				if defined(PBR_WATER)
+	result.detailVariance = normalsAmplitude.x * normalsAmplitude.x * ToksvigVariance(normals1 + float3(0, 0, 1), Normals01Tex, baseNormalUv);
+#				endif
 #			endif
 
-#			if defined(WADING_RT) || defined(WADING)
+	// PBR water has no vanilla wading displacement (TESWaterSystem_InitializeWater: noDisplacement), its ripple simulation
+	// stirs the real surface instead. The engine still flags the water as waded while the player is in it: reading the
+	// never-written DisplacementTex then tipped every pixel's normal over and the whole surface turned into a mirror.
+#			if (defined(WADING_RT) || defined(WADING)) && !defined(PBR_WATER)
 #				if defined(WADING_RT)
 	const bool isWading = Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Wading;
 #				else
@@ -1030,7 +1270,7 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	return result;
 }
 
-float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular)
+float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection, float distanceFactor, float skylightingSpecular, float roughness = 0.0)
 {
 #			if !defined(DYNAMIC_CUBEMAPS)
 	if (!(Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections))
@@ -1040,33 +1280,48 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #			if defined(FLUID_FIELD_FALLS)
 	float3 R = reflect(viewDirection, WaterParams.y * normal + FallUp * (1 - WaterParams.y));
 	// D174: falling water is rough: a blurred sky
-	const float reflectionMip = FallShading::REFLECTION_BLUR_MIPS;
+	const float pbrCubeLevel = FallShading::REFLECTION_BLUR_MIPS;
+	const float pbrEnvironmentLevel = FallShading::REFLECTION_BLUR_MIPS;
 #			else
 	float3 R = reflect(viewDirection, WaterParams.y * normal + float3(0, 0, 1 - WaterParams.y));
-	const float reflectionMip = 0.0;
+#				if defined(PBR_WATER)
+	// Glossy reflections: rough water (wind, rain, or wave detail filtered out at a distance) reflects a
+	// blurred environment, through the reflection cubemap's mips when it has them.
+	uint pbrCubeWidth, pbrCubeHeight, pbrCubeLevels;
+	CubeMapTex.GetDimensions(0, pbrCubeWidth, pbrCubeHeight, pbrCubeLevels);
+	float pbrCubeLevel = roughness * (float)(pbrCubeLevels - 1);
+	float pbrEnvironmentLevel = roughness * 8.0;
+#				else
+	float pbrCubeLevel = 0;
+	float pbrEnvironmentLevel = 0;
+#				endif
 #			endif
 
 #			if defined(DYNAMIC_CUBEMAPS)
 	if (SharedData::InInterior)
-		return DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, reflectionMip).xyz;
+		return DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
 
 	float3 workingSpecularIrradiance = 0.0;
 	if (skylightingSpecular < 1.0)
-		workingSpecularIrradiance = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, reflectionMip).xyz;
+		workingSpecularIrradiance = DynamicCubemaps::EnvTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
 
 	float3 workingSpecularIrradianceReflections = 0.0;
 	if (skylightingSpecular > 0.0)
-		workingSpecularIrradianceReflections = DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, reflectionMip).xyz;
+		workingSpecularIrradianceReflections = DynamicCubemaps::EnvReflectionsTexture.SampleLevel(CubeMapSampler, R, pbrEnvironmentLevel).xyz;
 
 	float3 dynamicCubemap = ColorManagement::SceneColor::LerpInLinear(workingSpecularIrradiance, workingSpecularIrradianceReflections, skylightingSpecular);
 
 	float3 reflectionColor = dynamicCubemap;
+#				if !defined(PBR_WATER)
+	// PBR water keeps one environment at every distance: switching to the vanilla reflection cubemap (much darker)
+	// past 1024 units made the whole water change brightness as the camera rose above it.
 	if ((Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Reflections) && !SharedData::HideSky) {
 		float reflectionAmount = saturate(length(input.WPosition.xyz) / 1024.0);
-		reflectionColor = lerp(dynamicCubemap, CubeMapTex.SampleLevel(CubeMapSampler, R, reflectionMip).xyz, reflectionAmount);
+		reflectionColor = lerp(dynamicCubemap, CubeMapTex.SampleLevel(CubeMapSampler, R, pbrCubeLevel).xyz, reflectionAmount);
 	}
+#				endif
 #			else
-	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, reflectionMip).xyz;
+	float3 reflectionColor = CubeMapTex.SampleLevel(CubeMapSampler, R, pbrCubeLevel).xyz;
 #			endif
 
 #			if defined(FLUID_FIELD_FALLS)
@@ -1091,12 +1346,23 @@ float3 GetWaterSpecularColor(PS_INPUT input, float3 normal, float3 viewDirection
 #			elif !defined(LOD) && NUM_SPECULAR_LIGHTS == 0
 	float pointingDirection = dot(viewDirection, R) * 0.5 + 0.5;
 	float pointingAlignment = dot(reflect(viewDirection, float3(0, 0, 1)), R) * 0.5 + 0.5;
+#				if defined(PBR_WATER)
+	// The reflection normal is a blend, not unit length, so the dots can dip just below -1 and the
+	// sqrt would return NaN.
+	float ssrAmount = sqrt(max(min(pointingAlignment, pointingDirection), 0.0));
+#				else
 	float ssrAmount = sqrt(min(pointingAlignment, pointingDirection));
+#				endif
 	float2 ssrReflectionUv = ((FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy) * SSRParams.zw) + 0.05 * normal.xy;
 	float2 ssrReflectionUvDR = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(ssrReflectionUv);
 	float4 ssrReflectionColorBlurred = SSRReflectionTex.Sample(SSRReflectionSampler, ssrReflectionUvDR);
 	float4 ssrReflectionColorRaw = RawSSRReflectionTex.Sample(RawSSRReflectionSampler, ssrReflectionUvDR);
+#				if defined(PBR_WATER)
+	// Rough water only shows the blurred screen-space reflection.
+	float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7 * saturate(1.0 - roughness * 3.0));
+#				else
 	float4 ssrReflectionColor = lerp(ssrReflectionColorBlurred, ssrReflectionColorRaw, ssrAmount * 0.7);
+#				endif
 	float3 finalSsrReflectionColor = max(0, ssrReflectionColor.xyz);
 	float ssrFraction = saturate(ssrReflectionColor.w * distanceFactor * ssrAmount);
 	reflectionColor = lerp(reflectionColor, finalSsrReflectionColor, ssrFraction);
@@ -1164,7 +1430,12 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	const float4 refractionClip = mul(FrameBuffer::CameraViewProj, float4(input.MPosition.xyz + VarAmounts.w * refractionsDepthFactor * FallShading::FLOW_REFRACTION * fallTilt, 1));
 	float2 refractionUvRaw = saturate(refractionClip.xy / max(refractionClip.w, 1e-4) * float2(0.5, -0.5) + 0.5);
 #				else
-	float4 refractionNormal = mul(transpose(TextureProj), float4((VarAmounts.w * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
+#					if defined(PBR_WATER)
+	float refractionMagnitude = VarAmounts.w * PBRWater::Light1.z;
+#					else
+	float refractionMagnitude = VarAmounts.w;
+#					endif
+	float4 refractionNormal = mul(transpose(TextureProj), float4((refractionMagnitude * refractionsDepthFactor * normal.xy) + input.MPosition.xy, input.MPosition.z, 1));
 
 	float2 refractionUvRaw = float2(refractionNormal.x, refractionNormal.w - refractionNormal.y) / refractionNormal.ww;
 #				endif
@@ -1216,6 +1487,14 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 
 	float3 refractionDiffuseColor;
 
+#				if defined(PBR_WATER) && !defined(UNDERWATER)
+	// PBR Water: the body colour is the light an optically deep column scatters back, the water form's deep colour.
+	// Its shallow colour is the column's transmission tint (Beer-Lambert in the water column, Water.hlsl), not a colour
+	// of its own. Vanilla's blend by distanceMul left the body at the shallow colour wherever its refraction-plane test
+	// failed (water at the eye seen edge-on, anything just under the surface): an olive line along the horizon and
+	// olive shapes around everything in the water, the underwater fog's colour.
+	refractionDiffuseColor = DeepColor.xyz;
+#				else
 	if (SharedData::enbSettings.EnableWater) {
 		float3 shallowColor = ShallowColor.xyz;
 		float maxValue = max(shallowColor.x, max(shallowColor.y, shallowColor.z));
@@ -1230,6 +1509,7 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 	} else {
 		refractionDiffuseColor = lerp(ShallowColor.xyz, DeepColor.xyz, distanceMul.y);
 	}
+#				endif
 
 	DiffuseOutput output;
 	output.refractionColor = refractionColor;
@@ -1249,7 +1529,7 @@ DiffuseOutput GetWaterDiffuseColor(PS_INPUT input, float3 normal, float3 viewDir
 #			endif
 }
 
-float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition)
+float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition, float roughness = 0.0)
 {
 #			if defined(UNDERWATER)
 	return 0.0.xxx;
@@ -1257,12 +1537,17 @@ float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition)
 	if (Permutation::PixelShaderDescriptor & Permutation::WaterFlags::Interior)
 		return 0.0.xxx;
 
+#				if defined(PBR_WATER)
+	// Clamp what one pixel can reflect: a sub-pixel glint the AA kernel misses must not bloom across the screen.
+	float reflectionMul = min(PBRWater::SpecularGGX(normal, -viewDirection, SunDir.xyz, roughness, 1.0 / PBRWater::WaterIOR, PBRWater::SunAngularRadius), 12.0) * PBRWater::Light0.w;
+#				else
 	float3 reflectionDirection = reflect(viewDirection, normal);
-#				if defined(FLUID_FIELD)
+#					if defined(FLUID_FIELD)
 	// The glint spreads on rough simulated water and stays tight on calm water
 	float reflectionMul = FluidField::SunGlint(saturate(dot(reflectionDirection, SunDir.xyz)), VarAmounts.x);
-#				else
+#					else
 	float reflectionMul = VarAmounts.x > 0 ? exp2(VarAmounts.x * log2(saturate(dot(reflectionDirection, SunDir.xyz)))) : 1.0;
+#					endif
 #				endif
 
 	float3 sunColor = Color::DirectionalLight(ColorManagement::SRGBToWorking(SunColor.xyz)) * SunDir.w * (1.0 - exp(-DeepColor.w));
@@ -1287,6 +1572,18 @@ float3 GetSunColor(float3 normal, float3 viewDirection, float3 worldPosition)
 PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
+
+#		if defined(PBR_WATER)
+	// Dry: the bed rises above the waves and the swash, where DisplaceSurface held the mesh just above it. Both passes
+	// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
+#			if defined(STENCIL)
+	if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
+		discard;
+#			else
+	if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
+		discard;
+#			endif
+#		endif
 
 	float2 screenPosition = FrameBuffer::DynamicResolutionParams1.xy * (FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy);
 
@@ -1597,7 +1894,13 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float3 positionMSSkylight = input.WPosition.xyz;
 
-	sh2 skylightingSH = Skylighting::SampleNoBias(positionMSSkylight);
+#				if defined(PBR_WATER)
+	// The waves are in Skylighting's occlusion maps (PBR Water): read the sky just above this point of the surface,
+	// where a trough sees less of it past the crests around than a crest does.
+	positionMSSkylight.z += Skylighting::CELL_SIZE.z;
+#				endif
+	// The water surface itself is never lifted out of the water (Skylighting::SampleNoBias).
+	sh2 skylightingSH = Skylighting::SampleNoBias(positionMSSkylight, false);
 	float skylighting = SphericalHarmonics::Unproject(skylightingSH, waterUp);
 
 	float skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, waterUp, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
@@ -1640,7 +1943,26 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #			endif
 
+#			if defined(PBR_WATER)
+	PBRWater::SurfaceShading pbrSurface = PBRWater::ShadeSurface(input.WaveParam, input.FlowVelocity, input.ShoreState, input.SurfaceNoise.y, normal, waterData.detailVariance);
+	normal = pbrSurface.normal;
+	// A curling lip can turn its far side to the camera (seen from behind the wave, or where the lip passes through the
+	// water behind it). Shaded about a normal facing away, its reflection, sun and foam lighting turned odd along the crest:
+	// mirrored across the view direction, the normal keeps its lean along the surface and faces the side that is seen.
+	float pbrFacing = dot(normal, viewDirection);
+	if (pbrFacing > 0.0)
+		normal = normalize(normal - 2.0 * pbrFacing * viewDirection);
+	pbrSurface.normal = normal;  // the normals debug view shows what is shaded
+	float pbrRoughness = pbrSurface.roughness;
+#			else
+	float pbrRoughness = 0.0;
+#			endif
+
 #			if defined(SKYLIGHTING)
+#				if defined(PBR_WATER)
+	// The sky each wave facet sees: tilted towards a cliff or a hull it sees less of it.
+	skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, normal, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
+#				endif
 	sh2 specularLobe = SphericalHarmonics::FauxSpecularLobe(normal, -viewDirection, 0.0);
 	float skylightingSpecular = Skylighting::EvaluateSpecular(skylightingSH, specularLobe, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
 #			endif
@@ -1649,6 +1971,14 @@ PS_OUTPUT main(PS_INPUT input)
 #			if defined(FLUID_FIELD_FALLS)
 	// D190: white water is matte
 	fresnel *= 1.0 - fallWhite * FallShading::WHITE_REFLECTION_LOSS;
+#			endif
+#			if defined(PBR_WATER) && !defined(UNDERWATER)
+	{
+		// Roughness-aware environment Fresnel for F0 = 0.02 (air -> water).
+		float2 envBRDF = BRDF::EnvBRDF(pbrRoughness, saturate(dot(-viewDirection, normal)));
+		float pbrFresnel = saturate(0.02 * envBRDF.x + envBRDF.y);
+		fresnel = lerp(pbrFresnel, fresnel, PBRWater::Light0.z);
+	}
 #			endif
 
 #			if defined(SPECULAR) && (NUM_SPECULAR_LIGHTS != 0)
@@ -1664,13 +1994,23 @@ PS_OUTPUT main(PS_INPUT input)
 #					if defined(ENABLE_LL)
 		lightColorMul = pow(lightColorMul, TransferFunctions::GAME_GAMMA);
 #					endif
+#					if defined(PBR_WATER)
+		float pbrLightDistance = length(lightVector);
+		float3 lightColor = Color::PointLight(LightColor[lightIndex].xyz) * lightColorMul *
+		                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightVector, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
+								PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius(), pbrLightDistance)) *
+		                    PBRWater::Light1.w;
+#					else
 		float LdotN = saturate(dot(lightDirection, normal));
 		float3 lightColor = (Color::PointLight(LightColor[lightIndex].xyz) * pow(LdotN, FresnelRI.z)) * lightColorMul;
+#					endif
 		finalColor += lightColor;
 	}
 #				endif
 
+#				if !defined(PBR_WATER)
 	finalColor *= fresnel;
+#				endif
 #				if defined(WETNESS_EFFECTS) && defined(DEBUG_WETNESS_EFFECTS)
 	// DEBUG MODE: Override specular color with debug visualization
 	float3 debugColor = WetnessEffects::GetDebugWetnessColorSpecular(waterData.rippleInfo, 2.5, 4.0);
@@ -1683,9 +2023,9 @@ PS_OUTPUT main(PS_INPUT input)
 #			else
 
 #				if defined(SKYLIGHTING)
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceBlendFactor, skylightingSpecular);
+	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceBlendFactor, skylightingSpecular, pbrRoughness);
 #				else
-	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceBlendFactor, 1.0);
+	float3 specularColor = GetWaterSpecularColor(input, normal, viewDirection, distanceBlendFactor, 1.0, pbrRoughness);
 #				endif
 
 	DiffuseOutput diffuseOutput = GetWaterDiffuseColor(input, normal, viewDirection, distanceMul, depthControl.y, fresnel, viewPosition, depth);
@@ -1696,6 +2036,10 @@ PS_OUTPUT main(PS_INPUT input)
 	// D190: soften the sun's shadow on the falls: the volumetric cascades resolve cliff shadows only near, blotching the falls
 	surfaceShadow = lerp(1.0, surfaceShadow, FallShading::SUN_SHADOW);
 	dirShadow = lerp(1.0, dirShadow, FallShading::SUN_SHADOW);
+#				endif
+#				if defined(PBR_WATER) && !defined(UNDERWATER)
+	// The waves' own shadows: the water the sunlight crosses to get here (the engine's shadow map holds no water).
+	PBRWater::SunThroughWaves pbrWaveSun = PBRWater::SunPathThroughWaves(input.WPosition.xyz, SunDir.xyz, input.ShoreState.w, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
 #				endif
 
 	float3 dirColor;
@@ -1855,10 +2199,17 @@ PS_OUTPUT main(PS_INPUT input)
 			[branch] if (localShadow)
 				lightShadow = LightLimitFix::GetLocalShadow(DepthSampler, light.localShadowIndex, input.WPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, normalizedLightDirection, false, Random::InterleavedGradientNoise(input.HPosition.xy, SharedData::FrameCount));
 
+#					if defined(PBR_WATER)
+			float3 lightColor = Color::PointLight(light.color.xyz) * light.fade *
+			                    PBRWater::SpecularGGX(normal, -viewDirection, PBRWater::SafeNormalize(lightDirection, normal), pbrRoughness, 1.0 / PBRWater::WaterIOR,
+									PBRWater::EmitterAngularRadius(PBRWater::PointLightEmitterRadius(), lightDist)) *
+			                    PBRWater::Light1.w;
+#					else
 			float3 H = normalize(normalizedLightDirection - viewDirection);
 			float HdotN = saturate(dot(H, normal));
 
 			float3 lightColor = Color::PointLight(light.color.xyz) * pow(HdotN, FresnelRI.z) * light.fade;
+#					endif
 			specularLighting += lightColor * intensityMultiplier * lightShadow;
 		}
 	}
@@ -1878,7 +2229,7 @@ PS_OUTPUT main(PS_INPUT input)
 #					endif
 #				else
 
-	float3 sunColor = GetSunColor(normal, viewDirection, input.WPosition.xyz) * surfaceShadow;
+	float3 sunColor = GetSunColor(normal, viewDirection, input.WPosition.xyz, pbrRoughness) * surfaceShadow;
 #					if defined(FLUID_FIELD)
 	{
 		// Foam is matte: no sun glint and a dull reflection where it is dense
@@ -1908,7 +2259,7 @@ PS_OUTPUT main(PS_INPUT input)
 #					endif
 	}
 
-#					if defined(VC)
+#					if defined(VC) && !defined(PBR_WATER)
 	float specularFraction = lerp(1, fresnel * surfaceMul, distanceBlendFactor);
 	float3 finalColorPreFog = lerp(diffuseColor, specularColor, specularFraction) + sunColor * sunMul;
 
@@ -1958,6 +2309,180 @@ PS_OUTPUT main(PS_INPUT input)
 #						endif
 
 #					else
+#						if defined(PBR_WATER)
+	// Water column: Beer-Lambert transmittance of the refracted scene plus in-scattered body colour.
+	float pbrPathLength = distanceMul.x * FogParam.z;
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	{
+		// Nothing rendered behind the water (sky / far plane): treat the column as infinitely deep.
+		float pbrRawDepth = DepthTex.Load(float3(screenPosition, 0)).x;
+#								if defined(HORIZON_FIX)
+		bool pbrEmpty = pbrRawDepth >= HorizonFix::EmptyDepthThreshold;
+#								else
+		bool pbrEmpty = pbrRawDepth >= 0.999999;
+#								endif
+		pbrPathLength = pbrEmpty ? 1e7 : max(depthMul - length(input.WPosition.xyz), 0.0);
+	}
+#							endif
+	// Vertical depth of what is seen through the water, and the path the refracted ray really takes to it:
+	// Snell bends it towards the vertical, so at grazing angles light crosses far less water than the
+	// straight view ray suggests.
+	float pbrBottomDepth = pbrPathLength * abs(viewDirection.z);
+	float3 pbrRefracted = refract(viewDirection, normal, 1.0 / PBRWater::WaterIOR);
+	float pbrWaterPath = pbrBottomDepth / max(-pbrRefracted.z, 0.2);
+	// A breaker's face is no slab: the ray seen through it runs into the crest nearly level and leaves through its back,
+	// crossing only the crest's thickness at that height, about three times the height still above it (a crest's back is
+	// about a third as steep as a breaking face). As a slab down to the bed far behind, every face shaded as the same deep
+	// body colour, a wall; through the crest the face is thin and bright near the top and deepens towards the trough.
+	float pbrSteepFace = smoothstep(0.6, 0.2, abs(normal.z)) * saturate(pbrSurface.crest / (0.1 * PBRWater::UnitsPerMetre));
+	float pbrCrestPath = 3.0 * max(pbrSurface.crest - pbrSurface.height, 0.0) + 0.05 * PBRWater::UnitsPerMetre;
+	pbrWaterPath = lerp(pbrWaterPath, min(pbrWaterPath, pbrCrestPath), pbrSteepFace);
+	// What the depth buffer shows behind a wave that rises above the still water (icebergs, cliffs, the far shore) is no
+	// part of the water's background: the ray refracted into the wave bends down into the sea and never reaches it, and
+	// the scene behind showed through every crest standing above the horizon. Only the bed under the water is seen.
+	// (One depth-tested layer of water: the nearest wave already hides the ones behind it.)
+	float pbrReachable = 1.0;
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	if (pbrPathLength < 1e6) {
+		float pbrBehind = input.WPosition.z + viewDirection.z * pbrPathLength - input.WaveParam.z;
+		// Nor is anything far behind: the scene seen through the water holds no water, so past the wave the ray would
+		// cross the waves behind, not the horizon and the land beyond them (a line along the horizon through every crest).
+		float pbrBeyond = pbrPathLength * length(viewDirection.xy);
+		float pbrUnreachable = max(saturate(pbrBehind / (0.25 * PBRWater::UnitsPerMetre)), saturate((pbrBeyond - 5.0 * PBRWater::UnitsPerMetre) / (5.0 * PBRWater::UnitsPerMetre))) *
+		                       saturate(pbrSurface.height / (0.05 * PBRWater::UnitsPerMetre));
+		// Blended as a share of the light, not of the path: lerp(path, 1e7, w) is ~1e5 units for even w = 0.01, and
+		// everything just under a raised surface (a body floating in it, a leg) turned opaque body colour.
+		pbrReachable = 1.0 - pbrUnreachable;
+	}
+#							endif
+
+	// Clarity: drifting sediment patches, wave-stirred shallows, river silt, wading.
+	float pbrFlow = saturate((1.0 - input.WaveParam.w) / max(PBRWater::Foam1.w, 0.01));
+	float pbrColumnDepth = min(pbrSurface.depth, pbrBottomDepth);
+	PBRWater::Turbidity pbrTurbidity = PBRWater::GetTurbidity(input.WaveParam.xyz, input.SurfaceNoise.x, pbrColumnDepth, PBRWater::FetchHeightRatio(pbrSurface.fetchMetres), input.WaveParam.w, pbrSurface.breakStage, pbrFlow);
+	pbrSurface.turbidity = PBRWater::ColumnTurbidity(pbrTurbidity, pbrColumnDepth);
+	PBRWater::WaterOptics pbrOptics = PBRWater::GetWaterOptics(PBRWater::Extinction(ShallowColor.xyz, FogParam.z * PBRWater::Light1.x), pbrSurface.turbidity);
+
+	// Body colour: the water form's, shifted towards the sediment colour as sediment takes over.
+	float3 pbrBodyLinear = ColorManagement::SceneToLinear(diffuseOutput.refractionDiffuseColor);
+	pbrBodyLinear = PBRWater::BodyColour(pbrBodyLinear, PBRWater::SedimentBodyColour(pbrBodyLinear), pbrOptics);
+
+	// Transmission (Beer-Lambert along the refracted path, in linear light). What is seen through the water
+	// was itself lit through the water above it, so light reaching the bottom is attenuated by K_d.
+	float pbrSunShare = Color::RGBToLuminance(dirColor) / max(Color::RGBToLuminance(dirColor + ambientColor), 1e-5);
+	// Sunlight that reached this water through a crest lost what that water took (K_d: what it scatters forwards still
+	// arrives): the body colour's and the bed's share of it, and the foam's.
+	float3 pbrWaveSunLight = exp(-pbrOptics.downwelling * pbrWaveSun.path);
+	float3 pbrWaveSunShare = lerp(1.0, pbrWaveSunLight, pbrSunShare);
+	pbrBodyLinear *= pbrWaveSunShare;
+#							if defined(REFRACTIONS)
+	float3 pbrTransmittance = exp(-pbrOptics.extinction * pbrWaterPath) * pbrReachable;
+	float3 pbrBottomLight = PBRWater::DownwellingTransmittance(pbrOptics, pbrBottomDepth, PBRWater::RefractedSunDirection(SunDir.xyz).z, pbrSunShare);
+#							else
+	float3 pbrTransmittance = 0.0;
+	float3 pbrBottomLight = 1.0;
+#							endif
+	pbrBottomLight *= pbrWaveSunShare;
+	float3 pbrTransmitted = ColorManagement::LinearToScene(ColorManagement::SceneToLinear(diffuseOutput.refractionColor) * pbrTransmittance * pbrBottomLight +
+														   pbrBodyLinear * (1.0 - pbrTransmittance));
+
+	// Sunlight transmitted through thin wave crests, coloured by the water it crosses.
+	float pbrCrest = saturate(input.ShoreState.z / max(PBRWater::Optics0.w * 0.5, 1.0));
+	float3 pbrSunLight, pbrSkyLight;
+	ShadowSampling::ExtractLighting(1.0.xxx, pbrSunLight, pbrSkyLight);
+	float pbrCrestThickness = max(PBRWater::Optics0.w * 0.6, 0.4 * PBRWater::UnitsPerMetre);
+	// Through the crest's real thickness towards the sun where the heightfield reaches.
+	float pbrCrestSunPath = pbrWaveSun.valid ? pbrWaveSun.path : -1.0;
+	pbrTransmitted += pbrSunLight * dirShadow * PBRWater::WaveTranslucency(normal, -viewDirection, SunDir.xyz, pbrCrest, pbrOptics, pbrCrestThickness, pbrCrestSunPath) * PBRWater::Light0.y;
+
+	// The waterline per pixel: the water's surface here (the waves at this pixel, or the swash sheet over the ground)
+	// against the ground seen through it, so the edge follows the true bed - and rocks, piles and legs standing in the
+	// water - instead of the mesh's triangles cutting through the terrain. Over the last few centimetres the surface
+	// (reflection, body colour) fades into the ground; foam lies on the water, so it stays on the thin sheet.
+	float pbrBed = pbrSurface.elevation;
+#							if defined(DEPTH) && !defined(VERTEX_ALPHA_DEPTH)
+	if (pbrPathLength < 1e6) {
+		// Only ground just behind the surface is the bed under it. Seen through a wave that rises in front of it, an
+		// iceberg, a mountain or the horizon far behind stood near or above the crest and the pixel was taken for (nearly)
+		// dry ground: the wave showed it. Further out, the terrain under the pixel.
+		if (pbrPathLength * length(viewDirection.xy) < 3.0 * PBRWater::UnitsPerMetre)
+			pbrBed = input.WPosition.z + viewDirection.z * pbrPathLength - input.WaveParam.z;
+	}
+#							endif
+	float pbrFilm = max(pbrSurface.height, PBRWater::SwashSurface(pbrBed, pbrSurface.swashSurface, pbrSurface.swashDepth)) - pbrBed;
+	// With refractions, dry pixels show the ground instead (pbrEdge = 0): the stencil pass put them in the water mask,
+	// and ISWaterBlend composites whatever this target holds there - after a discard, an old frame's water.
+	float pbrEdge = smoothstep(0.0, 0.06 * PBRWater::UnitsPerMetre, pbrFilm);
+
+	// Foam (PBRWater.hlsli): the shore waves' and the swash's, drawn with the foam texture below; and the open sea's
+	// (pbrSurface.fftFoam, the accumulated cascade foam of GarrettGunnell/Water), blended in raw as a coverage.
+	// Nothing is drawn from what the depth buffer shows through the water:
+	// that put foam in the shape of whatever stood in it (legs, rocks) and of the shoreline seen from below. It is drawn
+	// with the foam texture (Crest's black-point fade) where the surface is, a diffuse scatterer
+	// (Dupuy & Bruneton 2012) lit by the sun and the sky like any surface.
+	// The swash sheet runs up the beach foaming: each bore's own foam, carried up with its water and thinning as the sheet
+	// spreads and drains, and the white water where uprushes and backwash collide (SwashStepCS). The sheet is where the
+	// swash covers the bed near or above the still water.
+	float pbrTipGap = pbrSurface.swashDepth > PBRWater::SwashMinDepth ? pbrSurface.swashSurface - pbrBed : -PBRWater::UnitsPerMetre;
+	// Antialiased over the pixel: a hard step drew the uprush's edge in stairs.
+	float pbrSheet = saturate(pbrTipGap / max(fwidth(pbrTipGap), 0.01) + 0.5) * smoothstep(-0.15 * PBRWater::UnitsPerMetre, 0.0, pbrBed);
+	// What the breakers left on the water rides the water under the waves (ShoreFoamCS); the swash's is its own.
+	float2 pbrSimFoam = pbrSurface.simFoam;
+	// Two foams. The breaking wave's own white water (pbrSurface.breakerFoam: the folding of its surface and the profile's
+	// foam, BreakerFoam) is drawn the way the open sea's is, as a raw coverage with no texture, so there is nothing on the
+	// face, crest, lip and tumbling white water to stretch. The foam texture is kept for the flat white water: the bore once
+	// it has formed and lies near horizontal, what the surf left on the water where it lies flat (on a rising face that
+	// joins the breaker's, drawn with the sea's foam), and the swash sheet's. The two cross-fade by
+	// how flat the surface is, and for the wave itself by its stage (bore), so the pattern takes over as the wave rolls flat.
+	// The pattern holds still where the surface is, projected from above: the foam moves over it, as its coverage.
+	// SurfaceFoam takes screen derivatives and skips the pattern where it gets no foam, so it is called unconditionally.
+	float3 pbrFoamPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
+	// Near the waterline the mesh lies on the sand above the water (DisplaceSurface) and climbs every ledge in the bed;
+	// the water seen there is further along the view ray, where it reaches the water's surface. Projected from the mesh,
+	// the pattern ran down the steep faces over the ledges in vertical streaks, a step along each one.
+	float pbrMeshAbove = (input.WPosition.z - input.WaveParam.z) - max(pbrSurface.height, PBRWater::SwashSurface(pbrBed, pbrSurface.swashSurface, pbrSurface.swashDepth));
+	if (pbrMeshAbove > 0.0 && viewDirection.z < -0.01)
+		pbrFoamPosition += viewDirection * min(pbrMeshAbove / -viewDirection.z, pbrPathLength);
+	float pbrFlat = smoothstep(0.80, 0.95, pbrSurface.waveNormal.z);
+	float pbrBoreFlat = pbrSurface.bore * pbrFlat;
+	float pbrPatternCoverage = max(max(pbrSurface.foam * pbrBoreFlat, pbrSimFoam.x * pbrFlat * (1.0 - pbrSurface.clearFace)), pbrSimFoam.y * pbrSheet);
+	// What the swash stranded on the sand as it drained (the swash mark at the top of each uprush, lace where the sheet
+	// thinned): drawn on the ground where no water covers it, the pattern held where it lies.
+	float pbrStrandedFoam = PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrSimFoam.y * (1.0 - pbrSheet), PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler);
+	// The surf's leftover foam on faces that are not flat is in pbrSurface.breakerFoam, drawn with the sea's (BreakerFoamDrawn).
+	float pbrRawCoverage = pbrSurface.breakerFoam;
+	float pbrFoamPattern = saturate(PBRWaterFoam::SurfaceFoam(pbrFoamPosition.xy, pbrPatternCoverage, PBRWater::FoamTile(), PBRWater::Tune5.y, PBRWater::OceanSampler) + pbrRawCoverage);
+	// Whitewater is a layer of bubbles light scatters through, not a surface: it is lit about the normal bent halfway up,
+	// with the sun wrapping around it. Lit about the water's own normal, the foam on the underside of a curling lip (facing
+	// down, seeing neither the sun nor the sky) drew a dark line along every curling crest.
+	float3 pbrFoamNormal = PBRWater::SafeNormalize(normal + float3(0.0, 0.0, 1.0), float3(0.0, 0.0, 1.0));
+	float3 pbrFoamIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetDirectionalLighting()) * (dirShadow * saturate((dot(pbrFoamNormal, SunDir.xyz) + 0.5) / 1.5)) * pbrWaveSunLight;
+	float3 pbrSkyIrradiance = ColorManagement::SceneToLinear(ShadowSampling::GetAmbientLighting());
+#							if defined(SKYLIGHTING)
+	pbrSkyIrradiance *= Skylighting::EvaluateDiffuse(skylightingSH, pbrFoamNormal, Skylighting::GetFadeOutFactor(input.WPosition.xyz));
+#							endif
+	float3 pbrFoamColor = ColorManagement::LinearToScene(PBRWaterFoam::Albedo * (pbrFoamIrradiance + pbrSkyIrradiance));
+
+	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
+	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
+	float3 pbrSunGlint = sunColor * (depthControl.w * pbrWaveSun.visible);
+#							if !defined(REFRACTIONS)
+	if (pbrFilm <= 0.0)
+		discard;
+#							endif
+	pbrSunGlint *= pbrEdge;
+	float pbrFilmFoam = smoothstep(0.0, 0.04 * PBRWater::UnitsPerMetre, pbrFilm);
+	float pbrFoam = max(pbrFoamPattern * pbrFilmFoam, saturate(pbrSurface.fftFoam) * pbrFilmFoam);
+	// Foam scatters the glint with the rest of the light that reaches it.
+	finalColorPreFog = lerp(finalColorPreFog, pbrFoamColor, pbrFoam) + pbrSunGlint * (1.0 - pbrFoam);
+#							if defined(REFRACTIONS)
+	// The foam stranded on the dry sand lies on the ground the final blend shows where there is no water (pbrEdge).
+	float pbrStrandedShown = (1.0 - pbrEdge) * pbrStrandedFoam;
+	float pbrCover = pbrEdge + pbrStrandedShown;
+	finalColorPreFog = (pbrEdge * finalColorPreFog + pbrStrandedShown * pbrFoamColor) / max(pbrCover, 1e-4);
+	pbrEdge = pbrCover;
+#							endif
+#						else
 	float specularFraction = lerp(1, fresnel, distanceBlendFactor);
 	float waterOpacity = diffuseOutput.refractionMul;
 	float3 finalColorPreFog;
@@ -1972,10 +2497,10 @@ PS_OUTPUT main(PS_INPUT input)
 	} else {
 		finalColorPreFog = lerp(diffuseOutput.refractionDiffuseColor, specularColor, specularFraction) + sunColor * depthControl.w;
 	}
-#						if defined(FLUID_FIELD)
+#							if defined(FLUID_FIELD)
 	{
 		// Foam is opaque: it covers the see-through refraction as well
-#							if defined(FLUID_FIELD_FALLS)
+#								if defined(FLUID_FIELD_FALLS)
 		// D159: the falls' own foam, laid over the water as the river's is
 		if (fallAboveWater < 0.0) {
 			// D176: under the water below, the bubbles' colour, dimmed into the water's hue with depth
@@ -2022,10 +2547,11 @@ PS_OUTPUT main(PS_INPUT input)
 			finalColorPreFog = (finalColorPreFog * (waterOpacity * (1.0 - fallFoam)) + fallFoamLight * fallFoam) / max(fallOpacity, 1e-3);
 			waterOpacity = fallOpacity;
 		}
-#							else
+#								else
 		// shortcut: the river's lobe foam (FoamLook) is off: its sparse peaks read as bright white specks; redo it before drawing it again
-#							endif
+#								endif
 	}
+#							endif
 #						endif
 
 #						if !defined(UNIFIED_WATER)
@@ -2064,23 +2590,39 @@ PS_OUTPUT main(PS_INPUT input)
 	finalColorPreFog = lerp(finalColorPreFog, preFogColor, fogDistanceFactor);
 #						endif
 
+#						if defined(PBR_WATER)
+	float3 finalColor = finalColorPreFog;
+	// Debug views go through the same per-pixel waterline as the water: drawn over the whole coverage, they showed the
+	// coarser, triangle-shaped region the passes keep (where the ground shows) as hard corners that are never on screen.
+	if (PBRWater::Draw0.z > 0.5)
+		finalColor = PBRWater::DebugView((uint)PBRWater::Draw0.z, pbrSurface, pbrFoam, input.ShoreState.z);
+	// The waves' sun shadows: red the sun's glint hidden, green the water the sunlight crosses (2 m), blue off the heightfield.
+	if ((uint)PBRWater::Draw0.z == PBRWater::DebugWaveSun)
+		finalColor = float3(1.0 - pbrWaveSun.visible, saturate(pbrWaveSun.path / (2.0 * PBRWater::UnitsPerMetre)), pbrWaveSun.valid ? 0.0 : 0.3);
+#							if defined(REFRACTIONS)
+	// The thinnest water shows the ground it covers (as it is, already lit and fogged).
+	float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;
+	finalColor = lerp(pbrGround, finalColor, pbrEdge);
+#							endif
+#						else
 	float3 refractionColor = diffuseOutput.refractionColor;
 
 	float fogFactor = min(FogParam.w, pow(saturate(-diffuseOutput.depth * FogParam.y - FogParam.x), FogParam.z));
 	float3 fogColor = lerp(ColorManagement::SRGBToWorking(FogNearColor.xyz), ColorManagement::SRGBToWorking(FogFarColor.xyz), fogFactor);
-#						if defined(EXP_HEIGHT_FOG)
+#							if defined(EXP_HEIGHT_FOG)
 	if (SharedData::exponentialHeightFogSettings.enabled && ExponentialHeightFog::ShouldDisableVanillaFog()) {
 		fogFactor = 0;
 	}
-#						endif
-#						if defined(IBL)
+#							endif
+#							if defined(IBL)
 	if (SharedData::iblSettings.EnableIBL) {
 		fogColor = ImageBasedLighting::GetFogIBLColor(fogColor);
 	}
-#						endif
+#							endif
 	refractionColor = lerp(refractionColor, fogColor, fogFactor);
 
 	float3 finalColor = lerp(refractionColor, finalColorPreFog, waterOpacity);
+#						endif
 #						if defined(FLUID_FIELD_FALLS)
 	// D180: bubbles over the result, or the water's colour hides them
 	{
@@ -2107,6 +2649,13 @@ PS_OUTPUT main(PS_INPUT input)
 
 #				endif
 #			endif
+#			if defined(PBR_WATER)
+	if (PBRWater::Draw0.y > 0.5) {
+		float wire = PBRWater::WireframeMask(input.Barycentric);
+		float3 background = PBRWater::Draw0.y > 1.5 ? 0.0 : finalColor;
+		finalColor = lerp(background, float3(0.1, 1.0, 0.6), wire);
+	}
+#			endif
 	psout.Lighting = float4(finalColor, isSpecular);
 #			if defined(FLUID_FIELD_FALLS)
 	// D159: premultiplied for FallRefraction's blend (one, one minus source alpha); alpha only fades the edges
@@ -2120,9 +2669,25 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 normal =
 		normalize(cross(ddx_coarse(input.WorldPosition.xyz), ddy_coarse(input.WorldPosition.xyz)));
 	float VdotN = dot(viewDirection, normal);
+#			if defined(PBR_WATER)
+	// The mask also marks the water for ISWaterBlend and the upscaler: on a wave face seen edge-on or from behind
+	// (the coarse derivatives span a crest) it rounded to 0 in the UNORM target and punched 2x2 holes in the water.
+	VdotN = max(abs(VdotN), 2.0 / 255.0);
+#			endif
 	psout.WaterMask = float4(0, 0, VdotN, 0);
 
-	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, input.PreviousWorldPosition);
+	float4 previousPosition = input.PreviousWorldPosition;
+#			if defined(PBR_WATER)
+	// The surf's foam, read at the displaced position (this pass has no undisplaced one); the foam grid's texels are
+	// coarser than the difference almost everywhere.
+	// The foam's pattern holds still where the surface is, so where it covers the water it does not move sideways with the
+	// mesh: temporal AA and the upscalers reprojected it from where the mesh was and smeared it.
+	float pbrMotionFoam = PBRWater::ShoreFoamAt(input.WorldPosition.xy + FrameBuffer::CameraPosAdjust.xy);
+	// Last frame's position is relative to last frame's camera.
+	float2 pbrFoamPrevious = input.WorldPosition.xy + (FrameBuffer::CameraPosAdjust.xy - FrameBuffer::CameraPreviousPosAdjust.xy);
+	previousPosition.xy = lerp(previousPosition.xy, pbrFoamPrevious, saturate(2.0 * pbrMotionFoam));
+#			endif
+	psout.MotionVector = MotionBlur::GetSSMotionVector(input.WorldPosition, previousPosition);
 #		endif
 
 #		if defined(FLUID_FIELD_FALLS) && !defined(STENCIL)

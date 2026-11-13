@@ -476,6 +476,13 @@ namespace SharedData
 		float3 pad;
 	};
 
+	struct PBRWaterSettings
+	{
+		float4 SwashGrid;    // xy swash grid corner (absolute units), z 1 / extent (units), w enabled
+		float4 Wetness;      // x wet shores enabled, y foam on the sand strength, z foam pattern scale (units), w unused
+		float4 Skylighting;  // x the water surface is in Skylighting's occlusion maps, yzw unused
+	};
+
 	struct RainRefractionSettings
 	{
 		uint Enable;
@@ -485,6 +492,12 @@ namespace SharedData
 		float4 TextureBounds;
 		float2 TextureRadiusScale;
 		float2 pad1;
+	};
+
+	struct WaterEffectsSettings
+	{
+		float4 Caustics0;  // x projection divisor along the light, y lowest sun elevation (sine) it follows, z focal depth (m), w depth of field (m)
+		float4 Caustics1;  // x most mip levels of defocus blur, yzw unused
 	};
 
 	struct ProceduralSunSettings
@@ -544,7 +557,9 @@ namespace SharedData
 		TruePBRSettings truePBRSettings;
 		SkinData skinData;
 		HorizonFixSettings horizonFixSettings;
+		PBRWaterSettings pbrWaterSettings;
 		RainRefractionSettings rainRefractionSettings;
+		WaterEffectsSettings waterEffectsSettings;
 		ProceduralSunSettings proceduralSunSettings;
 		FluidFieldSettings fluidFieldSettings;
 	};

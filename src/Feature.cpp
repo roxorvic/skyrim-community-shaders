@@ -25,6 +25,7 @@
 #include "Features/LODBlending.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
+#include "Features/PBRWater.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/PostProcessing.h"
 #include "Features/ProceduralSun.h"
@@ -279,6 +280,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::effects11,
 		&globals::features::rainRefraction,
 		&globals::features::unifiedWater,
+		&globals::features::pbrWater,
 		&globals::features::horizonFix,
 		&globals::features::exponentialHeightFog,
 		&globals::features::hdrDisplay,

@@ -119,6 +119,17 @@ struct UnifiedWater : OverlayFeature
 	/** @brief The world flowmap, or null; read-only, for Shallow Water's river currents. */
 	const Flowmap* GetFlowmap() const { return flowmap; }
 
+	/** @brief The water placement cache, or nullptr before DataLoaded or after a failed load. */
+	WaterCache* GetWaterCache() const { return waterCache; }
+
+	/**
+	 * @brief The worldspace flowmap and its world-to-texture mapping.
+	 * @param srv receives the flowmap view
+	 * @param mapping receives the mapping uv = absolute world xy * mapping.xz + mapping.yw
+	 * @return false when no worldspace flowmap is active (interiors, other worldspaces, not loaded)
+	 */
+	bool GetWorldFlowmap(ID3D11ShaderResourceView*& srv, float4& mapping) const;
+
 private:
 	RE::NiPointer<RE::BSTriShape> waterMesh;
 	Flowmap* flowmap = nullptr;
