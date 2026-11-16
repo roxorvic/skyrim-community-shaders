@@ -33,6 +33,10 @@ struct FallCurrent
 StructuredBuffer<FallCurrent> FallCurrents : register(t11);
 // Water whose surface is further than this from a falls' water level is another pool or river: left alone
 static const float FALL_LEVEL_MATCH = 64.0;
+// A river carries about the same water through every cross-section, so it runs slower where it is deep and faster where
+// shallow; the flowmap's current is flat, so it is scaled by REFERENCE_DEPTH over vanilla's depth here, within the limits
+static const float REFERENCE_DEPTH = 35.0;  // World units (~0.5 m): the depth at which the current runs at its flowmap speed
+static const float2 DEPTH_SPEED_LIMITS = float2(0.25, 1.5);
 // Under this river speed (world units/s) the water has no flowmap current: the falls drive all of it, unfaded
 static const float NO_RIVER_SPEED = 1.0;
 // Slowest the falls drive such water anywhere (world units/s): far from them it still visibly flows
@@ -62,6 +66,52 @@ static const float BED_CHANGE_THRESHOLD = 2.0;  // World units
 static const float STILL_SPEED = 60.0;       // World units/s of current under which the water counts as still
 static const float STILL_DAMPING = 1.5;      // Extra per-second damping of waves on still water
 static const float STILL_LEVEL_RELAX = 2.0;  // Extra per-second pull of its surface back to rest
+// Behind an obstacle the flow breaks up and loses the energy the shallow-water equations would hand back as height (they
+// have no turbulence): sheltered water slower than the current around it is pulled back to its level this fast, per second
+static const float WAKE_RELAX = 4.0;
+// Cells upstream (along the current) looked at for the obstacle that shelters a cell
+static const int WAKE_LOOK = 4;
+// Per second water standing on a bed above vanilla's water (a rock it climbed, a bank it spilled onto) drains back: slowly
+// while it runs fast (a sheet going over a rock keeps going), fast once it is still or slow (a film left behind runs off)
+static const float DRY_BED_DRAIN = 0.25;
+static const float FILM_DRAIN = 3.0;
+static const float SHEET_SPEED = 60.0;  // World units/s at which water on such a bed counts as a running sheet
+// Water on such a bed stands at most its velocity head v^2 / 2g above the nearby vanilla water, plus this (world units):
+// it climbs only as high as its speed carries it
+static const float CLIMB_MARGIN = 3.5;
+
+/** @brief 1 where an obstacle lies upstream of the cell within WAKE_LOOK cells along a_downstream (unit), 0 otherwise. */
+float Sheltered(int2 logical, float2 a_downstream)
+{
+	[unroll] for (int k = 1; k <= WAKE_LOOK; k++)
+	{
+		if (LoadDepth(DepthIn, logical - int2(round(a_downstream * k))) <= WetThreshold)
+			return 1.0;
+	}
+	return 0.0;
+}
+
+/**
+ * @brief The rest current with its part into nearby walls removed. The pull toward the current knows nothing of
+ * obstacles: next to a rock it kept pushing water into the face, piling it far higher than its momentum could.
+ */
+float2 AlongWalls(int2 logical, float2 a_rest)
+{
+	float2 toWall = 0.0;
+	[unroll] for (int r = 1; r <= 2; r++)
+	{
+		const float w = r == 1 ? 1.0 : 0.5;
+		toWall += w * float2(LoadDepth(DepthIn, logical + int2(r, 0)) <= WetThreshold ? 1.0 : 0.0, 0.0);
+		toWall -= w * float2(LoadDepth(DepthIn, logical + int2(-r, 0)) <= WetThreshold ? 1.0 : 0.0, 0.0);
+		toWall += w * float2(0.0, LoadDepth(DepthIn, logical + int2(0, r)) <= WetThreshold ? 1.0 : 0.0);
+		toWall -= w * float2(0.0, LoadDepth(DepthIn, logical + int2(0, -r)) <= WetThreshold ? 1.0 : 0.0);
+	}
+	const float len = length(toWall);
+	if (len < 1e-3)
+		return a_rest;
+	const float2 n = toWall / len;
+	return a_rest - n * max(dot(a_rest, n), 0.0);
+}
 
 RWTexture2D<float> DepthOut : register(u0);
 RWTexture2D<float2> VelocityOut : register(u1);
@@ -101,7 +151,8 @@ float2 MixFallCurrents(float2 a_worldPos, float a_surface, float2 a_river, out f
 		a_churn = max(a_churn, near * (c.Kind > 0.0 ? LANDING_DAMPING : BRINK_DAMPING));
 		const float rushWeight = exp(-r * r / max(BRINK_RUSH_REACH * BRINK_RUSH_REACH * c.HalfWidth * c.HalfWidth, 1.0));
 		const float rush = c.Kind < 0.0 ? 1.0 + BRINK_RUSH * rushWeight : 1.0;
-		const float2 radial = d / max(r, 1e-3) * c.Kind * c.Speed * rush * c.HalfWidth / max(r, c.HalfWidth) * (noRiver ? 1.0 : RIVER_RADIAL_SHARE);
+		const float spread = c.HalfWidth / max(r, c.HalfWidth);
+		const float2 radial = d / max(r, 1e-3) * c.Kind * c.Speed * rush * spread * spread * (noRiver ? 1.0 : RIVER_RADIAL_SHARE);
 		const float jet = exp(-r * r / max(c.HalfWidth * c.HalfWidth, 1.0));
 		const float2 along = c.Direction * c.Speed * jet;
 		if (noRiver) {
@@ -120,34 +171,6 @@ float2 MixFallCurrents(float2 a_worldPos, float a_surface, float2 a_river, out f
 		return nearest > 0.0 && speed > 1e-3 ? falls * max(speed, MIN_FALLS_SPEED) / speed : falls;
 	}
 	return a_river * (1.0 - FallMix * nearest) + FallMix * falls + extra;
-}
-
-/** @brief Cell-centred velocity from the staggered faces (u on the west face, v on the south face). */
-float2 CentredVelocity(int2 logical)
-{
-	float2 here = LoadClamped(VelocityIn, logical);
-	return 0.5 * float2(here.x + LoadClamped(VelocityIn, logical + int2(1, 0)).x, here.y + LoadClamped(VelocityIn, logical + int2(0, 1)).y);
-}
-
-/** @brief Vorticity (curl of the velocity) at a cell centre, per second. */
-float Curl(int2 logical)
-{
-	float dvdx = CentredVelocity(logical + int2(1, 0)).y - CentredVelocity(logical + int2(-1, 0)).y;
-	float dudy = CentredVelocity(logical + int2(0, 1)).x - CentredVelocity(logical + int2(0, -1)).x;
-	return (dvdx - dudy) / (2.0 * CellSize);
-}
-
-/** @brief Vorticity confinement (push along N x omega, N up the gradient of |omega|): restores swirl advection smears out. */
-float2 ConfinementForce(int2 logical)
-{
-	float omega = Curl(logical);
-	float2 gradient = float2(abs(Curl(logical + int2(1, 0))) - abs(Curl(logical + int2(-1, 0))),
-		abs(Curl(logical + int2(0, 1))) - abs(Curl(logical + int2(0, -1))));
-	float len = length(gradient);
-	if (len < 1.0e-5)
-		return 0.0;
-	float2 n = gradient / len;
-	return Vorticity * CellSize * float2(n.y * omega, -n.x * omega);
 }
 
 /** @brief Hash of a lattice point to [-1, 1]. */
@@ -172,12 +195,21 @@ float ValueNoise(float3 p)
 static const float STIR_SCALE = 160.0;
 static const float STIR_RATE = 0.35;
 /** @brief Stirring acceleration per unit of river speed (1/s), before Turbulence scales it. */
-static const float STIR_STRENGTH = 0.9;
+static const float STIR_STRENGTH = 0.3;  // Shown as geometry, 0.9 stirred a funnel into every eddy
+
+/** @brief Rapids: finer, faster swirls where fast water runs over a rough bed (RapidsChaos). */
+static const float CHAOS_SCALE = 56.0;
+static const float CHAOS_RATE = 1.2;
+/** @brief Chaos acceleration per unit of water speed (1/s) at full roughness, before RapidsChaos scales it. */
+static const float CHAOS_STRENGTH = 2.5;
+/** @brief World units out to where the bed's roughness is measured, and the bed spread (units) that counts as fully rough. */
+static const float ROUGH_RADIUS = 48.0;
+static const float ROUGH_FULL = 24.0;
 
 /** @brief Curl noise from a slowly changing stream function: swirls water without piling it up, so rivers never settle. */
-float2 StirVelocity(float2 worldPos)
+float2 StirVelocity(float2 worldPos, float scale, float rate)
 {
-	float3 p = float3(worldPos / STIR_SCALE, SimTime * STIR_RATE);
+	float3 p = float3(worldPos / scale, SimTime * rate);
 	const float e = 0.5;
 	float dPsiDx = ValueNoise(p + float3(e, 0, 0)) - ValueNoise(p - float3(e, 0, 0));
 	float dPsiDy = ValueNoise(p + float3(0, e, 0)) - ValueNoise(p - float3(0, e, 0));
@@ -207,6 +239,7 @@ float2 StirVelocity(float2 worldPos)
 	bool vanillaWet = vanillaDepth > WetThreshold;
 	// Rivers follow the flowmap; lakes and the sea (water types without the flowmap) stay still
 	float2 restVelocity = vanillaWet ? (FlowmapEnabled != 0 ? SampleRiverFlow(worldPos) * SampleRiverFlowScale(worldPos) : Current) : 0.0;
+	restVelocity *= clamp(REFERENCE_DEPTH / max(vanillaDepth, 1.0), DEPTH_SPEED_LIMITS.x, DEPTH_SPEED_LIMITS.y);
 	// Eddies are stirred in by the river's own speed: a pond the falls drive would churn all over
 	const float riverSpeed = length(restVelocity);
 	float fallLevel = 0.0, fallChurn = 0.0;
@@ -252,23 +285,44 @@ float2 StirVelocity(float2 worldPos)
 	}
 
 	if (Vorticity > 0.0 && depth > WetThreshold && kept) {
-		// Symmetric flow past an obstacle sheds no vortices on its own; real rivers always carry small disturbances
-		float speed = length(velocity);
-		bool besideObstacle = LoadDepth(DepthIn, logical + int2(1, 0)) <= WetThreshold || LoadDepth(DepthIn, logical + int2(-1, 0)) <= WetThreshold ||
-		                      LoadDepth(DepthIn, logical + int2(0, 1)) <= WetThreshold || LoadDepth(DepthIn, logical + int2(0, -1)) <= WetThreshold;
-		// Confinement only in open water: beside jagged edges it makes the flow flicker
-		if (!besideObstacle)
-			velocity += ConfinementForce(logical) * DeltaTime;
-		// Stir moving water in proportion to the river's speed
+		// Stirred, not confined: confinement fed every eddy until it dug a funnel to the bed
+		const float speed = length(velocity);
 		if (riverSpeed > 1.0)
-			velocity += StirVelocity(worldPos) * riverSpeed * STIR_STRENGTH * Vorticity * DeltaTime;
+			velocity += StirVelocity(worldPos, STIR_SCALE, STIR_RATE) * riverSpeed * STIR_STRENGTH * Vorticity * DeltaTime;
+		// Rapids: fast water over a rough bed churns. Roughness is the bed's spread on a ring around the cell (rocks and
+		// ledges, not the river's slope), so a smooth bed at the same speed stays calm.
+		if (RapidsChaos > 0.0 && speed > STILL_SPEED) {
+			const int r = max(1, int(round(ROUGH_RADIUS / CellSize)));
+			const int2 ring[8] = { int2(r, 0), int2(-r, 0), int2(0, r), int2(0, -r), int2(r, r), int2(-r, r), int2(r, -r), int2(-r, -r) };
+			float sum = 0.0, sumSq = 0.0;
+			[unroll] for (int k = 0; k < 8; k++)
+			{
+				float b = CellMapIn[LogicalToStorage(clamp(logical + ring[k], 0, int(GridRes) - 1))].x;
+				sum += b;
+				sumSq += b * b;
+			}
+			float spread = sqrt(max(sumSq / 8.0 - (sum / 8.0) * (sum / 8.0), 0.0));
+			float rough = saturate(spread / ROUGH_FULL);
+			velocity += StirVelocity(worldPos, CHAOS_SCALE, CHAOS_RATE) * speed * CHAOS_STRENGTH * RapidsChaos * rough * DeltaTime;
+		}
 		// Not a per-cell random nudge: that rings shores at the grid frequency
 	}
 
+	if (kept)
+		restVelocity = AlongWalls(logical, restVelocity);
 	velocity = lerp(velocity, restVelocity, saturate(CurrentRelax * DeltaTime));
 	float levelDepth = max(vanillaDepth + fallLevel, 0.0);
 	const float still = 1.0 - saturate(length(restVelocity) / STILL_SPEED);
-	depth = lerp(depth, levelDepth, saturate((LevelRelax + STILL_LEVEL_RELAX * still + fallChurn) * DeltaTime));
+	// 2. Water the flow carried onto a bed above vanilla's water is not pulled off it at once (it would never climb)
+	float levelRate = vanillaWet ? LevelRelax + STILL_LEVEL_RELAX * still + fallChurn : DRY_BED_DRAIN + FILM_DRAIN * (1.0 - saturate(length(velocity) / SHEET_SPEED));
+	// The wake: sheltered water slower than the current loses its head instead of standing up with it. The obstacle's
+	// upstream face is not sheltered, so water still climbs it as far as its speed carries it.
+	const float restSpeed = length(restVelocity);
+	if (kept && vanillaWet && restSpeed > STILL_SPEED) {
+		const float slowed = saturate(1.0 - length(velocity) / restSpeed);
+		levelRate += WAKE_RELAX * slowed * Sheltered(logical, restVelocity / restSpeed);
+	}
+	depth = lerp(depth, levelDepth, saturate(levelRate * DeltaTime));
 
 	// Absorbing border: a per-second pull to vanilla growing quadratically toward the edge, so waves fade instead of bouncing
 	float edgeWeight = EdgeWeight(logical);
@@ -276,6 +330,33 @@ float2 StirVelocity(float2 worldPos)
 	velocity = lerp(velocity, restVelocity, edge);
 	depth = lerp(depth, vanillaDepth, edge);
 
+	// Energy limit near rocks and banks: water piling against them or carried onto them stands no higher above vanilla's
+	// level, and dips no lower below it, than the fastest water around can account for (its velocity head v^2 / 2g)
+	if (depth > WetThreshold && kept) {
+		bool nearWall = false;
+		float speedMax = length(velocity);
+		[unroll] for (int ny = -3; ny <= 3; ny++)
+		{
+			[unroll] for (int nx = -3; nx <= 3; nx++)
+			{
+				nearWall = nearWall || LoadDepth(DepthIn, logical + int2(nx, ny)) <= WetThreshold;
+				if (abs(nx) <= 1 && abs(ny) <= 1)
+					speedMax = max(speedMax, length(LoadClamped(VelocityIn, logical + int2(nx, ny))));
+			}
+		}
+		float level = vanillaWet ? map.y : NearbyVanillaLevel(worldPos);
+		if ((nearWall || !vanillaWet) && HasWater(level)) {
+			float head = speedMax * speedMax / (2.0 * Gravity) + CLIMB_MARGIN;
+			depth = min(depth, max(level + head - bed, 0.0));
+			if (vanillaWet)
+				depth = max(depth, level - head - bed);
+		}
+	}
+	// A swirl dips the surface by about v^2 / g at its core; numerical confinement and stirring dug deeper funnels
+	if (vanillaWet && depth > WetThreshold) {
+		float speed = length(velocity);
+		depth = max(depth, levelDepth - speed * speed / Gravity - CLIMB_MARGIN);
+	}
 	DepthOut[id] = max(depth, 0.0);
 	// Only the deviation from the river decays, so damping calms waves, not the current
 	VelocityOut[id] = restVelocity + (velocity - restVelocity) * VelocityDecay * exp(-(STILL_DAMPING * still + fallChurn) * DeltaTime);

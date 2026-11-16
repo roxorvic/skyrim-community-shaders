@@ -36,6 +36,14 @@ namespace FluidFieldSim
 
 		/** @brief Solid at a fine lattice point; a_top is the height the water solver should see there. */
 		bool IsSolid(int32_t a_fineX, int32_t a_fineY, float& a_top) const;
+		/**
+		 * @brief The visible mesh's top surface at a fine lattice point under or near the water (a rock's submerged flank),
+		 * from the same triangles as the cut. Havok's collision hulls, which the bed rays hit, are bulkier than the meshes
+		 * drawn, and the water stood on their phantom shoulders over the real rock.
+		 */
+		bool GetSurface(int32_t a_fineX, int32_t a_fineY, float& a_z) const;
+		/** @brief Whether a cut mesh's surface lies within a_radius fine points: a bed ray hitting a mesh there hit its hull. */
+		bool NearSurface(int32_t a_fineX, int32_t a_fineY, int32_t a_radius) const;
 
 		/** @brief Blocks (fine coordinates of their south-west point) whose solid points changed; the list is emptied. */
 		std::vector<std::pair<int32_t, int32_t>> TakeDirtyBlocks();
@@ -47,6 +55,8 @@ namespace FluidFieldSim
 		float GetFineSpacing() const { return fineSpacing; }
 
 	private:
+		/** @brief World units under the water a reference's top may lie and still give the bed its surface (submerged rocks). */
+		static constexpr float SUBMERGED_REACH = 210.0f;
 		/** @brief Updates between scans of the loaded cells for references that arrived or left. */
 		static constexpr uint32_t SCAN_INTERVAL = 30;
 		/** @brief CPU time the cuts of one update may take; one reference is always finished once started. */
@@ -58,9 +68,15 @@ namespace FluidFieldSim
 			float top = 0.0f;
 		};
 
+		struct Surface
+		{
+			uint32_t count = 0;  ///< References giving this point a surface
+			float z = 0.0f;      ///< The highest of them (shortcut: not lowered when the highest one unloads; rare, until a clear)
+		};
 		struct CutRecord
 		{
-			std::vector<uint64_t> points;  ///< Fine points this reference made solid
+			std::vector<uint64_t> points;         ///< Fine points this reference made solid
+			std::vector<uint64_t> surfacePoints;  ///< Fine points this reference gave a surface
 		};
 
 		static uint64_t MakeKey(int32_t a_x, int32_t a_y);
@@ -71,6 +87,7 @@ namespace FluidFieldSim
 		/** @brief Cuts one reference and adds its solid points. */
 		void Cut(RE::TESObjectREFR& a_ref, float a_surface);
 		void AddPoint(uint64_t a_key, float a_top);
+		void AddSurface(uint64_t a_key, float a_z);
 		void RemoveRecord(const CutRecord& a_record);
 		void MarkBlockDirty(uint64_t a_pointKey);
 
@@ -85,6 +102,7 @@ namespace FluidFieldSim
 		std::deque<Pending> queue;
 		std::unordered_set<uint32_t> queued;
 		std::unordered_map<uint64_t, Solid> solids;
+		std::unordered_map<uint64_t, Surface> surfaces;
 		std::unordered_set<uint64_t> dirtyBlocks;
 		float fineSpacing = 0.0f;
 		uint32_t updatesUntilScan = 0;

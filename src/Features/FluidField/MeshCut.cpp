@@ -167,6 +167,7 @@ namespace FluidFieldSim
 		queue.clear();
 		queued.clear();
 		solids.clear();
+		surfaces.clear();
 		dirtyBlocks.clear();
 		updatesUntilScan = 0;
 		cleared = true;
@@ -179,6 +180,26 @@ namespace FluidFieldSim
 			return false;
 		a_top = it->second.top;
 		return true;
+	}
+
+	bool MeshCut::GetSurface(int32_t a_fineX, int32_t a_fineY, float& a_z) const
+	{
+		const auto it = surfaces.find(MakeKey(a_fineX, a_fineY));
+		if (it == surfaces.end())
+			return false;
+		a_z = it->second.z;
+		return true;
+	}
+
+	bool MeshCut::NearSurface(int32_t a_fineX, int32_t a_fineY, int32_t a_radius) const
+	{
+		for (int32_t y = -a_radius; y <= a_radius; y++) {
+			for (int32_t x = -a_radius; x <= a_radius; x++) {
+				if (surfaces.contains(MakeKey(a_fineX + x, a_fineY + y)))
+					return true;
+			}
+		}
+		return false;
 	}
 
 	std::vector<std::pair<int32_t, int32_t>> MeshCut::TakeDirtyBlocks()
@@ -198,6 +219,10 @@ namespace FluidFieldSim
 	{
 		std::unordered_set<uint64_t> keys;
 		for (const auto& [key, solid] : solids) {
+			const auto [fx, fy] = SplitKey(key);
+			keys.insert(MakeKey(FloorDiv(fx, BLOCK), FloorDiv(fy, BLOCK)));
+		}
+		for (const auto& [key, surface] : surfaces) {
 			const auto [fx, fy] = SplitKey(key);
 			keys.insert(MakeKey(FloorDiv(fx, BLOCK), FloorDiv(fy, BLOCK)));
 		}
@@ -225,8 +250,26 @@ namespace FluidFieldSim
 			MarkBlockDirty(a_key);
 	}
 
+	void MeshCut::AddSurface(uint64_t a_key, float a_z)
+	{
+		auto& surface = surfaces[a_key];
+		if (surface.count == 0 || a_z > surface.z)
+			surface.z = a_z;
+		if (surface.count++ == 0)
+			MarkBlockDirty(a_key);
+	}
+
 	void MeshCut::RemoveRecord(const CutRecord& a_record)
 	{
+		for (const uint64_t key : a_record.surfacePoints) {
+			const auto it = surfaces.find(key);
+			if (it == surfaces.end())
+				continue;
+			if (--it->second.count == 0) {
+				surfaces.erase(it);
+				MarkBlockDirty(key);
+			}
+		}
 		for (const uint64_t key : a_record.points) {
 			const auto it = solids.find(key);
 			if (it == solids.end())
@@ -269,7 +312,7 @@ namespace FluidFieldSim
 					                                               0.0f;
 					found = a_water.SampleHeight(bound.center.x + dx, bound.center.y + dy, surface) != WaterSurfaces::Source::None;
 				}
-				if (!found || surface < bound.center.z - bound.radius || surface > bound.center.z + bound.radius)
+				if (!found || surface < bound.center.z - bound.radius || surface > bound.center.z + bound.radius + SUBMERGED_REACH)
 					return RE::BSContainer::ForEachResult::kContinue;
 				if (!HasCollision(root))
 					return RE::BSContainer::ForEachResult::kContinue;
@@ -311,6 +354,32 @@ namespace FluidFieldSim
 		auto* root = a_ref.Get3D();
 		std::vector<Segment> segments;
 		std::vector<RE::NiPoint3> world;
+		std::unordered_map<uint64_t, float> tops;  // The highest triangle over each fine point
+		const float spacing = fineSpacing;
+		const float topLimit = a_surface + SOLID_RISE;
+		const auto rasterise = [&](const RE::NiPoint3& a, const RE::NiPoint3& b, const RE::NiPoint3& c) {
+			const float area = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+			if (std::abs(area) < 1e-3f)
+				return;  // Edge-on from above: a vertical face adds no top surface
+			const auto x0 = static_cast<int32_t>(std::ceil(std::min({ a.x, b.x, c.x }) / spacing));
+			const auto x1 = static_cast<int32_t>(std::floor(std::max({ a.x, b.x, c.x }) / spacing));
+			const auto y0 = static_cast<int32_t>(std::ceil(std::min({ a.y, b.y, c.y }) / spacing));
+			const auto y1 = static_cast<int32_t>(std::floor(std::max({ a.y, b.y, c.y }) / spacing));
+			for (int32_t py = y0; py <= y1; py++) {
+				for (int32_t px = x0; px <= x1; px++) {
+					const float x = static_cast<float>(px) * spacing, y = static_cast<float>(py) * spacing;
+					const float wb = ((x - a.x) * (c.y - a.y) - (c.x - a.x) * (y - a.y)) / area;
+					const float wc = ((b.x - a.x) * (y - a.y) - (x - a.x) * (b.y - a.y)) / area;
+					const float wa = 1.0f - wb - wc;
+					if (wa < 0.0f || wb < 0.0f || wc < 0.0f)
+						continue;
+					const float z = std::min(wa * a.z + wb * b.z + wc * c.z, topLimit);
+					auto [it, added] = tops.try_emplace(MakeKey(px, py), z);
+					if (!added)
+						it->second = std::max(it->second, z);
+				}
+			}
+		};
 
 		RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* a_geometry) {
 			auto* triShape = a_geometry->AsTriShape();
@@ -344,7 +413,8 @@ namespace FluidFieldSim
 				minZ = std::min(minZ, world[i].z);
 				maxZ = std::max(maxZ, world[i].z);
 			}
-			if (!(minZ < a_surface && maxZ > a_surface))
+			const bool crosses = minZ < a_surface && maxZ > a_surface;
+			if (!(minZ < a_surface && maxZ > a_surface - SUBMERGED_REACH))
 				return RE::BSVisit::BSVisitControl::kContinue;
 
 			const uint16_t* indices = renderer->rawIndexData;
@@ -354,15 +424,15 @@ namespace FluidFieldSim
 				const uint16_t i2 = indices[t * 3 + 2];
 				if (i0 >= counts.vertexCount || i1 >= counts.vertexCount || i2 >= counts.vertexCount)
 					continue;
+				rasterise(world[i0], world[i1], world[i2]);
 				Segment segment;
-				if (CutTriangle(world[i0], world[i1], world[i2], a_surface, segment))
+				if (crosses && CutTriangle(world[i0], world[i1], world[i2], a_surface, segment))
 					segments.push_back(segment);
 			}
 			return RE::BSVisit::BSVisitControl::kContinue;
 		});
 
 		// Rasterise segments as four-neighbour-watertight lines, then fill each closed loop
-		const float spacing = fineSpacing;
 		const float top = a_surface + SOLID_RISE;
 		std::unordered_set<uint64_t> points;
 		for (const auto& s : segments) {
@@ -404,6 +474,11 @@ namespace FluidFieldSim
 		record.points.assign(points.begin(), points.end());
 		for (const uint64_t key : record.points)
 			AddPoint(key, top);
+		record.surfacePoints.reserve(tops.size());
+		for (const auto& [key, z] : tops) {
+			record.surfacePoints.push_back(key);
+			AddSurface(key, z);
+		}
 		cut[a_ref.GetFormID()] = std::move(record);
 	}
 

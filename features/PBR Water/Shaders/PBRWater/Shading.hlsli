@@ -249,6 +249,12 @@ namespace PBRWater
 	static const uint DebugShoreWave = 13;
 	/// The debug view of the waves' sun shadows (Water.hlsl).
 	static const uint DebugWaveSun = 14;
+	/// Fluid Field (Water.hlsl): the surface's height split by source, and the simulation's height alone.
+	static const uint DebugHeightLayers = 15;
+	static const uint DebugFluidHeight = 16;
+	static const uint DebugFluidDepth = 17;
+	static const uint DebugEdgeTest = 18;
+	static const uint DebugSimBed = 19;
 
 	/**
 	 * Combines the analytic wave normal, the interactive ripples and the vanilla detail normal.
@@ -275,6 +281,18 @@ namespace PBRWater
 		ctx.flow = flowVelocity;
 		WaveResult waves = EvaluateWavesFiltered(waveParam.xyz, ctx, o.simFoam.x);
 		float2 ripple = RippleSlope(waveParam.xyz, ctx.depth);
+		float simHeight = 0.0;  // the sim's surface above the still water, in its area (DisplaceSurface moved the mesh by it)
+#if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+		{
+			// The sim's surface slope at full strength in its area, in place of his ripples
+			float fluidHeight;
+			float2 fluidSlope;
+			FluidSurface(waveParam.xyz, fluidHeight, fluidSlope);
+			const float fluidShare = FluidShare(waveParam.xyz);
+			ripple = lerp(ripple, fluidSlope, fluidShare);
+			simHeight = fluidHeight * fluidShare;
+		}
+#endif
 		float wind = LocalWindSpeed(gust, ctx.fetchMetres);
 		// The vanilla normal maps are the wind's ripples: calm patches turn glassy, gusts ripple the water.
 		// River currents and rain ripple it whatever the wind.
@@ -356,7 +374,9 @@ namespace PBRWater
 			o.levelError = ShoreLevel(absXY) - (waveParam.z + FrameBuffer::CameraPosAdjust.z);
 		o.breakStage = waves.breakStage;
 		o.depth = ctx.depth;
-		o.height = waves.displacement.z;
+		// The water's surface for the per-pixel waterline (Water.hlsl pbrFilm): the sim's surface counts, or the edge
+		// fades out water the sim raised
+		o.height = waves.displacement.z + simHeight;
 		o.elevation = ctx.hasTerrain > 0.5 ? ctx.elevation : -1e6;
 		o.bedSlope = length(ctx.terrainGrad);
 		o.fetchMetres = ctx.fetchMetres;
@@ -365,7 +385,7 @@ namespace PBRWater
 		o.waveNormal = waves.normal;
 		o.breakerFoam = waves.breakerFoam;
 		o.bore = waves.bore;
-		o.crest = waves.crest;
+		o.crest = waves.crest + simHeight;
 		o.waveDir = SafeNormalize(float3(lerp(Params1.xy, ctx.shore.direction, ctx.train), 0.0), float3(Params1.xy, 0.0)).xy;
 		return o;
 	}

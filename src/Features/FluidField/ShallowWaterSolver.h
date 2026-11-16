@@ -65,6 +65,8 @@ namespace FluidFieldSim
 		std::span<const WaterFallCurrent> fallCurrents;
 		float fallReach = 4096.0f;  ///< World units from a falls at which its current has faded out
 		float fallMix = 0.7f;       ///< Share of the rest current the falls take at a falls (the flowmap keeps the rest)
+		float rapidsChaos = 1.0f;   ///< Scales the swirling over rough beds in fast water
+		float refZ = 0.0f;          ///< World height the surface output's height is stored against (FluidFieldSettings::RefZ)
 	};
 
 	/**
@@ -129,12 +131,19 @@ namespace FluidFieldSim
 		}
 
 		/** @brief Writes the surface and flow outputs from the latest state. */
-		void WriteOutputs(ID3D11DeviceContext* context);
+		bool WriteOutputs(ID3D11DeviceContext* context);
 
 		/** @brief (slope x, slope y, height above vanilla, coverage) per texel, in storage order. */
 		ID3D11ShaderResourceView* GetSurfaceSRV() const { return surface.srv.get(); }
 		/** @brief Cell-centred velocity (xy) and foam (z, 0 to about 1.5) per texel, in storage order. */
 		ID3D11ShaderResourceView* GetFlowSRV() const { return flow.srv.get(); }
+		/** @brief The surface output as it was before the last WriteOutputs (motion vectors). */
+		ID3D11ShaderResourceView* GetPreviousSurfaceSRV() const { return previousSurface.srv.get(); }
+
+		/** @brief Debug (stalls the GPU): the latest depth, cell map (bed, vanilla depth), velocity (staggered faces) and
+		 * surface output, each as a tightly packed array of resolution^2 texels in storage order. False if unavailable. */
+		bool ReadState(ID3D11Device* a_device, ID3D11DeviceContext* a_context, std::vector<float>& a_depth, std::vector<float>& a_cellMap,
+			std::vector<float>& a_velocity, std::vector<std::uint16_t>& a_surface) const;
 
 	private:
 		struct Layer
@@ -189,9 +198,11 @@ namespace FluidFieldSim
 			std::uint32_t fallCurrentCount;
 			float fallReach;
 			float fallMix;
-			float pad;
+			float rapidsChaos;
+			float refZ;
+			float pad[3];
 		};
-		static_assert(sizeof(WaterConstants) == 128);
+		static_assert(sizeof(WaterConstants) == 144);
 
 		static Layer CreateLayer(ID3D11Device* device, std::uint32_t resolution, DXGI_FORMAT format, const NameFn& name, const char* label, bool unordered = true);
 		static void UpdateBuffer(ID3D11DeviceContext* context, ID3D11Buffer* buffer, const void* data, std::size_t size);
@@ -221,6 +232,7 @@ namespace FluidFieldSim
 		std::array<Layer, 2> cellMap;   // Ping-pong: the forces pass compares the new bed with the previous one
 		std::array<Layer, 2> foam;      // Ping-pong, `currentFoam` holds the latest
 		Layer surface;
+		Layer previousSurface;
 		Layer flow;
 		Layer map;
 		Layer obstacles;

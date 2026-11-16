@@ -42,10 +42,13 @@ struct FluidFieldShallowWater : Feature
 		bool Enabled = true;
 		float RiverSpeed = 150.0f;           ///< River current at full flowmap strength, world units per second (0: still water)
 		float CurrentPull = 0.25f;           ///< Per-second pull of the water toward the river current; lower lets obstacles shape the flow
-		float Turbulence = 0.4f;             ///< Vorticity confinement: keeps eddies behind obstacles alive (0: off)
+		float Turbulence = 0.4f;             ///< How strongly moving water is stirred into eddies (0: off)
 		float WaveDamping = 0.3f;            ///< Fraction of the water's speed lost per second, as an exponential rate
 		float SurfaceNormalStrength = 1.0f;  ///< How strongly the simulated waves tilt the water's surface normal
 		float FlowDetail = 1.2f;             ///< Strength of the surface detail carried by the simulated flow
+		float RapidsChaos = 0.3f;            ///< Extra swirling where fast water runs over a rough, rocky bed (0: none)
+		bool AdaptiveTessellation = true;    ///< With PBR Water: more triangles where the water changes shape, fewer on flat water
+		uint32_t DebugProbe = 0;             ///< Debug: set non-zero to log the water's numbers where the camera looks once (then cleared)
 		float FoamStrength = 1.0f;           ///< How much foam the flow makes at obstacles, rapids, wakes and splashes (0: none)
 		float WaterTint = 0.5f;              ///< How much the water type's colour tints what is seen through all water (0: vanilla)
 		bool ReplaceVanillaFoam = true;      ///< Hide vanilla's placed foam, splash and spray effects where the water is simulated
@@ -59,8 +62,8 @@ struct FluidFieldShallowWater : Feature
 		bool FarWater = true;                ///< A coarser water level around the near one, so rivers stay simulated further out
 		float FarWaterScale = 8.0f;          ///< Far water width as a multiple of the near width, at the same resolution
 		bool RaycastBed = true;              ///< Find rocks, banks and riverbed meshes under water with Havok rays
-		uint RaysPerFrame = 32;              ///< Most bed rays cast in one frame
-		float RaySpacing = 64.0f;            ///< World units between bed rays
+		uint RaysPerFrame = 64;              ///< Most bed rays cast in one frame
+		float RaySpacing = 36.0f;            ///< World units between bed rays (about 0.5 m)
 		bool MeshCutObstacles = true;        ///< Water-line obstacles from cutting placed meshes at the water height (D15)
 	};
 
@@ -95,6 +98,10 @@ struct FluidFieldShallowWater : Feature
 
 	/** @brief Loaded and enabled. */
 	bool IsActive() const { return loaded && settings.Enabled; }
+	/** @brief PBR Water's displacement reads the simulated surface in the vertex, hull and domain stages: binds it there for one water draw. */
+	void BindForDisplacement(ID3D11DeviceContext* a_context) const;
+	/** @brief Whether a water draw's bounds reach the simulated area (PBR Water then displaces and tessellates it). */
+	bool Covers(const RE::NiBound& a_bound) const;
 
 	/** @brief Water grid placement for the water shader (SharedData::fluidFieldSettings); 16-byte sized. */
 	struct WaterShaderData
@@ -110,9 +117,14 @@ struct FluidFieldShallowWater : Feature
 		uint32_t FarGridRes = 0;
 		float FarCellSize = 0.0f;
 		uint32_t FarEnabled = 0;
-		float Fade = 0.0f;       ///< 0 to 1 over the first moments after a (re)start, so the water eases in
-		uint32_t DebugView = 0;  ///< Unused (0), kept for the layout
-		float farPad = 0.0f;
+		float Fade = 0.0f;          ///< 0 to 1 over the first moments after a (re)start, so the water eases in
+		uint32_t DebugView = 0;     ///< Unused (0), kept for the layout
+		uint32_t AdaptiveTess = 0;  ///< PBR Water refines the mesh where the simulated surface is steep (Tessellation.hlsli)
+		int32_t PrevGridMin[2]{};   ///< Last frame's placement of the surface copies (GetPreviousSurfaceSRV), for motion vectors
+		int32_t PrevFarGridMin[2]{};
+		float RefZ = 0.0f;      ///< World height the surface's height is stored against (half floats keep it precise near it)
+		float PrevRefZ = 0.0f;  ///< RefZ the surface copies were written with
+		float refPad[2]{};
 	};
 	static_assert(sizeof(WaterShaderData) % 16 == 0);
 	/** @brief This frame's water grid placement, or all zero when the water is off. */
@@ -181,5 +193,8 @@ private:
 	WaterShaderData waterShaderData;
 	/** @brief Binds the water surface output for the water shader (t66) when it is valid. */
 	void BindWaterOutputs(ID3D11DeviceContext* a_context) const;
+	std::array<ID3D11ShaderResourceView*, 4> WaterOutputSRVs() const;
+	/** @brief Debug: logs the near water's numbers around where the camera looks (DebugProbe). */
+	void LogProbe(ID3D11DeviceContext* a_context);
 	int32_t meshWindowCentre[2]{ INT32_MIN, INT32_MIN };
 };

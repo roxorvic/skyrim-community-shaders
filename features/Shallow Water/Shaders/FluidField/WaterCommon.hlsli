@@ -41,7 +41,9 @@ cbuffer WaterCB : register(b1)
 	uint FallCurrentCount;  // Entries in FallCurrents (WaterForcesCS.hlsl)
 	float FallReach;        // World units from a falls at which its current has faded out
 	float FallMix;          // Share of the rest current the falls take at a falls; the flowmap keeps the rest
-	float WaterPad;
+	float RapidsChaos;      // Scales the swirling over rough beds in fast water (WaterForcesCS)
+	float RefZ;             // World height the surface output's height is stored against (WaterOutputCS)
+	float3 WaterPad;
 };
 
 static const float NO_WATER = -1.0e8;
@@ -106,6 +108,25 @@ float SampleRiverFlowScale(float2 worldPos)
 bool HasWater(float surface)
 {
 	return surface > NO_WATER * 0.5;
+}
+
+/** @brief Vanilla's water level near a world position (the mean of the water map's points with water around it), or NO_WATER. */
+float NearbyVanillaLevel(float2 worldPos)
+{
+	int2 i = int2(floor(worldPos / MapSpacing));
+	float sum = 0.0, count = 0.0;
+	[unroll] for (int y = -1; y <= 2; y++)
+	{
+		[unroll] for (int x = -1; x <= 2; x++)
+		{
+			float level = LoadMapLattice(i + int2(x, y)).y;
+			if (HasWater(level)) {
+				sum += level;
+				count += 1.0;
+			}
+		}
+	}
+	return count > 0.0 ? sum / count : NO_WATER;
 }
 
 /** @brief Bed and vanilla surface at a world position. The surface is interpolated only where all four corners have water. */

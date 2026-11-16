@@ -263,7 +263,7 @@ namespace PBRWater
 			// straight-edged, right-angled terraces along the LAND grid.
 			float twist = z00 + z11 - z10 - z01;
 			float2 g = float2(1.0 - f.x, f.y);
-			float alongMain = min(f.x, f.y) * (1.0 - max(f.x, f.y));  // split along 00-11
+			float alongMain = min(f.x, f.y) * (1.0 - max(f.x, f.y));   // split along 00-11
 			float alongCross = min(g.x, g.y) * (1.0 - max(g.x, g.y));  // split along 10-01
 			ceiling = lerp(Terrain1.x, Terrain1.y, bilinear + max(twist * alongMain, -twist * alongCross));
 		}
@@ -488,6 +488,30 @@ namespace PBRWater
 		return smoothstep(2.0, 12.0, Params0.y) * dot(Params1.xy, direction);
 	}
 
+#if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+	// Guards against bad data only: the sim's surface is shown as it is
+	static const float FluidHeightLimit = 140.0;
+
+	/// Fluid Field's share of the water here (FluidField::AreaWeight): its surface replaces his ripples in its area.
+	float FluidShare(float3 positionWS)
+	{
+		return FluidField::AreaWeight(positionWS.xy + FrameBuffer::CameraPosAdjust.xy);
+	}
+
+	/// Fluid Field's water surface: its height above this draw's own still plane at the (undisplaced) position (units), and
+	/// its slope; 0 outside the simulation.
+	void FluidSurface(float3 positionWS, out float height, out float2 slope)
+	{
+		float4 surface;
+		const float3 absPos = positionWS + FrameBuffer::CameraPosAdjust.xyz;
+		const bool simulated = FluidField::SampleSurface(absPos, surface);
+		height = simulated ? clamp(surface.z - absPos.z, -FluidHeightLimit, FluidHeightLimit) : 0.0;
+		slope = simulated ? surface.xy : 0.0;
+	}
+#else
+	static const float FluidHeightLimit = 0.0;
+#endif
+
 	WaveContext BuildWaveContext(float3 positionWS, float damping)
 	{
 		WaveContext ctx;
@@ -513,6 +537,15 @@ namespace PBRWater
 			ctx.hasTerrain = 1.0;
 		}
 		ctx.depth = ctx.hasTerrain > 0.5 ? max(-ctx.elevation, 0.0) : 1e6;
+#if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+		{
+			// The sim knows the rocks and placed meshes his terrain does not: over a rock's dry top the depth is 0, so no
+			// wave rises through it
+			const float fluidShare = FluidShare(positionWS);
+			if (fluidShare > 0.0)
+				ctx.depth = lerp(min(ctx.depth, 1e4), FluidField::SampleFlowOutput(absPos.xy).w, fluidShare);
+		}
+#endif
 		ctx.shore = SampleShore(absPos.xy);
 		ctx.onshoreWind = ShoreOnshoreWind(ctx.shore.direction);
 
@@ -873,13 +906,13 @@ namespace PBRWater
 	/// One wave of a train, as a point on it sees it.
 	struct ShoreWave
 	{
-		float phase;       // where this point is on the wave: 0 the trough ahead of it, 1 the trough behind
-		float index;       // the wave's number
-		float stage;       // its life, 0 deep water, 0.5 reaching its limit, 1 the bore at the shore
-		float height;      // trough to crest (m)
-		float wavelength;  // here (units)
-		float whelp;       // height (m) of the crests trailing the wave's front (ShoreWhelps); 0 where it has none
-		float whelpLength; // their wavelength (units)
+		float phase;        // where this point is on the wave: 0 the trough ahead of it, 1 the trough behind
+		float index;        // the wave's number
+		float stage;        // its life, 0 deep water, 0.5 reaching its limit, 1 the bore at the shore
+		float height;       // trough to crest (m)
+		float wavelength;   // here (units)
+		float whelp;        // height (m) of the crests trailing the wave's front (ShoreWhelps); 0 where it has none
+		float whelpLength;  // their wavelength (units)
 	};
 
 	/// Height (m) the sea's dominant waves arrive with from deep water, before shoaling. Mirrors the CPU's ShoreDeepHeight.
@@ -1455,7 +1488,7 @@ namespace PBRWater
 		float3 displacement;
 		float3 previous;
 		float dzdx, dzdy, dxdx, dydy, dxdy;
-		float foam;  // the cascades' foam so far, weighted and offset (FftFoam)
+		float foam;           // the cascades' foam so far, weighted and offset (FftFoam)
 		float seaFoam;        // the same with the sea's weights before the shore train's hand-over (BreakerFoamDrawn)
 		float seaFoamWeight;  // the sum of those weights
 		float slopeVariance;
@@ -2073,7 +2106,7 @@ namespace PBRWater
 	float DisplacementLimit()
 	{
 		float shoreWaves = 2.0 * (max(Shore1.z, 0.0) + max(Shore1.w, 0.0));
-		return 2.0 * max(Params2.z, 0.0) + shoreWaves * max(1.0, Tune4.y / 1.55) + max(Shore0.w, 0.0) + 4.0 * max(Ripple1.x, 0.0) + 1.0;
+		return 2.0 * max(Params2.z, 0.0) + shoreWaves * max(1.0, Tune4.y / 1.55) + max(Shore0.w, 0.0) + 4.0 * max(Ripple1.x, 0.0) + FluidHeightLimit + 1.0;
 	}
 
 	/**
@@ -2173,8 +2206,23 @@ namespace PBRWater
 		WaveResult now = EvaluateWaves(positionWS, ctx, spacing, motion);
 
 		float rippleFade = damping * RippleDepthFade(ctx.depth);
+#if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+		// In the sim's area the water sits on the sim's surface, as it is (not damped or depth-faded: the sim knows the
+		// bed), and his ripples give way to it
+		float fluidShare = FluidShare(positionWS);
+		rippleFade *= 1.0 - fluidShare;
+#endif
 		o.current = now.displacement + RippleDisplacement(positionWS, false) * rippleFade;
 		o.previous = motion ? now.previousDisplacement + RippleDisplacement(positionWS, true) * rippleFade : 0.0;
+#if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+		float fluidHeight;
+		float2 fluidSlope;
+		FluidSurface(positionWS, fluidHeight, fluidSlope);
+		o.current.z += fluidHeight * fluidShare;
+		// Last frame's surface, so the water's motion vectors follow the sim (only the stencil pass asks)
+		if (motion)
+			o.previous.z += clamp(FluidField::PreviousHeight(positionWS + FrameBuffer::CameraPosAdjust.xyz) - (positionWS.z + FrameBuffer::CameraPosAdjust.z), -FluidHeightLimit, FluidHeightLimit) * fluidShare;
+#endif
 
 		// The swash: each breaking wave runs up the beach above the still water as a thin sheet and drains back.
 		float2 sheet = SwashSheet(positionWS, ctx);

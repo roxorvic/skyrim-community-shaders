@@ -8,10 +8,13 @@
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
 
+#include "PBRWater.h"
 #include "UnifiedWater.h"
 #include "UnifiedWater/Flowmap.h"
 
+#include <DirectXPackedVector.h>
 #include <bit>
+#include <vector>
 
 #define I18N_KEY_PREFIX "feature.fluid_field_shallow_water."
 
@@ -24,6 +27,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	WaveDamping,
 	SurfaceNormalStrength,
 	FlowDetail,
+	RapidsChaos,
+	AdaptiveTessellation,
+	DebugProbe,
 	FoamStrength,
 	WaterTint,
 	ReplaceVanillaFoam,
@@ -71,6 +77,10 @@ void FluidFieldShallowWater::DrawSettings()
 	tooltip(T(TKEY("surface_normal_strength_tooltip"), "How strongly the simulated waves tilt the water's surface. 0 hides them; the simulation keeps running."));
 	ImGui::SliderFloat(T(TKEY("flow_detail"), "Flow Detail"), &settings.FlowDetail, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	tooltip(T(TKEY("flow_detail_tooltip"), "Surface detail that moves with the simulated flow, so currents and eddies show on the water."));
+	ImGui::SliderFloat(T(TKEY("rapids_chaos"), "Rapids Chaos"), &settings.RapidsChaos, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	tooltip(T(TKEY("rapids_chaos_tooltip"), "Extra boils and swirls where fast water runs over a rough, rocky bed."));
+	ImGui::Checkbox(T(TKEY("adaptive_tessellation"), "Adaptive Tessellation"), &settings.AdaptiveTessellation);
+	tooltip(T(TKEY("adaptive_tessellation_tooltip"), "With PBR Water: more triangles where the simulated water changes shape (around rocks, at fronts and drops), fewer on flat water."));
 	ImGui::SliderFloat(T(TKEY("foam_strength"), "Foam"), &settings.FoamStrength, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	tooltip(T(TKEY("foam_strength_tooltip"), "Foam made by the simulated water where it hits obstacles, breaks over rapids, and around wakes, splashes and waterfalls. It drifts with the flow and fades."));
 	ImGui::SliderFloat(T(TKEY("water_tint"), "Water Tint"), &settings.WaterTint, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -150,6 +160,7 @@ FluidFieldShallowWater::Settings FluidFieldShallowWater::Sanitize(Settings a_set
 	a_settings.CurrentPull = std::isfinite(a_settings.CurrentPull) ? std::clamp(a_settings.CurrentPull, 0.0f, 2.0f) : defaults.CurrentPull;
 	a_settings.Turbulence = std::isfinite(a_settings.Turbulence) ? std::clamp(a_settings.Turbulence, 0.0f, 5.0f) : defaults.Turbulence;
 	a_settings.FlowDetail = std::isfinite(a_settings.FlowDetail) ? std::clamp(a_settings.FlowDetail, 0.0f, 2.0f) : defaults.FlowDetail;
+	a_settings.RapidsChaos = std::isfinite(a_settings.RapidsChaos) ? std::clamp(a_settings.RapidsChaos, 0.0f, 3.0f) : defaults.RapidsChaos;
 	a_settings.FoamStrength = std::isfinite(a_settings.FoamStrength) ? std::clamp(a_settings.FoamStrength, 0.0f, 3.0f) : defaults.FoamStrength;
 	a_settings.WaterTint = std::isfinite(a_settings.WaterTint) ? std::clamp(a_settings.WaterTint, 0.0f, 1.0f) : defaults.WaterTint;
 	return a_settings;
@@ -292,6 +303,10 @@ void FluidFieldShallowWater::Prepass()
 		waterShaderData.FarEnabled = 0;
 	}
 	BindWaterOutputs(context);
+	if (settings.DebugProbe != 0) {
+		settings.DebugProbe = 0;
+		LogProbe(context);
+	}
 	{
 		// D22: the falls over the whole simulated area, far level included
 		const float simulated = 0.5f * (settings.FarWater ? settings.WaterSize * settings.FarWaterScale : settings.WaterSize);
@@ -357,6 +372,11 @@ float FluidFieldShallowWater::GetObstacleSpacing() const
 	return settings.RaySpacing / static_cast<float>(FluidFieldSim::BedRaycasts::REFINE * GetObstacleRatio());
 }
 
+/** @brief Fine points beyond a cut mesh's surface its collision hull is taken to reach (bed-ray mesh hits there are dropped). */
+constexpr int32_t HULL_REACH = 6;
+/** @brief World units above the water a solid point's mesh skin must stand to be its bed (else the solid cap is). */
+constexpr float SOLID_SKIN = 1.0f;
+
 std::array<float, FluidFieldSim::MeshCut::BLOCK * FluidFieldSim::MeshCut::BLOCK * 4> FluidFieldShallowWater::ComposeObstacleBlock(int32_t a_originX, int32_t a_originY) const
 {
 	constexpr int32_t n = FluidFieldSim::MeshCut::BLOCK;
@@ -371,6 +391,14 @@ std::array<float, FluidFieldSim::MeshCut::BLOCK * FluidFieldSim::MeshCut::BLOCK 
 			texel[2] = static_cast<float>(fy);
 			float top = 0.0f;
 			if (settings.MeshCutObstacles && meshCut.IsSolid(fx, fy, top)) {
+				// The rock's real skin where it stands above the water, not the cap: the level a dry cell carries is held
+				// under its bed, and at the cap a lid of water stood over every low rock's flank
+				float skin;
+				const bool hasSkin = meshCut.GetSurface(fx, fy, skin) && skin > top - FluidFieldSim::MeshCut::SOLID_RISE + SOLID_SKIN;
+				texel[0] = hasSkin ? skin : top;
+				texel[3] = 2.0f;
+			} else if (settings.MeshCutObstacles && meshCut.GetSurface(fx, fy, top)) {
+				// The visible mesh's surface, not its collision hull's
 				texel[0] = top;
 				texel[3] = 2.0f;
 			} else if (settings.RaycastBed) {
@@ -378,6 +406,9 @@ std::array<float, FluidFieldSim::MeshCut::BLOCK * FluidFieldSim::MeshCut::BLOCK 
 				const auto rx = static_cast<int32_t>(std::lround(static_cast<double>(fx) / ratio));
 				const auto ry = static_cast<int32_t>(std::lround(static_cast<double>(fy) / ratio));
 				bedRays.FindFine(rx, ry, texel[0], texel[3]);
+				// A mesh hit just outside a cut mesh's surface is its hull reaching past it: the landscape bed stands there
+				if (texel[3] > 1.5f && settings.MeshCutObstacles && meshCut.NearSurface(fx, fy, HULL_REACH))
+					texel[3] = 0.0f;
 			}
 		}
 	}
@@ -473,17 +504,260 @@ FluidFieldShallowWater::WaterShaderData FluidFieldShallowWater::GetCommonBufferD
 	WaterShaderData data = waterShaderData;
 	data.WaterTint = settings.WaterTint;
 	data.Fade = waterFade;
+	data.AdaptiveTess = settings.AdaptiveTessellation ? 1u : 0u;
 	return data;
+}
+
+std::array<ID3D11ShaderResourceView*, 4> FluidFieldShallowWater::WaterOutputSRVs() const
+{
+	const bool hasFar = waterShaderData.FarEnabled != 0;
+	return { nearWater.solver.GetSurfaceSRV(), nearWater.solver.GetFlowSRV(), hasFar ? farWater.solver.GetSurfaceSRV() : nullptr,
+		hasFar ? farWater.solver.GetFlowSRV() : nullptr };
 }
 
 void FluidFieldShallowWater::BindWaterOutputs(ID3D11DeviceContext* a_context) const
 {
 	if (!waterShaderData.Enabled)
 		return;
-	const bool hasFar = waterShaderData.FarEnabled != 0;
-	ID3D11ShaderResourceView* srvs[] = { nearWater.solver.GetSurfaceSRV(), nearWater.solver.GetFlowSRV(),
-		hasFar ? farWater.solver.GetSurfaceSRV() : nullptr, hasFar ? farWater.solver.GetFlowSRV() : nullptr };
-	a_context->PSSetShaderResources(66, 4, srvs);
+	a_context->PSSetShaderResources(66, 4, WaterOutputSRVs().data());
+}
+
+void FluidFieldShallowWater::LogProbe(ID3D11DeviceContext* a_context)
+{
+	std::vector<float> depth, cellMap, velocity;
+	std::vector<std::uint16_t> surface;
+	if (!waterShaderData.Enabled || !nearWater.solver.ReadState(globals::d3d::device, a_context, depth, cellMap, velocity, surface)) {
+		logger::info("[Fluid Field] Probe: no near water to read");
+		return;
+	}
+	const int res = static_cast<int>(settings.WaterResolution);
+	const float cell = GetWaterCellSize();
+	const int mask = res - 1;
+	const auto at = [&](int lx, int ly) { return std::size_t((ly + nearWater.gridMin[1]) & mask) * res + ((lx + nearWater.gridMin[0]) & mask); };
+	const auto half = [](std::uint16_t h) { return DirectX::PackedVector::XMConvertHalfToFloat(h); };
+	constexpr float WET = 0.5f;  // world units, about WetThreshold
+
+	// Where the camera looks: march its ray until it meets vanilla's water
+	auto* camera = RE::PlayerCamera::GetSingleton();
+	if (!camera || !camera->cameraRoot)
+		return;
+	const auto& world = camera->cameraRoot->world;
+	const RE::NiPoint3 eye = world.translate;
+	// Bed sources along four lines out from under the camera, 0.25 m steps: which one stands too high near rocks
+	{
+		const auto& landscape = FluidFieldSim::Field::Get().GetLandscape();
+		const float fine = GetObstacleSpacing();
+		const int32_t ratio = GetObstacleRatio();
+		const char* dirs[] = { "east", "west", "north", "south" };
+		const float dx[] = { 1, -1, 0, 0 }, dy[] = { 0, 0, 1, -1 };
+		for (int d = 0; d < 4; ++d) {
+			std::string line;
+			for (int step = 0; step <= 12; ++step) {
+				const float x = eye.x + dx[d] * step * 17.5f, y = eye.y + dy[d] * step * 17.5f;
+				float land = -1e9f;
+				landscape.SampleHeight(x, y, land);
+				const auto fx = static_cast<int32_t>(std::lround(x / fine)), fy = static_cast<int32_t>(std::lround(y / fine));
+				float top = 0.0f, surf = 0.0f, ray = 0.0f, kind = 0.0f;
+				const bool solid = meshCut.IsSolid(fx, fy, top);
+				const bool hasSurf = meshCut.GetSurface(fx, fy, surf);
+				bedRays.FindFine(static_cast<int32_t>(std::lround(static_cast<double>(fx) / ratio)), static_cast<int32_t>(std::lround(static_cast<double>(fy) / ratio)), ray, kind);
+				const int lx = static_cast<int>(std::floor(x / cell)) - nearWater.gridMin[0], ly = static_cast<int>(std::floor(y / cell)) - nearWater.gridMin[1];
+				std::string sim = "-";
+				if (lx >= 0 && ly >= 0 && lx < res && ly < res) {
+					const std::size_t k = at(lx, ly);
+					sim = std::format("bed {:.0f} d {:.0f} v {:.0f}", cellMap[2 * k], depth[k], cellMap[2 * k] + cellMap[2 * k + 1]);
+				}
+				line += std::format(" | {:.2f}m land {:.0f} ray {}{:.0f} mesh {} {}", step * 0.25f, land, kind > 1.5f ? "M" : kind > 0.5f ? "L" :
+																																			"-",
+					ray,
+					solid ? "SOLID" : hasSurf ? std::format("{:.0f}", surf) :
+												std::string("-"),
+					sim);
+			}
+			logger::info("[Fluid Field] Probe bed {}:{}", dirs[d], line);
+		}
+	}
+	const RE::NiPoint3 forward = world.rotate * RE::NiPoint3(0.0f, 1.0f, 0.0f);
+	int hx = -1, hy = -1;
+	for (float t = 0.0f; t < 8000.0f; t += 4.0f) {
+		const RE::NiPoint3 p = eye + forward * t;
+		const int lx = static_cast<int>(std::floor(p.x / cell)) - nearWater.gridMin[0];
+		const int ly = static_cast<int>(std::floor(p.y / cell)) - nearWater.gridMin[1];
+		if (lx < 0 || ly < 0 || lx >= res || ly >= res)
+			continue;
+		const std::size_t k = at(lx, ly);
+		if (cellMap[2 * k + 1] > WET && p.z <= cellMap[2 * k] + cellMap[2 * k + 1]) {
+			hx = lx;
+			hy = ly;
+			break;
+		}
+	}
+	if (hx < 0) {
+		logger::info("[Fluid Field] Probe: the camera does not look at simulated water");
+		return;
+	}
+	// Within 8 m of that point: per band of distance to the nearest dry cell, the water above vanilla, the displayed
+	// height and the speed, and the highest points
+	const int window = static_cast<int>(std::lround(560.0f / cell));
+	const int reach = 24;  // cells searched for the nearest dry one
+	struct Band
+	{
+		double rise = 0, shown = 0, speed = 0;
+		int count = 0, clamped = 0;
+	};
+	std::array<Band, 6> bands;  // 0-0.25 m, -0.5, -1, -2, -3, farther
+	const float edges[] = { 0.25f, 0.5f, 1.0f, 2.0f, 3.0f };
+	float maxRise = -1e9f, maxShown = -1e9f, minRise = 1e9f;
+	int maxX = 0, maxY = 0, wetCount = 0, dryCount = 0, climbed = 0, climbedTall = 0;
+	float climbedMax = 0.0f;
+	for (int dy = -window; dy <= window; ++dy) {
+		for (int dx = -window; dx <= window; ++dx) {
+			const int lx = hx + dx, ly = hy + dy;
+			if (lx < 1 || ly < 1 || lx >= res - 1 || ly >= res - 1)
+				continue;
+			const std::size_t k = at(lx, ly);
+			if (depth[k] <= WET) {
+				++dryCount;
+				continue;
+			}
+			if (cellMap[2 * k + 1] <= WET) {
+				// Wet where vanilla is dry (climbed onto a bank or rock): how high it is shown there
+				const float shownHere = half(surface[4 * k + 2]) + waterShaderData.RefZ - (cellMap[2 * at(hx, hy)] + cellMap[2 * at(hx, hy) + 1]);
+				++climbed;
+				climbedTall += shownHere > 31.5f;
+				climbedMax = std::max(climbedMax, shownHere);
+				continue;
+			}
+			++wetCount;
+			int nearest = reach + 1;
+			for (int sy = -reach; sy <= reach && nearest > 1; ++sy) {
+				for (int sx = -reach; sx <= reach; ++sx) {
+					const int d = std::max(std::abs(sx), std::abs(sy));
+					if (d < nearest && lx + sx >= 0 && ly + sy >= 0 && lx + sx < res && ly + sy < res && depth[at(lx + sx, ly + sy)] <= WET)
+						nearest = d;
+				}
+			}
+			const float metres = nearest * cell / 70.0f;
+			int b = 0;
+			while (b < 5 && metres > edges[b])
+				++b;
+			const float rise = depth[k] - cellMap[2 * k + 1];  // the sim's surface above vanilla's, units
+			const float shown = half(surface[4 * k + 2]) + waterShaderData.RefZ - (cellMap[2 * k] + cellMap[2 * k + 1]);
+			const float u = 0.5f * (velocity[2 * k] + velocity[2 * at(lx + 1, ly)]), v = 0.5f * (velocity[2 * k + 1] + velocity[2 * at(lx, ly + 1) + 1]);
+			auto& band = bands[b];
+			band.rise += rise;
+			band.shown += shown;
+			band.speed += std::sqrt(u * u + v * v);
+			band.clamped += std::abs(shown) >= 31.5f;
+			++band.count;
+			if (rise > maxRise) {
+				maxRise = rise;
+				maxX = dx;
+				maxY = dy;
+			}
+			minRise = std::min(minRise, rise);
+			maxShown = std::max(maxShown, shown);
+		}
+	}
+	const float u2m = 1.0f / 70.0f;
+	logger::info("[Fluid Field] Probe at ({:.0f}, {:.0f}): {} wet, {} dry cells within {:.1f} m; sim above vanilla {:.2f} to {:.2f} m (highest {:.1f} m east, {:.1f} m north of the probe); shown at most {:.2f} m",
+		(hx + nearWater.gridMin[0] + 0.5f) * cell, (hy + nearWater.gridMin[1] + 0.5f) * cell, wetCount, dryCount, window * cell * u2m, minRise * u2m, maxRise * u2m,
+		maxX * cell * u2m, maxY * cell * u2m, maxShown * u2m);
+	// Which way the current runs at vanilla's water steps (a river steps down from plane to plane): the flow 1.7-5 m either
+	// side of each step, on the same plane (flat there, so gravity does not drive it: the flowmap's current does), against
+	// the downhill direction across it. Settles the flowmap decode's sign.
+	{
+		int steps = 0, downhill = 0, uphill = 0;
+		double alongSum = 0.0;
+		const auto level = [&](int lx, int ly, float& out) {
+			const std::size_t k = at(lx, ly);
+			if (cellMap[2 * k + 1] <= WET)
+				return false;
+			out = cellMap[2 * k] + cellMap[2 * k + 1];
+			return true;
+		};
+		for (int axis = 0; axis < 2; ++axis) {
+			for (int ly = 8; ly < res - 8; ++ly) {
+				for (int lx = 8; lx < res - 8; ++lx) {
+					const int nx = lx + (axis == 0), ny = ly + (axis == 1);
+					float a = 0.0f, b = 0.0f;
+					if (!level(lx, ly, a) || !level(nx, ny, b) || std::abs(a - b) < 4.0f)
+						continue;
+					const float down = a > b ? 1.0f : -1.0f;  // +1: downhill toward +axis
+					double flowSum = 0.0;
+					int n = 0;
+					for (int d = 20; d <= 60; d += 4) {
+						for (int side = -1; side <= 1; side += 2) {
+							const int sx = side < 0 ? lx - (axis == 0) * d : nx + (axis == 0) * d;
+							const int sy = side < 0 ? ly - (axis == 1) * d : ny + (axis == 1) * d;
+							if (sx < 0 || sy < 0 || sx >= res || sy >= res)
+								continue;
+							float there = 0.0f;
+							const std::size_t k = at(sx, sy);
+							if (level(sx, sy, there) && std::abs(there - (side < 0 ? a : b)) < 1.0f && depth[k] > WET) {
+								flowSum += velocity[2 * k + axis];
+								++n;
+							}
+						}
+					}
+					if (n < 4)
+						continue;
+					const double along = flowSum / n * down;
+					++steps;
+					alongSum += along;
+					if (along > 5.0)
+						++downhill;
+					else if (along < -5.0)
+						++uphill;
+				}
+			}
+		}
+		logger::info("[Fluid Field] Probe flow at vanilla water steps: {} steps, flow runs downhill at {}, uphill at {}, mean {:+.2f} m/s along the downhill direction",
+			steps, downhill, uphill, steps ? alongSum / steps / 70.0 : 0.0);
+	}
+	logger::info("[Fluid Field] Probe climbed cells (wet where vanilla is dry): {}, shown over 0.45 m at {}, highest {:.2f} m", climbed, climbedTall, climbedMax / 70.0f);
+	const char* names[] = { "0-0.25 m", "0.25-0.5 m", "0.5-1 m", "1-2 m", "2-3 m", ">3 m" };
+	for (int b = 0; b < 6; ++b) {
+		const auto& band = bands[b];
+		if (band.count)
+			logger::info("[Fluid Field] Probe   {:>10} from dry: {:5} cells, sim above vanilla {:+.3f} m, shown {:+.3f} m ({:.0f}% at the limit), speed {:.2f} m/s",
+				names[b], band.count, band.rise / band.count * u2m, band.shown / band.count * u2m, 100.0 * band.clamped / band.count, band.speed / band.count * u2m);
+	}
+}
+
+bool FluidFieldShallowWater::Covers(const RE::NiBound& a_bound) const
+{
+	if (!IsActive() || !waterShaderData.Enabled)
+		return false;
+	const auto overlaps = [&](const int32_t a_gridMin[2], uint32_t a_res, float a_cell) {
+		const float x0 = a_gridMin[0] * a_cell, y0 = a_gridMin[1] * a_cell, size = a_res * a_cell;
+		return a_bound.center.x + a_bound.radius > x0 && a_bound.center.x - a_bound.radius < x0 + size &&
+		       a_bound.center.y + a_bound.radius > y0 && a_bound.center.y - a_bound.radius < y0 + size;
+	};
+	return overlaps(waterShaderData.GridMin, waterShaderData.GridRes, waterShaderData.CellSize) ||
+	       (waterShaderData.FarEnabled && overlaps(waterShaderData.FarGridMin, waterShaderData.FarGridRes, waterShaderData.FarCellSize));
+}
+
+void FluidFieldShallowWater::BindForDisplacement(ID3D11DeviceContext* a_context) const
+{
+	if (!loaded)
+		return;
+	// Always the shared (timer) and feature buffers: the feature buffer's Enabled flag tells the shader whether to read the
+	// surface, and b5/b6 may hold another feature's buffers in these stages otherwise
+	ID3D11Buffer* buffers[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
+	a_context->VSSetConstantBuffers(5, 2, buffers);
+	a_context->HSSetConstantBuffers(5, 2, buffers);
+	a_context->DSSetConstantBuffers(5, 2, buffers);
+	if (!waterShaderData.Enabled)
+		return;
+	const auto srvs = WaterOutputSRVs();
+	a_context->VSSetShaderResources(66, 4, srvs.data());
+	a_context->HSSetShaderResources(66, 4, srvs.data());
+	a_context->DSSetShaderResources(66, 4, srvs.data());
+	// Last frame's surfaces, for the stencil pass's motion vectors
+	ID3D11ShaderResourceView* previous[] = { nearWater.solver.GetPreviousSurfaceSRV(), waterShaderData.FarEnabled ? farWater.solver.GetPreviousSurfaceSRV() : nullptr };
+	a_context->VSSetShaderResources(70, 2, previous);
+	a_context->DSSetShaderResources(70, 2, previous);
 }
 
 void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLevel& a_level, bool a_near, uint32_t a_resolution, float a_size, const RE::NiPoint3& a_playerPos, float a_deltaTime)
@@ -557,6 +831,10 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 	params.fallCurrents = fallCurrents;
 	params.fallReach = settings.FallReach;
 	params.fallMix = settings.FallMix;
+	params.rapidsChaos = settings.RapidsChaos;
+	// Snapped, so it changes rarely: last frame's copies are read against the RefZ they were written with
+	const float refZ = 256.0f * std::round(a_playerPos.z / 256.0f);
+	params.refZ = refZ;
 	if (!a_near) {
 		// Far cells are FarWaterScale times wider, so sources cover more water: less foam, held less
 		params.foamStrength *= FAR_FOAM_SCALE;
@@ -616,7 +894,17 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 		levelSolver.Step(a_context, grid, params, emitters, wrap);
 
 	globals::profiler->BeginPass(a_near ? "FluidFieldShallowWater::Water Output" : "FluidFieldShallowWater::Far Water Output");
-	levelSolver.WriteOutputs(a_context);
+	const bool wrote = levelSolver.WriteOutputs(a_context);
+	// The copy holds last frame's surface where last frame's placement put it; without a new write it holds this frame's
+	int32_t* previous = a_near ? waterShaderData.PrevGridMin : waterShaderData.PrevFarGridMin;
+	const int32_t* placed = a_near ? waterShaderData.GridMin : waterShaderData.FarGridMin;
+	const bool hadOutput = a_near ? waterShaderData.Enabled != 0 : waterShaderData.FarEnabled != 0;
+	previous[0] = wrote && hadOutput ? placed[0] : a_gridMin[0];
+	previous[1] = wrote && hadOutput ? placed[1] : a_gridMin[1];
+	if (a_near) {
+		waterShaderData.PrevRefZ = wrote && hadOutput ? waterShaderData.RefZ : refZ;
+		waterShaderData.RefZ = refZ;
+	}
 	if (a_near) {
 		waterShaderData.GridMin[0] = a_gridMin[0];
 		waterShaderData.GridMin[1] = a_gridMin[1];

@@ -529,10 +529,15 @@ namespace SharedData
 		int2 FarGridMin;   // The far water level's placement (coarser, wider)
 		uint FarGridRes;
 		float FarCellSize;
-		uint FarEnabled;  // The far level has valid outputs this frame
-		float Fade;       // 0 to 1 over the first moments after a (re)start, so the water eases in
-		uint DebugView;   // Showcase view on the water: 0 off, 1 flow, 2 foam, 3 surface height
-		float farPad;
+		uint FarEnabled;    // The far level has valid outputs this frame
+		float Fade;         // 0 to 1 over the first moments after a (re)start, so the water eases in
+		uint DebugView;     // Showcase view on the water: 0 off, 1 flow, 2 foam, 3 surface height
+		uint AdaptiveTess;  // PBR Water refines the mesh where the simulated surface is steep (Tessellation.hlsli)
+		int2 PrevGridMin;   // Last frame's placement of the surface copies (t70, t71), for motion vectors
+		int2 PrevFarGridMin;
+		float RefZ;      // World height the surface's height is stored against
+		float PrevRefZ;  // RefZ the surface copies (t70, t71) were written with
+		float2 refPad;
 	};
 
 	cbuffer FeatureData : register(b6)

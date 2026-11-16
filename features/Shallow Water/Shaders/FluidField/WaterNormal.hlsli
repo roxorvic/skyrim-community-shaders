@@ -4,14 +4,10 @@
 // Near fades into far, far into vanilla.
 
 #include "FluidField/FoamLook.hlsli"
+#include "FluidField/WaterSurface.hlsli"
 
 namespace FluidField
 {
-	Texture2D<float4> WaterSurfaceTex : register(t66);
-	Texture2D<float4> WaterFlowTex : register(t67);
-	Texture2D<float4> FarSurfaceTex : register(t68);
-	Texture2D<float4> FarFlowTex : register(t69);
-
 	/** World units one tile of the flow-carried detail normals covers. */
 	static const float FLOW_DETAIL_TILE = 384.0;
 	/** Seconds between restarts of each detail phase; short so the detail never stretches far. */
@@ -20,54 +16,6 @@ namespace FluidField
 	static const float FLOW_DETAIL_MAX_DRIFT = 120.0;
 	/** Flow speed (world units/s) at which the detail reaches full strength. */
 	static const float FLOW_DETAIL_FULL_SPEED = 160.0;
-	/** Share of the near level's width over which it hands over to the far level (matches WaterOutputCS). */
-	static const float NEAR_FADE = 0.15;
-
-	/** One water level's placement on the world. */
-	struct Level
-	{
-		int2 GridMin;
-		int GridRes;
-		float CellSize;
-		bool Enabled;
-	};
-
-	Level NearLevel()
-	{
-		Level level;
-		level.GridMin = SharedData::fluidFieldSettings.GridMin;
-		level.GridRes = int(SharedData::fluidFieldSettings.GridRes);
-		level.CellSize = SharedData::fluidFieldSettings.CellSize;
-		level.Enabled = SharedData::fluidFieldSettings.Enabled != 0;
-		return level;
-	}
-
-	Level FarLevel()
-	{
-		Level level;
-		level.GridMin = SharedData::fluidFieldSettings.FarGridMin;
-		level.GridRes = int(SharedData::fluidFieldSettings.FarGridRes);
-		level.CellSize = SharedData::fluidFieldSettings.FarCellSize;
-		level.Enabled = SharedData::fluidFieldSettings.Enabled != 0 && SharedData::fluidFieldSettings.FarEnabled != 0;
-		return level;
-	}
-
-	/** A world position in a level's cell coordinates (texel centres at integers); false outside it. */
-	bool ToCell(Level a_level, float2 a_worldXY, out float2 a_cellPosition)
-	{
-		a_cellPosition = a_worldXY / max(a_level.CellSize, 1e-3) - 0.5;
-		const int2 logical = int2(floor(a_cellPosition)) - a_level.GridMin;
-		return a_level.Enabled && all(logical >= 0) && all(logical < a_level.GridRes - 1);
-	}
-
-	float4 BilinearSurface(Texture2D<float4> a_tex, Level a_level, float2 a_cellPosition)
-	{
-		const int mask = a_level.GridRes - 1;
-		const int2 c = int2(floor(a_cellPosition));
-		const float2 t = a_cellPosition - float2(c);
-		return lerp(lerp(a_tex.Load(int3(c & mask, 0)), a_tex.Load(int3((c + int2(1, 0)) & mask, 0)), t.x),
-			lerp(a_tex.Load(int3((c + int2(0, 1)) & mask, 0)), a_tex.Load(int3((c + int2(1, 1)) & mask, 0)), t.x), t.y);
-	}
 
 	/**
 	 * D176: BilinearFlow with foam (z) carried from wet corners into dry ones; blending toward a dry corner's zero left a
@@ -92,33 +40,6 @@ namespace FluidField
 		float4 result = lerp(lerp(f[0], f[1], t.x), lerp(f[2], f[3], t.x), t.y);
 		result.z *= smoothstep(0.0, 0.35, saturate(lerp(lerp(wet[0], wet[1], t.x), lerp(wet[2], wet[3], t.x), t.y)));
 		return result;
-	}
-
-	/** How much the near level (rather than the far one) decides the water here: 1 inside, 0 past its edge band. */
-	float NearWeight(Level a_near, float2 a_worldXY)
-	{
-		const float2 logical = a_worldXY / a_near.CellSize - float2(a_near.GridMin);
-		const float fromEdge = min(min(logical.x, logical.y), min(a_near.GridRes - logical.x, a_near.GridRes - logical.y));
-		return smoothstep(0.0, 1.0, fromEdge / (NEAR_FADE * a_near.GridRes));
-	}
-
-	/** The simulated surface at a world position, near level cross-faded into far; false outside both. */
-	bool SampleSurface(float3 a_worldPosition, out float4 a_surface)
-	{
-		a_surface = 0;
-		const Level nearLevel = NearLevel();
-		const Level farLevel = FarLevel();
-		float2 nearCell, farCell;
-		const bool inNear = ToCell(nearLevel, a_worldPosition.xy, nearCell);
-		const bool inFar = ToCell(farLevel, a_worldPosition.xy, farCell);
-		if (!inNear && !inFar)
-			return false;
-		const float4 nearSurface = inNear ? BilinearSurface(WaterSurfaceTex, nearLevel, nearCell) : 0;
-		const float4 farSurface = inFar ? BilinearSurface(FarSurfaceTex, farLevel, farCell) : 0;
-		const float weight = inNear ? (inFar ? NearWeight(nearLevel, a_worldPosition.xy) : 1.0) : 0.0;
-		// Eased in after a (re)start, growing from vanilla's flat water
-		a_surface = lerp(farSurface, nearSurface, weight) * SharedData::fluidFieldSettings.Fade;
-		return true;
 	}
 
 	/** Flow (xy, world units/s) and foam (z) at a world position, blended between levels like the surface. */

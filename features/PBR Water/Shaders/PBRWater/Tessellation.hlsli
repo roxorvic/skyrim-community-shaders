@@ -78,6 +78,12 @@ namespace PBRWater
 	/// Tessellation factor of one edge, from the endpoints in canonical order so both patches sharing it agree. It runs
 	/// for every edge of every patch, so it reads no waves: triangles of the target size where the surface has detail the
 	/// spectrum does not show (the ripples, the shore waves' fronts and the waterline), twice that on the open water.
+#	if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+	/// Most the sim's steep water is refined beyond his ripple density, and the surface slope (rise over run) that gets all of it.
+	static const float FluidTessBoost = 4.0;
+	static const float FluidTessFullSlope = 0.2;
+#	endif
+
 	float EdgeTessFactor(float3 a, float3 b)
 	{
 		float3 lo = PositionLess(a, b) ? a : b;
@@ -89,12 +95,25 @@ namespace PBRWater
 		float2 absXY = mid.xy + FrameBuffer::CameraPosAdjust.xy;
 		float2 rippleUV;
 		bool detailed = RippleUV(absXY, Ripple0.xy, rippleUV);
+		float fluidRefine = 1.0;
+#	if defined(FLUIDFIELD_WATERSURFACE_HLSLI)
+		// The sim's area is refined like his ripple grid, and up to FluidTessBoost times more where its surface is steep
+		// (rocks, fronts, drops), so the triangles land where the water changes shape (Adaptive Tessellation)
+		const float fluidShare = FluidShare(mid);
+		detailed = detailed || fluidShare > 0.0;
+		if (fluidShare > 0.0 && SharedData::fluidFieldSettings.AdaptiveTess != 0) {
+			float fluidHeight;
+			float2 fluidSlope;
+			FluidSurface(mid, fluidHeight, fluidSlope);
+			fluidRefine = 1.0 + (FluidTessBoost - 1.0) * fluidShare * saturate(length(fluidSlope) / FluidTessFullSlope);
+		}
+#	endif
 		float2 shoreUV;
 		bool shore = false;
 		if (ShoreFieldUV(absXY, shoreUV))
 			shore = ShoreField0.SampleLevel(LinearClampSampler, shoreUV, 0).y < 2.0 * Shore3.w;
 		float edgePixels = length(hi - lo) * Tess0.w / max(length(mid), 1.0);
-		float target = max(Tess0.y, 1.0) * (detailed || shore ? 1.0 : 2.0);
+		float target = max(Tess0.y, 1.0) * (detailed || shore ? 1.0 : 2.0) / fluidRefine;
 		// Breakers curl where the mesh is fine enough to carry the lip (ShoreCurlWeight): the shore gets Shore1.y times the
 		// triangles out to where that is in reach. The breakers' wavelength is about 0.6 of the deep-water one or less.
 		if (shore && Shore3.z > 0.0 && ShoreCurlSpacing(mid) < 0.6 * Shore3.w / 25.0)

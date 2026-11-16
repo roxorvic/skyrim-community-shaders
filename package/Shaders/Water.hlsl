@@ -196,6 +196,9 @@ struct VS_OUTPUT
 };
 
 #	if defined(PBR_WATER)
+#		if defined(FLUID_FIELD) && !defined(LOD)
+#			include "FluidField/WaterSurface.hlsli"
+#		endif
 #		include "PBRWater/PBRWater.hlsli"
 // Draws that may be tessellated. LOD water is never tessellated (it is far away and flat).
 #		if defined(SPECULAR) || defined(UNDERWATER) || defined(SIMPLE) || defined(STENCIL)
@@ -329,12 +332,23 @@ float3x3 InverseLinear(float4x4 m)
 float GetWaveFlowDamping(float3 positionWS, out float2 velocity)
 {
 	velocity = 0.0;
-	if (PBRWater::Flow0.x == 0.0)
-		return 1.0;
+	float damping = 1.0;
 	float2 absXY = positionWS.xy + FrameBuffer::CameraPosAdjust.xy;
-	float4 flow = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
-	velocity = PBRWater::FlowVelocity(flow);
-	return 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
+	if (PBRWater::Flow0.x != 0.0) {
+		float4 flow = FlowMapTexVS.SampleLevel(FlowMapSamplerVS, absXY * PBRWater::Flow0.xz + PBRWater::Flow0.yw, 0);
+		velocity = PBRWater::FlowVelocity(flow);
+		damping = 1.0 - PBRWater::Foam1.w * saturate(flow.z * flow.w);
+	}
+#				if defined(FLUID_FIELD) && !defined(LOD)
+	// In the sim's area the waves ride the sim's flow (around rocks, through eddies), undamped: they are the surface's
+	// moving detail there, and damping them by the flow hid them exactly where the water runs
+	const float fluidShare = PBRWater::FluidShare(positionWS);
+	if (fluidShare > 0.0) {
+		velocity = lerp(velocity, FluidField::SampleFlowOutput(absXY).xy, fluidShare);
+		damping = lerp(damping, 1.0, fluidShare);
+	}
+#				endif
+	return damping;
 }
 #			endif
 
@@ -1206,9 +1220,10 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 	}
 #			endif
 
-#			if defined(FLUID_FIELD) && !defined(FLUID_FIELD_FALLS)
+#			if defined(FLUID_FIELD) && !defined(FLUID_FIELD_FALLS) && !defined(PBR_WATER)
 	{
-		// Fluid Field's simulated waves on top of the vanilla normal, at the parallax-shifted position
+		// Fluid Field's simulated waves on top of the vanilla normal, at the parallax-shifted position (PBR Water takes
+		// the sim's slope in its own shading instead)
 		float3 fluidFieldPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
 #				if defined(WATER_PARALLAX)
 		fluidFieldPosition.xy += parallaxOffset;
@@ -1577,10 +1592,10 @@ PS_OUTPUT main(PS_INPUT input)
 	// Dry: the bed rises above the waves and the swash, where DisplaceSurface held the mesh just above it. Both passes
 	// test the same pixels; the colour pass then finds the exact waterline against the ground behind it.
 #			if defined(STENCIL)
-	if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState))
+	if (PBRWater::AboveWaterline(input.WorldPosition.xyz, input.ShoreState) && (uint)PBRWater::Draw0.z != PBRWater::DebugEdgeTest)
 		discard;
 #			else
-	if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState))
+	if (PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState) && (uint)PBRWater::Draw0.z != PBRWater::DebugEdgeTest)
 		discard;
 #			endif
 #		endif
@@ -2467,7 +2482,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float3 finalColorPreFog = lerp(pbrTransmitted, specularColor, specularFraction);
 	float3 pbrSunGlint = sunColor * (depthControl.w * pbrWaveSun.visible);
 #							if !defined(REFRACTIONS)
-	if (pbrFilm <= 0.0)
+	if (pbrFilm <= 0.0 && (uint)PBRWater::Draw0.z != PBRWater::DebugEdgeTest)
 		discard;
 #							endif
 	pbrSunGlint *= pbrEdge;
@@ -2599,6 +2614,63 @@ PS_OUTPUT main(PS_INPUT input)
 	// The waves' sun shadows: red the sun's glint hidden, green the water the sunlight crosses (2 m), blue off the heightfield.
 	if ((uint)PBRWater::Draw0.z == PBRWater::DebugWaveSun)
 		finalColor = float3(1.0 - pbrWaveSun.visible, saturate(pbrWaveSun.path / (2.0 * PBRWater::UnitsPerMetre)), pbrWaveSun.valid ? 0.0 : 0.3);
+#							if defined(FLUID_FIELD)
+	{
+		// Heights in metres above the still water. The surface = waves (his) + the sim's surface in its area (or his ripples
+		// outside it) + the lift that holds the mesh above the bed near the waterline (DisplaceSurface).
+		float fluidHeight;
+		float2 fluidSlope;
+		PBRWater::FluidSurface(input.WaveParam.xyz, fluidHeight, fluidSlope);
+		const float fluidMetres = fluidHeight * PBRWater::FluidShare(input.WPosition.xyz) * PBRWater::MetresPerUnit;
+		const float waveMetres = input.ShoreState.z * PBRWater::MetresPerUnit - fluidMetres;
+		const float liftMetres = (input.WPosition.z - input.ShoreState.w - input.ShoreState.z) * PBRWater::MetresPerUnit;
+		// Height layers: red his waves and ripples, green the sim, blue the lift; each |m|, full at 1 m
+		if ((uint)PBRWater::Draw0.z == PBRWater::DebugHeightLayers)
+			finalColor = saturate(abs(float3(waveMetres, fluidMetres, liftMetres)));
+		// The sim's surface against this draw's still plane: red above, blue below (full at 1 m), grey contour lines every
+		// 0.25 m, white beyond 1 m, dark outside the simulation. A flat colour over a whole draw is an offset between them.
+		if ((uint)PBRWater::Draw0.z == PBRWater::DebugFluidHeight) {
+			float4 fluidSurface;
+			const bool simulated = FluidField::SampleSurface(input.WaveParam.xyz + FrameBuffer::CameraPosAdjust.xyz, fluidSurface);
+			const float raw = fluidHeight * PBRWater::MetresPerUnit;
+			const float contour = step(0.9, frac(abs(raw) * 4.0)) * 0.3;
+			finalColor = !simulated ? 0.05 : abs(raw) >= 1.0 ? 1.0 :
+			                                                   float3(saturate(raw), fluidSurface.w * 0.3, saturate(-raw)) + contour;
+		}
+		// Waterline test: magenta where his mesh test (AboveWaterline, his terrain only) cuts the water; otherwise red how
+		// much the per-pixel edge (pbrEdge, the sim's surface counted) fades it into the ground behind
+		if ((uint)PBRWater::Draw0.z == PBRWater::DebugEdgeTest)
+			finalColor = PBRWater::AboveWaterline(input.WPosition.xyz, input.ShoreState) ? float3(1.0, 0.0, 1.0) : float3(1.0 - pbrEdge, 0.0, 0.0);
+		// Sim bed vs the ground behind the pixel (depth buffer, within 3 m), both above the still water: green within 5 cm,
+		// red the sim's bed higher (it has rock where there is none: gaps), blue lower (it misses rock: lips, shards), 1 at
+		// 0.5 m; black where the sim has no water, grey where the ground behind is out of reach
+		if ((uint)PBRWater::Draw0.z == PBRWater::DebugSimBed) {
+			const float3 absPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
+			const float simDepth = FluidField::SampleFlowOutput(absPos.xy).w;
+			const float simBed = fluidHeight - simDepth;
+			const bool groundSeen = pbrPathLength < 1e6 && pbrPathLength * length(viewDirection.xy) < 3.0 * PBRWater::UnitsPerMetre;
+			const float diff = (simBed - pbrBed) * PBRWater::MetresPerUnit;
+			finalColor = simDepth <= 0.0 ? 0.0 : !groundSeen  ? 0.3 :
+			                                 abs(diff) < 0.05 ? float3(0.0, 0.8, 0.0) :
+			                                                    float3(saturate(diff * 2.0), 0.0, saturate(-diff * 2.0));
+		}
+		// The sim's water depth (its bed: terrain, rays and mesh cuts): blue deep (2 m), red shallow, white contours every
+		// 0.25 m, black where the sim has no water (a rock's top it counts as dry); dark grey outside the simulation
+		if ((uint)PBRWater::Draw0.z == PBRWater::DebugFluidDepth) {
+			const float3 absPos = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
+			const FluidField::Level nearLevel = FluidField::NearLevel();
+			float2 nearCell;
+			// Point read of the near level: the bilinear blend would average dry (0) cells into the depth
+			const bool inNear = FluidField::ToCell(nearLevel, absPos.xy, nearCell);
+			const float depthUnits = inNear ? FluidField::WaterFlowTex.Load(int3(int2(round(nearCell)) & (nearLevel.GridRes - 1), 0)).w : -2.0;
+			const float metres = depthUnits * PBRWater::MetresPerUnit;
+			const float t = saturate(metres / 2.0);
+			const float contour = step(0.9, frac(metres * 4.0)) * 0.6;
+			finalColor = !inNear ? 0.05 : depthUnits <= 0.0 ? 0.0 :
+			                                                  float3(1.0 - t, 0.2, t) + contour;
+		}
+	}
+#							endif
 #							if defined(REFRACTIONS)
 	// The thinnest water shows the ground it covers (as it is, already lit and fogged).
 	float3 pbrGround = RefractionTex.Sample(RefractionSampler, FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(FrameBuffer::DynamicResolutionParams2.xy * input.HPosition.xy * VPOSOffset.xy + VPOSOffset.zw)).xyz;

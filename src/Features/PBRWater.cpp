@@ -1,6 +1,7 @@
 #include "PBRWater.h"
 #include "PBRWater/Profiling.h"
 
+#include "Features/FluidFieldShallowWater.h"
 #include "Features/UnifiedWater.h"
 #include "Features/Upscaling.h"
 #include "I18n/I18n.h"
@@ -391,7 +392,7 @@ void PBRWater::SanitizeSettings()
 	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
-	s.DebugView = std::clamp(s.DebugView, 0, 14);
+	s.DebugView = std::clamp(s.DebugView, 0, 19);
 }
 
 void PBRWater::SaveSettings(json& o_json)
@@ -699,6 +700,11 @@ void PBRWater::DrawSettings()
 			T(TKEY("debug_shore_level"), "Shore Field Level"),
 			T(TKEY("debug_shore_wave"), "Shore Wave"),
 			T(TKEY("debug_wave_sun"), "Wave Sun Shadows"),
+			T(TKEY("debug_height_layers"), "Height Layers (Fluid Field)"),
+			T(TKEY("debug_fluid_height"), "Fluid Field Height"),
+			T(TKEY("debug_fluid_bed"), "Water Depth (Fluid Field)"),
+			T(TKEY("debug_edge_test"), "Waterline Test (Fluid Field)"),
+			T(TKEY("debug_sim_bed"), "Sim Bed vs Ground (Fluid Field)"),
 		};
 		ImGui::Combo(T(TKEY("debug_view"), "Debug View"), &s.DebugView, views, IM_ARRAYSIZE(views));
 
@@ -1749,7 +1755,8 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	const bool waves = WavesReach(*pass->geometry);
 
 	const auto snap = snapshot.load(std::memory_order_acquire);
-	const bool hasWaves = waves && snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled || settings.EnableRipples);
+	// Fluid Field's simulated water displaces the surface where its area reaches (DisplaceSurface)
+	const bool hasWaves = waves && snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled || settings.EnableRipples || globals::features::fluidFieldShallowWater.Covers(pass->geometry->worldBound));
 
 	// Our hull/domain shaders only match our own vertex and pixel shaders of the same descriptor. While
 	// those are still compiling the vanilla shaders are bound, and tessellating them would break the
@@ -1827,6 +1834,7 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	}
 	context->VSSetConstantBuffers(7, 1, &cb);
 	context->PSSetConstantBuffers(7, 1, &cb);
+	globals::features::fluidFieldShallowWater.BindForDisplacement(context);
 
 	// Nothing else binds these slots outside the pixel stage, where Landscape Seams shares t110 and t111.
 	ID3D11SamplerState* linearClamp = linearClampSampler.get();

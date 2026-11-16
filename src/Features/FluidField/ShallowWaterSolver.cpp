@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace FluidFieldSim
 {
@@ -63,6 +64,7 @@ namespace FluidFieldSim
 		cellMap[0] = CreateLayer(device, a_resolution, DXGI_FORMAT_R32G32_FLOAT, name, "WaterCellMap0");
 		cellMap[1] = CreateLayer(device, a_resolution, DXGI_FORMAT_R32G32_FLOAT, name, "WaterCellMap1");
 		surface = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16B16A16_FLOAT, name, "WaterSurface");
+		previousSurface = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16B16A16_FLOAT, name, "WaterSurfacePrevious", false);
 		flow = CreateLayer(device, a_resolution, DXGI_FORMAT_R16G16B16A16_FLOAT, name, "WaterFlow");
 		foam[0] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16_FLOAT, name, "WaterFoam0");
 		foam[1] = CreateLayer(device, a_resolution, DXGI_FORMAT_R16_FLOAT, name, "WaterFoam1");
@@ -153,6 +155,7 @@ namespace FluidFieldSim
 		velocity = {};
 		cellMap = {};
 		surface = {};
+		previousSurface = {};
 		flow = {};
 		foam = {};
 		map = {};
@@ -265,7 +268,9 @@ namespace FluidFieldSim
 			.fallCurrentCount = fallCurrentCount,
 			.fallReach = params.fallReach,
 			.fallMix = params.fallMix,
-			.pad = 0.0f
+			.rapidsChaos = params.rapidsChaos,
+			.refZ = params.refZ,
+			.pad = {}
 		};
 		seedFoamSRV = params.seedFoam;
 		UpdateBuffer(context, waterConstants.get(), &waterData, sizeof(waterData));
@@ -365,10 +370,14 @@ namespace FluidFieldSim
 		currentFoam ^= 1;
 	}
 
-	void ShallowWaterSolver::WriteOutputs(ID3D11DeviceContext* context)
+	bool ShallowWaterSolver::WriteOutputs(ID3D11DeviceContext* context)
 	{
-		if (!HasResources() || !outputCS || !stepped)
-			return;
+		if (!HasResources())
+			return false;
+		// Last frame's surface for motion vectors; when nothing steps it equals this frame's, so nothing moves
+		context->CopyResource(previousSurface.texture.get(), surface.texture.get());
+		if (!outputCS || !stepped)
+			return false;
 
 		ID3D11Buffer* cbs[] = { gridConstants.get(), waterConstants.get() };
 		context->CSSetConstantBuffers(0, 2, cbs);
@@ -376,6 +385,42 @@ namespace FluidFieldSim
 		ID3D11UnorderedAccessView* uavs[] = { surface.uav.get(), flow.uav.get() };
 		Dispatch(context, outputCS.get(), srvs, uavs);
 		EndStep(context);
+		return true;
 	}
 
+	bool ShallowWaterSolver::ReadState(ID3D11Device* a_device, ID3D11DeviceContext* a_context, std::vector<float>& a_depth, std::vector<float>& a_cellMap,
+		std::vector<float>& a_velocity, std::vector<std::uint16_t>& a_surface) const
+	{
+		const auto read = [&](ID3D11Texture2D* a_texture, std::uint32_t a_bytesPerTexel, void* a_out) {
+			if (!a_texture)
+				return false;
+			D3D11_TEXTURE2D_DESC desc{};
+			a_texture->GetDesc(&desc);
+			desc.Usage = D3D11_USAGE_STAGING;
+			desc.BindFlags = 0;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			desc.MiscFlags = 0;
+			winrt::com_ptr<ID3D11Texture2D> staging;
+			if (FAILED(a_device->CreateTexture2D(&desc, nullptr, staging.put())))
+				return false;
+			a_context->CopyResource(staging.get(), a_texture);
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if (FAILED(a_context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped)))
+				return false;
+			const std::size_t row = std::size_t(desc.Width) * a_bytesPerTexel;
+			for (std::uint32_t y = 0; y < desc.Height; ++y)
+				std::memcpy(static_cast<std::uint8_t*>(a_out) + y * row, static_cast<const std::uint8_t*>(mapped.pData) + std::size_t(y) * mapped.RowPitch, row);
+			a_context->Unmap(staging.get(), 0);
+			return true;
+		};
+		const std::size_t n = std::size_t(resolution) * resolution;
+		if (n == 0)
+			return false;
+		a_depth.resize(n);
+		a_cellMap.resize(n * 2);
+		a_velocity.resize(n * 2);
+		a_surface.resize(n * 4);
+		return read(depth[currentDepth].texture.get(), 4, a_depth.data()) && read(cellMap[currentCellMap].texture.get(), 8, a_cellMap.data()) &&
+		       read(velocity[currentVelocity].texture.get(), 8, a_velocity.data()) && read(surface.texture.get(), 8, a_surface.data());
+	}
 }
