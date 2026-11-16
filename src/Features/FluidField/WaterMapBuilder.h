@@ -6,7 +6,6 @@
 
 namespace FluidFieldSim
 {
-	class BedRaycasts;
 	class LandscapeCache;
 	class WaterSurfaces;
 
@@ -21,7 +20,7 @@ namespace FluidFieldSim
 	public:
 		/** @brief Floats per map texel: bed height, vanilla surface (NO_WATER where none), river flow scale, unused. */
 		static constexpr uint32_t MAP_CHANNELS = 4;
-		static constexpr float MAP_SPACING = 64.0f;  ///< Matches the default bed ray spacing
+		static constexpr float MAP_SPACING = 64.0f;  ///< Half the landscape's 128-unit vertex spacing
 		static constexpr uint32_t SLICES = 8;        ///< Calls one rebuild is spread over
 
 		/** @brief Map texels per side for a grid of the given world size: a power of two covering it. */
@@ -31,7 +30,7 @@ namespace FluidFieldSim
 		 * @brief Advances the rebuild by one slice; a new one starts only when a_inputVersion or the centre lattice point changed.
 		 * @return True when a rebuild just completed and GetData() holds a new map.
 		 */
-		bool Update(const LandscapeCache& a_landscape, const WaterSurfaces& a_water, const BedRaycasts* a_rays,
+		bool Update(const LandscapeCache& a_landscape, const WaterSurfaces& a_water,
 			float a_centreX, float a_centreY, uint32_t a_resolution, uint64_t a_inputVersion);
 
 		void Clear();

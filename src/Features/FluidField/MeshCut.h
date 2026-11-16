@@ -42,8 +42,6 @@ namespace FluidFieldSim
 		 * drawn, and the water stood on their phantom shoulders over the real rock.
 		 */
 		bool GetSurface(int32_t a_fineX, int32_t a_fineY, float& a_z) const;
-		/** @brief Whether a cut mesh's surface lies within a_radius fine points: a bed ray hitting a mesh there hit its hull. */
-		bool NearSurface(int32_t a_fineX, int32_t a_fineY, int32_t a_radius) const;
 
 		/** @brief Blocks (fine coordinates of their south-west point) whose solid points changed; the list is emptied. */
 		std::vector<std::pair<int32_t, int32_t>> TakeDirtyBlocks();

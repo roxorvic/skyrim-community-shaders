@@ -191,17 +191,6 @@ namespace FluidFieldSim
 		return true;
 	}
 
-	bool MeshCut::NearSurface(int32_t a_fineX, int32_t a_fineY, int32_t a_radius) const
-	{
-		for (int32_t y = -a_radius; y <= a_radius; y++) {
-			for (int32_t x = -a_radius; x <= a_radius; x++) {
-				if (surfaces.contains(MakeKey(a_fineX + x, a_fineY + y)))
-					return true;
-			}
-		}
-		return false;
-	}
-
 	std::vector<std::pair<int32_t, int32_t>> MeshCut::TakeDirtyBlocks()
 	{
 		std::vector<std::pair<int32_t, int32_t>> blocks;

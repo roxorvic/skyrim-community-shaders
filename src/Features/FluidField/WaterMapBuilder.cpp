@@ -2,7 +2,6 @@
 
 #include <bit>
 
-#include "BedRaycasts.h"
 #include "LandscapeCache.h"
 #include "ShallowWaterSolver.h"
 #include "WaterSurfaces.h"
@@ -31,7 +30,7 @@ namespace FluidFieldSim
 		builtVersion = 0;
 	}
 
-	bool WaterMapBuilder::Update(const LandscapeCache& a_landscape, const WaterSurfaces& a_water, const BedRaycasts* a_rays,
+	bool WaterMapBuilder::Update(const LandscapeCache& a_landscape, const WaterSurfaces& a_water,
 		float a_centreX, float a_centreY, uint32_t a_resolution, uint64_t a_inputVersion)
 	{
 		const uint32_t n = a_resolution;
@@ -66,13 +65,6 @@ namespace FluidFieldSim
 				float bed = std::numeric_limits<float>::quiet_NaN();
 				if (!a_landscape.SampleHeight(wx, wy, bed))
 					bed = std::numeric_limits<float>::quiet_NaN();
-				if (const auto* ray = a_rays ? a_rays->Find(wx, wy) : nullptr) {
-					if (ray->kind == BedRaycasts::HitKind::Terrain)
-						bed = ray->height;
-					// Meshes rising out of the water are left to the fine obstacle layer: at this spacing a pillar would blur into a blob
-					else if (ray->kind == BedRaycasts::HitKind::Static && !(hasWater && ray->height > surface))
-						bed = std::isfinite(bed) ? std::max(bed, ray->height) : ray->height;
-				}
 				if (!hasWater)
 					surface = ShallowWaterSolver::NO_WATER;
 				if (!std::isfinite(bed))

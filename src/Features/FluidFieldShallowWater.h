@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Feature.h"
-#include "FluidField/BedRaycasts.h"
 #include "FluidField/MeshCut.h"
 #include "FluidField/ShallowWaterSolver.h"
 #include "FluidField/VanillaFoam.h"
@@ -32,11 +31,6 @@ struct FluidFieldShallowWater : Feature
 				T("feature.fluid_field_shallow_water.key_feature_3", "Foam that gathers at obstacles and rapids and drifts with the flow") } };
 	}
 
-	static constexpr uint MIN_RAYS_PER_FRAME = 1;
-	static constexpr uint MAX_RAYS_PER_FRAME = 256;
-	static constexpr float MIN_RAY_SPACING = 32.0f;
-	static constexpr float MAX_RAY_SPACING = 256.0f;
-
 	struct Settings
 	{
 		bool Enabled = true;
@@ -61,9 +55,6 @@ struct FluidFieldShallowWater : Feature
 		float WaterSize = 8818.0f;           ///< Near water width in world units (full detail: obstacles, wakes)
 		bool FarWater = true;                ///< A coarser water level around the near one, so rivers stay simulated further out
 		float FarWaterScale = 8.0f;          ///< Far water width as a multiple of the near width, at the same resolution
-		bool RaycastBed = true;              ///< Find rocks, banks and riverbed meshes under water with Havok rays
-		uint RaysPerFrame = 64;              ///< Most bed rays cast in one frame
-		float RaySpacing = 36.0f;            ///< World units between bed rays (about 0.5 m)
 		bool MeshCutObstacles = true;        ///< Water-line obstacles from cutting placed meshes at the water height (D15)
 	};
 
@@ -137,12 +128,9 @@ private:
 	/** @brief Loading screens this feature has reset for (Field::ConsumeLoad). */
 	uint32_t seenLoads = UINT32_MAX;
 
-	/** @brief Obstacle points per fine bed-ray point per axis, enough to match the simulation's cell size (at most 4). */
-	int32_t GetObstacleRatio() const;
-	/** @brief World units between obstacle (mesh-cut) points: the bed rays' fine spacing over GetObstacleRatio. */
-	float GetObstacleSpacing() const;
+	/** @brief World units between obstacle (mesh-cut) points, about the near water's cell size. */
+	static float GetObstacleSpacing() { return 9.0f; }
 
-	FluidFieldSim::BedRaycasts bedRays;
 	FluidFieldSim::MeshCut meshCut;
 
 	/** @brief One water simulation level: its solver, map and this step's placement on the world. */

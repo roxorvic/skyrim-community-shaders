@@ -42,9 +42,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	WaterSize,
 	FarWater,
 	FarWaterScale,
-	RaycastBed,
-	RaysPerFrame,
-	RaySpacing,
 	MeshCutObstacles)
 
 void FluidFieldShallowWater::DrawSettings()
@@ -124,11 +121,6 @@ void FluidFieldShallowWater::DrawSettings()
 		tooltip(T(TKEY("far_water_scale_tooltip"), "How much wider the far water is than the detailed water, at the same resolution."));
 
 		ImGui::SeparatorText(T(TKEY("depth_map"), "Bed and Obstacles"));
-		ImGui::Checkbox(T(TKEY("raycast_bed"), "Raycast Bed"), &settings.RaycastBed);
-		tooltip(T(TKEY("raycast_bed_tooltip"), "Casts rays down from the water surface to find rocks, banks and riverbed meshes that the landscape heights miss."));
-		ImGui::SliderScalar(T(TKEY("rays_per_frame"), "Rays Per Frame"), ImGuiDataType_U32, &settings.RaysPerFrame, &MIN_RAYS_PER_FRAME, &MAX_RAYS_PER_FRAME, "%u", ImGuiSliderFlags_AlwaysClamp);
-		ImGui::SliderFloat(T(TKEY("ray_spacing"), "Ray Spacing"), &settings.RaySpacing, MIN_RAY_SPACING, MAX_RAY_SPACING, "%.0f", ImGuiSliderFlags_AlwaysClamp);
-		tooltip(T(TKEY("ray_spacing_tooltip"), "World units between rays. Smaller finds smaller rocks and casts more rays. Changing it clears the results."));
 		ImGui::Checkbox(T(TKEY("mesh_cut"), "Cut Meshes at the Water Line"), &settings.MeshCutObstacles);
 		tooltip(T(TKEY("mesh_cut_tooltip"), "Finds pillars, posts, walls and boats by cutting their meshes at the water height. Rays then only measure the bed."));
 		ImGui::PopID();
@@ -142,8 +134,6 @@ FluidFieldShallowWater::Settings FluidFieldShallowWater::Sanitize(Settings a_set
 	using FluidFieldSim::Field;
 	const Settings defaults{};
 
-	a_settings.RaysPerFrame = std::clamp(a_settings.RaysPerFrame, MIN_RAYS_PER_FRAME, MAX_RAYS_PER_FRAME);
-	a_settings.RaySpacing = std::isfinite(a_settings.RaySpacing) ? std::clamp(a_settings.RaySpacing, MIN_RAY_SPACING, MAX_RAY_SPACING) : defaults.RaySpacing;
 	a_settings.WakeStrength = std::isfinite(a_settings.WakeStrength) ? std::clamp(a_settings.WakeStrength, 0.0f, 3.0f) : defaults.WakeStrength;
 
 	if (std::ranges::find(Field::GRID_RESOLUTIONS, a_settings.WaterResolution) == Field::GRID_RESOLUTIONS.end())
@@ -213,8 +203,6 @@ void FluidFieldShallowWater::Release()
 	fallSources.Clear();
 	vanillaFoam.RestoreAll();
 	waterShaderData = {};
-	if (bedRays.GetSampleCount() > 0)
-		bedRays.Clear();
 	if (meshCut.GetFineSpacing() > 0.0f)
 		meshCut.Clear();
 }
@@ -239,14 +227,10 @@ void FluidFieldShallowWater::Prepass()
 
 	// Every load leaves the player somewhere new: find the bed again and start the water from rest
 	const bool reset = field.ConsumeLoad(seenLoads);
-	if (reset) {
-		bedRays.Clear();
+	if (reset)
 		meshCut.Clear();
-	}
-	const auto& landscape = field.GetLandscape();
 	const auto& water = field.GetWater();
 	const auto playerPos = field.GetPlayerPosition();
-	bedRays.SetOverheadsAlwaysOpen(settings.MeshCutObstacles);
 	if (settings.MeshCutObstacles) {
 		ZoneScopedN("FluidField - Mesh Cut");
 		globals::profiler->BeginPass("FluidField::Mesh Cut");
@@ -254,14 +238,6 @@ void FluidFieldShallowWater::Prepass()
 		globals::profiler->EndPass();
 	} else if (meshCut.GetFineSpacing() > 0.0f) {
 		meshCut.Clear();
-	}
-	if (settings.RaycastBed) {
-		ZoneScopedN("FluidField - Bed Raycasts");
-		globals::profiler->BeginPass("FluidField::Bed Raycasts");
-		bedRays.Update(landscape, water, playerPos.x, playerPos.y, settings.WaterSize, settings.RaySpacing, settings.RaysPerFrame);
-		globals::profiler->EndPass();
-	} else if (bedRays.GetSampleCount() > 0) {
-		bedRays.Clear();
 	}
 
 	auto context = globals::d3d::context;
@@ -361,26 +337,12 @@ bool FluidFieldShallowWater::EnsureWater(WaterLevel& a_level, uint32_t a_resolut
 	return true;
 }
 
-int32_t FluidFieldShallowWater::GetObstacleRatio() const
-{
-	const float rayFine = settings.RaySpacing / static_cast<float>(FluidFieldSim::BedRaycasts::REFINE);
-	return std::clamp(static_cast<int32_t>(std::lround(rayFine / GetWaterCellSize())), 1, 4);
-}
-
-float FluidFieldShallowWater::GetObstacleSpacing() const
-{
-	return settings.RaySpacing / static_cast<float>(FluidFieldSim::BedRaycasts::REFINE * GetObstacleRatio());
-}
-
-/** @brief Fine points beyond a cut mesh's surface its collision hull is taken to reach (bed-ray mesh hits there are dropped). */
-constexpr int32_t HULL_REACH = 6;
 /** @brief World units above the water a solid point's mesh skin must stand to be its bed (else the solid cap is). */
 constexpr float SOLID_SKIN = 1.0f;
 
 std::array<float, FluidFieldSim::MeshCut::BLOCK * FluidFieldSim::MeshCut::BLOCK * 4> FluidFieldShallowWater::ComposeObstacleBlock(int32_t a_originX, int32_t a_originY) const
 {
 	constexpr int32_t n = FluidFieldSim::MeshCut::BLOCK;
-	const int32_t ratio = GetObstacleRatio();
 	std::array<float, n * n * 4> texels{};
 	for (int32_t j = 0; j < n; j++) {
 		for (int32_t i = 0; i < n; i++) {
@@ -401,15 +363,7 @@ std::array<float, FluidFieldSim::MeshCut::BLOCK * FluidFieldSim::MeshCut::BLOCK 
 				// The visible mesh's surface, not its collision hull's
 				texel[0] = top;
 				texel[3] = 2.0f;
-			} else if (settings.RaycastBed) {
-				// The nearest bed-ray fine point; obstacle points are `ratio` times finer
-				const auto rx = static_cast<int32_t>(std::lround(static_cast<double>(fx) / ratio));
-				const auto ry = static_cast<int32_t>(std::lround(static_cast<double>(fy) / ratio));
-				bedRays.FindFine(rx, ry, texel[0], texel[3]);
-				// A mesh hit just outside a cut mesh's surface is its hull reaching past it: the landscape bed stands there
-				if (texel[3] > 1.5f && settings.MeshCutObstacles && meshCut.NearSurface(fx, fy, HULL_REACH))
-					texel[3] = 0.0f;
-			}
+			}  // Elsewhere kind 0: the water map's landscape bed
 		}
 	}
 	return texels;
@@ -419,35 +373,16 @@ void FluidFieldShallowWater::UploadObstacles(ID3D11DeviceContext* a_context, con
 {
 	constexpr int32_t n = FluidFieldSim::MeshCut::BLOCK;
 	const float fineSpacing = GetObstacleSpacing();
-	const int32_t ratio = GetObstacleRatio();
 	const auto blockKey = [](int32_t a_originX, int32_t a_originY) {
 		return (static_cast<uint64_t>(static_cast<uint32_t>(a_originX)) << 32) | static_cast<uint32_t>(a_originY);
 	};
 
-	if (nearWater.solver.ObstaclesNeedClear() || bedRays.WasCleared() || meshCut.WasCleared()) {
+	if (nearWater.solver.ObstaclesNeedClear() || meshCut.WasCleared()) {
 		nearWater.solver.ClearObstacles(a_context);
-		bedRays.MarkAllRefinedDirty();
 		residentMeshBlocks.clear();
 		meshWindowCentre[0] = meshWindowCentre[1] = INT32_MIN;
 	}
 
-	// A refined ray square covers ratio x ratio obstacle blocks (plus the half-point rounding at its edges)
-	for (const auto& block : bedRays.TakeDirtyBlocks()) {
-		const auto floorDiv = [](int32_t a_value, int32_t a_divisor) {
-			return a_value >= 0 ? a_value / a_divisor : -((-a_value + a_divisor - 1) / a_divisor);
-		};
-		const int32_t half = ratio / 2;
-		const int32_t minX = floorDiv(block.originX * ratio - half, n) * n;
-		const int32_t minY = floorDiv(block.originY * ratio - half, n) * n;
-		const int32_t maxX = floorDiv((block.originX + FluidFieldSim::BedRaycasts::REFINE) * ratio + half, n) * n;
-		const int32_t maxY = floorDiv((block.originY + FluidFieldSim::BedRaycasts::REFINE) * ratio + half, n) * n;
-		for (int32_t y = minY; y <= maxY; y += n) {
-			for (int32_t x = minX; x <= maxX; x += n) {
-				const auto texels = ComposeObstacleBlock(x, y);
-				nearWater.solver.UploadObstacleBlock(a_context, x, y, n, texels.data(), fineSpacing);
-			}
-		}
-	}
 	if (!settings.MeshCutObstacles)
 		return;
 
@@ -547,7 +482,6 @@ void FluidFieldShallowWater::LogProbe(ID3D11DeviceContext* a_context)
 	{
 		const auto& landscape = FluidFieldSim::Field::Get().GetLandscape();
 		const float fine = GetObstacleSpacing();
-		const int32_t ratio = GetObstacleRatio();
 		const char* dirs[] = { "east", "west", "north", "south" };
 		const float dx[] = { 1, -1, 0, 0 }, dy[] = { 0, 0, 1, -1 };
 		for (int d = 0; d < 4; ++d) {
@@ -557,19 +491,16 @@ void FluidFieldShallowWater::LogProbe(ID3D11DeviceContext* a_context)
 				float land = -1e9f;
 				landscape.SampleHeight(x, y, land);
 				const auto fx = static_cast<int32_t>(std::lround(x / fine)), fy = static_cast<int32_t>(std::lround(y / fine));
-				float top = 0.0f, surf = 0.0f, ray = 0.0f, kind = 0.0f;
+				float top = 0.0f, surf = 0.0f;
 				const bool solid = meshCut.IsSolid(fx, fy, top);
 				const bool hasSurf = meshCut.GetSurface(fx, fy, surf);
-				bedRays.FindFine(static_cast<int32_t>(std::lround(static_cast<double>(fx) / ratio)), static_cast<int32_t>(std::lround(static_cast<double>(fy) / ratio)), ray, kind);
 				const int lx = static_cast<int>(std::floor(x / cell)) - nearWater.gridMin[0], ly = static_cast<int>(std::floor(y / cell)) - nearWater.gridMin[1];
 				std::string sim = "-";
 				if (lx >= 0 && ly >= 0 && lx < res && ly < res) {
 					const std::size_t k = at(lx, ly);
 					sim = std::format("bed {:.0f} d {:.0f} v {:.0f}", cellMap[2 * k], depth[k], cellMap[2 * k] + cellMap[2 * k + 1]);
 				}
-				line += std::format(" | {:.2f}m land {:.0f} ray {}{:.0f} mesh {} {}", step * 0.25f, land, kind > 1.5f ? "M" : kind > 0.5f ? "L" :
-																																			"-",
-					ray,
+				line += std::format(" | {:.2f}m land {:.0f} mesh {} {}", step * 0.25f, land,
 					solid ? "SOLID" : hasSurf ? std::format("{:.0f}", surf) :
 												std::string("-"),
 					sim);
@@ -787,19 +718,13 @@ void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLeve
 	{
 		ZoneScopedN("FluidField - Water Map");
 		globals::profiler->BeginPass(a_near ? "FluidFieldShallowWater::Water Map" : "FluidFieldShallowWater::Far Water Map");
-		const uint64_t inputVersion = water.GetSignature() ^ (static_cast<uint64_t>(bedRays.GetSampleCount()) << 20) ^ (static_cast<uint64_t>(landscape.GetCellCount()) << 52);
-		if (map.Update(landscape, water, settings.RaycastBed ? &bedRays : nullptr, a_playerPos.x, a_playerPos.y, levelSolver.GetMapResolution(), inputVersion)) {
-			// After a reset, wait for settled inputs so the water starts calm on the right bed
-			const bool settled = !(settings.RaycastBed && bedRays.IsRefilling());
-			if (!a_level.awaitingMap || settled) {
-				levelSolver.UploadMap(a_context, map.GetData(), FluidFieldSim::WaterMapBuilder::MAP_SPACING);
-				// Warm up a couple of seconds at once so the river already flows when it first shows
-				if (a_level.awaitingMap)
-					a_level.warmupSubsteps = static_cast<uint32_t>(WARMUP_SECONDS / WARMUP_SUBSTEP);
-				a_level.awaitingMap = false;
-			} else {
-				map.Clear();  // Built too early; rebuild once the inputs settle
-			}
+		const uint64_t inputVersion = water.GetSignature() ^ (static_cast<uint64_t>(landscape.GetCellCount()) << 52);
+		if (map.Update(landscape, water, a_playerPos.x, a_playerPos.y, levelSolver.GetMapResolution(), inputVersion)) {
+			levelSolver.UploadMap(a_context, map.GetData(), FluidFieldSim::WaterMapBuilder::MAP_SPACING);
+			// Warm up a couple of seconds at once so the river already flows when it first shows
+			if (a_level.awaitingMap)
+				a_level.warmupSubsteps = static_cast<uint32_t>(WARMUP_SECONDS / WARMUP_SUBSTEP);
+			a_level.awaitingMap = false;
 		}
 		globals::profiler->EndPass();
 	}

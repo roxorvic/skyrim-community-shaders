@@ -2129,7 +2129,7 @@ PS_OUTPUT main(PS_INPUT input)
 	fallFoamLight = lerp(fallFoamLight, diffuseOutput.refractionDiffuseColor, fallAerationVolume.z * FallShading::AERATION_DEEP_TINT * (1.0 - fallSurfaceShare));
 	// D179: aerated water is milky (the bubbles scatter the light inside it), less see-through, and its bubbles glint
 	diffuseOutput.refractionDiffuseColor = lerp(diffuseOutput.refractionDiffuseColor, fluidFoamLight, saturate(fallBubbles * 0.2));
-#					else
+#					elif !defined(PBR_WATER)  // On PBR Water our foam drew as an opaque beige layer; off until it moves into his foam
 	{
 		// Bubbles in fast, foamy water make the water body lighter and milkier
 		const float3 fluidPosition = input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
@@ -2250,6 +2250,8 @@ PS_OUTPUT main(PS_INPUT input)
 		// Foam is matte: no sun glint and a dull reflection where it is dense
 #						if defined(FLUID_FIELD_FALLS)
 		const float fluidMatte = saturate(fallFoam * 1.5);  // D159: the falls' own foam
+#						elif defined(PBR_WATER)
+		const float fluidMatte = 0.0;  // Our foam is off on PBR Water (above)
 #						else
 		const float fluidMatte = FluidField::FoamMatte(input.WPosition.xyz + FrameBuffer::CameraPosAdjust.xyz);
 #						endif

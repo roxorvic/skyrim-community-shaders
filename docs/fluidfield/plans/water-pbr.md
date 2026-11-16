@@ -133,6 +133,34 @@ handed PBR Water.
 cap and swirl dip bound if nothing hits them now; (5) the earlier later-list (ripple sources, foam port, buoyancy, lakes,
 tell Davo the flowmap sign).
 
+## Session 2026-11-16 (review D:\WATER_PBR_REVIEW_2026-11-16.md)
+
+- Checkpoint commit 6ec6093ac (Victor's go). Our foam off on PBR Water (Water.hlsl: ApplyAeration and FoamMatte skipped
+  under PBR_WATER) until it moves into his foam renderer: the beige patches and flaps are gone at PBR 1-4.
+- **Bed rays removed** (Victor: water-only bed for now). A/B at PBR 5 and PBR 2: transect, probe and views 16/19 the
+  same with rays on or off. The bed is now the mesh cut (solid outline, the mesh skin above and under the water) over the
+  water map's landscape bed (64 units, finer than the landscape's own 128-unit vertices). Obstacle spacing fixed at 9 units.
+- The "false solid" west/south of the PBR 2/5 rock is real: the mesh skin there stands 15-30 units over the water; the
+  rays passed through it because the rock's collision does not cover it.
+- Flowmap sign: Davo's minus comes from upstream CS's rain-ripple helper (GetFlowmapDataWorldSpace, #577), where the
+  vector is a sampling offset (so it points upstream on purpose); he uses it as the travel direction.
+- Seen, not fixed: a thin dark trench at the rock's downstream end (likely WAKE_RELAX pulling sheltered cells to
+  vanilla); for the limit retirement after the flow field.
+
+## Cost (2026-11-16, worst GPU time over 10 s, RTX capped at 150 W, from our GPU span log)
+
+| Camera          | Water draw (engine water + falls), tess on / off | Our sim    |
+| --------------- | ------------------------------------------------ | ---------- |
+| PBR 1           | 10.0 / 8.5 ms                                    | 1.7 ms     |
+| PBR 2           | 9.6 / 8.7 ms                                     | 1.5 ms     |
+| PBR 4           | 9.2 / - ms                                       | 1.7 ms     |
+| PBR 5           | 8.7 / - ms                                       | 1.7 ms     |
+| Wide river view | 12.0 / 10.7 ms                                   | 1.1-1.3 ms |
+
+- Adaptive Tessellation costs about 1-1.5 ms at worst. The sim is 1.1-1.7 ms (was 4.4-5.7 ms on the old branch).
+- "-": no span line logged in that window. With the sim off nothing is logged (the spans are ours), so his water's
+  own cost without us needs a different timer (PresentMon or his own).
+
 ## Polish rounds 2026-11-14 (in game, PBR 1-4 + probe)
 
 Each fixed in the sim or as data preparation, never as a display effect:
