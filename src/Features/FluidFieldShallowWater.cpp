@@ -656,6 +656,17 @@ void FluidFieldShallowWater::LogProbe(ID3D11DeviceContext* a_context)
 	}
 }
 
+bool FluidFieldShallowWater::NearArea(float a_min[2], float a_max[2]) const
+{
+	if (!IsActive() || !waterShaderData.Enabled)
+		return false;
+	for (int i = 0; i < 2; i++) {
+		a_min[i] = waterShaderData.GridMin[i] * waterShaderData.CellSize;
+		a_max[i] = a_min[i] + waterShaderData.GridRes * waterShaderData.CellSize;
+	}
+	return true;
+}
+
 bool FluidFieldShallowWater::Covers(const RE::NiBound& a_bound) const
 {
 	if (!IsActive() || !waterShaderData.Enabled)
@@ -679,16 +690,19 @@ void FluidFieldShallowWater::BindForDisplacement(ID3D11DeviceContext* a_context)
 	a_context->VSSetConstantBuffers(5, 2, buffers);
 	a_context->HSSetConstantBuffers(5, 2, buffers);
 	a_context->DSSetConstantBuffers(5, 2, buffers);
+	a_context->CSSetConstantBuffers(5, 2, buffers);
 	if (!waterShaderData.Enabled)
 		return;
 	const auto srvs = WaterOutputSRVs();
 	a_context->VSSetShaderResources(66, 4, srvs.data());
 	a_context->HSSetShaderResources(66, 4, srvs.data());
 	a_context->DSSetShaderResources(66, 4, srvs.data());
+	a_context->CSSetShaderResources(66, 4, srvs.data());
 	// Last frame's surfaces, for the stencil pass's motion vectors
 	ID3D11ShaderResourceView* previous[] = { nearWater.solver.GetPreviousSurfaceSRV(), waterShaderData.FarEnabled ? farWater.solver.GetPreviousSurfaceSRV() : nullptr };
 	a_context->VSSetShaderResources(70, 2, previous);
 	a_context->DSSetShaderResources(70, 2, previous);
+	a_context->CSSetShaderResources(70, 2, previous);
 }
 
 void FluidFieldShallowWater::StepWater(ID3D11DeviceContext* a_context, WaterLevel& a_level, bool a_near, uint32_t a_resolution, float a_size, const RE::NiPoint3& a_playerPos, float a_deltaTime)

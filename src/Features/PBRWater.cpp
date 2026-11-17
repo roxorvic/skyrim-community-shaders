@@ -49,6 +49,10 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		ShoreCurl,
 		ShoreCurlDetail,
 		SwashLinger,
+		SwashChurnHeight,
+		SwashChurnDepth,
+		SwashChurnSize,
+		SwashChurnSpeed,
 		Roughness,
 		SunSpecular,
 		PointLightSpecular,
@@ -118,8 +122,13 @@ void to_json(nlohmann::json& nlohmann_json_j, const PBRWater::Settings& nlohmann
 		GameplayWaves,
 		EnableFloatingObjects,
 		CarryActors,
+		EnableSpray,
+		SprayAmount,
+		SprayRange,
+		SprayQuality,
 		WireframeMode,
 		DebugView))
+	nlohmann_json_j["SprayEmitters"] = nlohmann_json_t.SprayEmitters;
 }
 
 void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohmann_json_t)
@@ -153,6 +162,10 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		ShoreCurl,
 		ShoreCurlDetail,
 		SwashLinger,
+		SwashChurnHeight,
+		SwashChurnDepth,
+		SwashChurnSize,
+		SwashChurnSpeed,
 		Roughness,
 		SunSpecular,
 		PointLightSpecular,
@@ -222,8 +235,24 @@ void from_json(const nlohmann::json& nlohmann_json_j, PBRWater::Settings& nlohma
 		GameplayWaves,
 		EnableFloatingObjects,
 		CarryActors,
+		EnableSpray,
+		SprayAmount,
+		SprayRange,
+		SprayQuality,
 		WireframeMode,
 		DebugView))
+	// Emitter by emitter over the defaults: a file with fewer, or with missing values, keeps the rest. An emitter saved for
+	// another layout or emission (SprayParticles::EmitterVersion, stored in each: the saved settings are merged over the
+	// defaults, which would lend a top-level version to an old file) starts over from its default.
+	nlohmann_json_t.SprayEmitters = SprayParticles::DefaultEmitters();
+	if (const auto it = nlohmann_json_j.find("SprayEmitters"); it != nlohmann_json_j.end() && it->is_array()) {
+		for (size_t i = 0; i < std::min<size_t>(it->size(), SprayParticles::EmitterCount); ++i) {
+			const auto& saved = (*it)[i];
+			const auto version = saved.is_object() ? saved.find("Version") : saved.end();
+			if (version != saved.end() && version->is_number_integer() && version->get<int>() == SprayParticles::EmitterVersion)
+				from_json(saved, nlohmann_json_t.SprayEmitters[i]);
+		}
+	}
 }
 
 namespace
@@ -294,7 +323,7 @@ void PBRWater::SanitizeSettings()
 {
 	// Safety bounds only, not the sliders' ranges: Ctrl+click may type any value past a slider's end and it must stick
 	// (this runs every frame). Only what would break the maths is held back: non-finite values, divisors and sizes that
-	// must stay positive, factors that only mean something in 0..1, and the hardware's tessellation limit.
+	// must stay positive, factors that only mean something in 0..1, and the tessellation's limits.
 	auto& s = settings;
 	constexpr float Huge = 1.0e6f;
 	auto clamp = [](float& value, float lo, float hi, float fallback) {
@@ -327,6 +356,10 @@ void PBRWater::SanitizeSettings()
 	clamp(s.ShoreCurl, 0.0f, 2.0f, d.ShoreCurl);
 	clamp(s.ShoreCurlDetail, 1.0f, 4.0f, d.ShoreCurlDetail);
 	clamp(s.SwashLinger, 1.0f, 8.0f, d.SwashLinger);
+	clamp(s.SwashChurnHeight, 0.0f, 0.5f, d.SwashChurnHeight);
+	clamp(s.SwashChurnDepth, 0.0f, 1.0f, d.SwashChurnDepth);
+	clamp(s.SwashChurnSize, 0.05f, 3.0f, d.SwashChurnSize);
+	clamp(s.SwashChurnSpeed, 0.0f, 10.0f, d.SwashChurnSpeed);
 	clamp(s.Roughness, 0.001f, 1.0f, d.Roughness);
 	clamp(s.SunSpecular, 0.0f, Huge, d.SunSpecular);
 	clamp(s.PointLightSpecular, 0.0f, Huge, d.PointLightSpecular);
@@ -365,6 +398,10 @@ void PBRWater::SanitizeSettings()
 	clamp(s.FoamRoughnessModifier, 0.0f, Huge, d.FoamRoughnessModifier);
 	clamp(s.FoamFeather, 0.001f, 0.5f, d.FoamFeather);
 	clamp(s.FoamBubbleSize, 0.01f, 100.0f, d.FoamBubbleSize);
+	clamp(s.SprayAmount, 0.0f, 100.0f, d.SprayAmount);
+	clamp(s.SprayRange, 16.0f, 2000.0f, d.SprayRange);
+	for (auto& emitter : s.SprayEmitters)
+		SprayParticles::Sanitize(emitter);
 	clamp(s.RippleExtent, 4.0f, 2000.0f, d.RippleExtent);
 	clamp(s.RippleHeight, 0.0f, 5.0f, d.RippleHeight);
 	clamp(s.RippleNormalStrength, 0.0f, 100.0f, d.RippleNormalStrength);
@@ -391,6 +428,7 @@ void PBRWater::SanitizeSettings()
 	s.FlowPeriodMax = std::max(s.FlowPeriodMax, s.FlowPeriodMin);
 	s.DisplacementFadeEnd = std::max(s.DisplacementFadeEnd, s.DisplacementFadeStart + 1.0f);
 	s.WaveResolution = std::clamp(s.WaveResolution, 0, 2);
+	s.SprayQuality = std::clamp(s.SprayQuality, 0, 2);
 	s.WireframeMode = std::clamp(s.WireframeMode, 0, 2);
 	s.DebugView = std::clamp(s.DebugView, 0, 19);
 }
@@ -403,6 +441,142 @@ void PBRWater::SaveSettings(json& o_json)
 void PBRWater::RestoreDefaultSettings()
 {
 	settings = {};
+}
+
+void PBRWater::DrawSpraySettings()
+{
+	auto& s = settings;
+	Util::CheckboxTip(T(TKEY("enable_spray"), "Sea Spray"), &s.EnableSpray,
+		T(TKEY("enable_spray_tooltip"), "Breakers throw splashes, droplets and mist into the air, and the open sea's whitecaps throw spray that a strong wind tears off the crests. Drawn with the game's own effect textures."));
+	if (!s.EnableSpray)
+		return;
+	Util::SliderFloatTip(T(TKEY("spray_amount"), "Spray Amount"), &s.SprayAmount, 0.0f, 3.0f, "%.2f",
+		T(TKEY("spray_amount_tooltip"), "Scales how many particles every emitter makes. Default 1."));
+	Util::SliderFloatTip(T(TKEY("spray_range"), "Spray Range"), &s.SprayRange, 32.0f, 512.0f, "%.0f m",
+		T(TKEY("spray_range_tooltip"), "Distance from the camera within which the waves throw spray. A larger range samples the waves more coarsely. Default 128 m."), ImGuiSliderFlags_Logarithmic);
+	{
+		const char* qualities[] = { T(TKEY("spray_quality_low"), "Low (16k particles)"), T(TKEY("spray_quality_medium"), "Medium (64k particles)"), T(TKEY("spray_quality_high"), "High (128k particles)") };
+		ImGui::Combo(T(TKEY("spray_quality"), "Spray Particles"), &s.SprayQuality, qualities, IM_ARRAYSIZE(qualities));
+		Util::HoverTip(T(TKEY("spray_quality_tooltip"), "The most spray particles alive at once. When a storm asks for more, the oldest go first."));
+	}
+	if (Util::Button(T(TKEY("spray_reset_all"), "Reset All Emitters")))
+		s.SprayEmitters = SprayParticles::DefaultEmitters();
+
+	ImGui::SeparatorText(T(TKEY("spray_emitters"), "Emitters"));
+	const char* sources[] = {
+		T(TKEY("spray_source_plunge"), "Plunging breaker"),
+		T(TKEY("spray_source_roller"), "Broken wave's roller"),
+		T(TKEY("spray_source_surf"), "Surf on the beach"),
+		T(TKEY("spray_source_whitecap"), "Open sea whitecaps"),
+		T(TKEY("spray_source_spindrift"), "Spindrift (strong wind)"),
+	};
+	const char* shapes[] = {
+		T(TKEY("spray_shape_droplets"), "Droplets (motion streaks)"),
+		T(TKEY("spray_shape_puffs"), "Puffs (spray and mist)"),
+	};
+	const char* names[SprayParticles::EmitterCount] = {
+		T(TKEY("spray_emitter_breaker_sheet"), "Breaker Sheet"),
+		T(TKEY("spray_emitter_breaker_droplets"), "Breaker Droplets"),
+		T(TKEY("spray_emitter_breaker_mist"), "Breaker Mist"),
+		T(TKEY("spray_emitter_roller_spray"), "Roller Spray"),
+		T(TKEY("spray_emitter_roller_mist"), "Roller Mist"),
+		T(TKEY("spray_emitter_surf_droplets"), "Surf Droplets"),
+		T(TKEY("spray_emitter_whitecap_spray"), "Whitecap Spray"),
+		T(TKEY("spray_emitter_spindrift"), "Spindrift"),
+	};
+	const auto defaults = SprayParticles::DefaultEmitters();
+	for (uint32_t i = 0; i < SprayParticles::EmitterCount; ++i) {
+		auto& e = s.SprayEmitters[i];
+		ImGui::PushID(static_cast<int>(i));
+		ImGui::Checkbox("##enabled", &e.Enabled);
+		ImGui::SameLine();
+		if (ImGui::CollapsingHeader(names[i])) {
+			ImGui::Combo(T(TKEY("spray_source"), "Source"), &e.SourceKind, sources, IM_ARRAYSIZE(sources));
+			Util::HoverTip(T(TKEY("spray_source_tooltip"), "What makes this emitter's particles: the splash-up where a plunging breaker's lip lands, the churning front of a broken wave, the white water running up the beach, the open sea's breaking crests, or the spray a gale tears off them (from 9 m/s of wind)."));
+			ImGui::Combo(T(TKEY("spray_shape"), "Shape"), &e.ShapeKind, shapes, IM_ARRAYSIZE(shapes));
+			Util::HoverTip(T(TKEY("spray_shape_tooltip"), "Droplets are drawn as the streak each one makes while it flies, at least a pixel wide. Puffs are soft blobs broken up by noise that tears them apart as they age: the spray sheet, fine spray and mist."));
+			if (e.ShapeKind == SprayParticles::Puffs) {
+				Util::SliderFloatTip(T(TKEY("spray_softness"), "Softness"), &e.Softness, 0.02f, 1.0f, "%.2f",
+					T(TKEY("spray_softness_tooltip"), "How soft a puff's edges are: low for torn sheets of spray, high for mist."));
+				Util::SliderFloatTip(T(TKEY("spray_detail"), "Break-up"), &e.Detail, 0.0f, 1.0f, "%.2f",
+					T(TKEY("spray_detail_tooltip"), "How much noise breaks a puff up, and how far it tears apart as it ages."));
+			}
+
+			ImGui::SeparatorText(T(TKEY("spray_emission"), "Emission"));
+			Util::SliderFloatTip(T(TKEY("spray_rate"), "Rate"), &e.Rate, 0.0f, 200.0f, "%.2f /m2/s",
+				T(TKEY("spray_rate_tooltip"), "Particles per square metre per second where the source is at full strength."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_strength_min"), "Threshold"), &e.StrengthMin, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_strength_min_tooltip"), "Source strength below which the emitter makes nothing."));
+			Util::SliderFloatTip(T(TKEY("spray_strength_full"), "Full Strength"), &e.StrengthFull, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_strength_full_tooltip"), "Source strength at which the emitter makes its full rate."));
+			Util::SliderFloatTip(T(TKEY("spray_max_distance"), "Max Distance"), &e.MaxDistance, 10.0f, 1000.0f, "%.0f m",
+				T(TKEY("spray_max_distance_tooltip"), "The farthest from the camera these particles are made and drawn."), ImGuiSliderFlags_Logarithmic);
+
+			ImGui::SeparatorText(T(TKEY("spray_launch"), "Launch"));
+			Util::SliderFloatTip(T(TKEY("spray_speed"), "Speed"), &e.Speed, 0.0f, 15.0f, "%.2f m/s",
+				T(TKEY("spray_speed_tooltip"), "Launch speed. For shore sources this is for a 1 m wave; it grows with the square root of the wave's height."));
+			Util::SliderFloatTip(T(TKEY("spray_speed_variation"), "Speed Variation"), &e.SpeedVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_speed_variation_tooltip"), "Random share of the speed, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_declination"), "Declination"), &e.Declination, 0.0f, 120.0f, "%.0f deg",
+				T(TKEY("spray_declination_tooltip"), "Angle from straight up, tilted towards the waves' travel (out at sea, the wind)."));
+			Util::SliderFloatTip(T(TKEY("spray_declination_variation"), "Declination Variation"), &e.DeclinationVariation, 0.0f, 90.0f, "%.0f deg",
+				T(TKEY("spray_declination_variation_tooltip"), "Random spread of the declination, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_planar_spread"), "Sideways Spread"), &e.PlanarSpread, 0.0f, 180.0f, "%.0f deg",
+				T(TKEY("spray_planar_spread_tooltip"), "How far either side of the waves' travel the particles may fly."));
+			Util::SliderFloatTip(T(TKEY("spray_inherit_wave"), "Wave Speed Carried"), &e.InheritWave, 0.0f, 1.5f, "%.2f",
+				T(TKEY("spray_inherit_wave_tooltip"), "Share of the wave's own speed the particles keep along its travel."));
+			Util::SliderFloatTip(T(TKEY("spray_inherit_wind"), "Wind Carried"), &e.InheritWind, 0.0f, 1.5f, "%.2f",
+				T(TKEY("spray_inherit_wind_tooltip"), "Share of the wind's speed the particles start with."));
+			Util::SliderFloatTip(T(TKEY("spray_start_height"), "Start Height"), &e.StartHeight, -0.5f, 2.0f, "%.2f m",
+				T(TKEY("spray_start_height_tooltip"), "Height above the water the particles start at."));
+
+			ImGui::SeparatorText(T(TKEY("spray_life_size"), "Life and Size"));
+			Util::SliderFloatTip(T(TKEY("spray_life"), "Lifespan"), &e.LifeSpan, 0.1f, 10.0f, "%.2f s",
+				T(TKEY("spray_life_tooltip"), "How long a particle lives, unless it falls back into the water first."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_life_variation"), "Lifespan Variation"), &e.LifeVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_life_variation_tooltip"), "Random share of the lifespan, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_radius"), "Radius"), &e.Radius, 0.002f, 5.0f, "%.3f m",
+				T(TKEY("spray_radius_tooltip"), "Half the width of a particle at birth."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_radius_variation"), "Radius Variation"), &e.RadiusVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_radius_variation_tooltip"), "Random share of the radius, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_end_size"), "End Size"), &e.EndSize, 0.0f, 6.0f, "%.2f x",
+				T(TKEY("spray_end_size_tooltip"), "Size at the end of life, relative to the start: spray spreads as it flies."));
+			Util::SliderFloatTip(T(TKEY("spray_grow_time"), "Grow Time"), &e.GrowTime, 0.0f, 2.0f, "%.2f s",
+				T(TKEY("spray_grow_time_tooltip"), "Time a particle takes to grow from nothing."));
+			Util::SliderFloatTip(T(TKEY("spray_fade_time"), "Fade Time"), &e.FadeTime, 0.0f, 5.0f, "%.2f s",
+				T(TKEY("spray_fade_time_tooltip"), "Time a particle takes to fade out at the end of its life."));
+			Util::SliderFloatTip(T(TKEY("spray_fade_in"), "Fade In"), &e.FadeIn, 0.0f, 0.5f, "%.2f",
+				T(TKEY("spray_fade_in_tooltip"), "Share of its life a particle takes to fade in."));
+
+			ImGui::SeparatorText(T(TKEY("spray_motion"), "Motion"));
+			Util::SliderFloatTip(T(TKEY("spray_gravity"), "Gravity"), &e.Gravity, 0.0f, 2.0f, "%.2f g",
+				T(TKEY("spray_gravity_tooltip"), "Gravity on the particles. Mist hangs in the air (near 0)."));
+			Util::SliderFloatTip(T(TKEY("spray_drag"), "Air Drag"), &e.Drag, 0.0f, 5.0f, "%.3f /m",
+				T(TKEY("spray_drag_tooltip"), "Quadratic air drag towards the wind. Droplets fly almost freely (about 0.0002 / radius); mist is held in the air and drifts with the wind (1 and more)."), ImGuiSliderFlags_Logarithmic);
+			Util::SliderFloatTip(T(TKEY("spray_rotation_speed"), "Spin"), &e.RotationSpeed, 0.0f, 180.0f, "%.0f deg/s",
+				T(TKEY("spray_rotation_speed_tooltip"), "How fast the particles turn, either way."));
+			Util::SliderFloatTip(T(TKEY("spray_rotation_variation"), "Spin Variation"), &e.RotationVariation, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_rotation_variation_tooltip"), "Random share of the spin, either way."));
+
+			ImGui::SeparatorText(T(TKEY("spray_look"), "Look"));
+			ImGui::ColorEdit3(T(TKEY("spray_color"), "Colour"), reinterpret_cast<float*>(&e.Color));
+			Util::SliderFloatTip(T(TKEY("spray_alpha"), "Opacity"), &e.Alpha, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_alpha_tooltip"), "Opacity of a particle at full strength."));
+			Util::SliderFloatTip(T(TKEY("spray_lighting"), "Lighting Influence"), &e.LightingInfluence, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_lighting_tooltip"), "1 lights the particles by the sun and sky like the vanilla particles; 0 draws them unlit."));
+			Util::SliderFloatTip(T(TKEY("spray_forward_scattering"), "Sun Glow"), &e.ForwardScattering, 0.0f, 0.9f, "%.2f",
+				T(TKEY("spray_forward_scattering_tooltip"), "How much brighter spray seen against the sun glows (forward scattering of the droplets)."));
+			Util::SliderFloatTip(T(TKEY("spray_additive"), "Additive"), &e.Additive, 0.0f, 1.0f, "%.2f",
+				T(TKEY("spray_additive_tooltip"), "0 blends the particles over the scene, 1 adds their light to it."));
+			Util::SliderFloatTip(T(TKEY("spray_soft_depth"), "Soft Edge Depth"), &e.SoftDepth, 0.0f, 5.0f, "%.2f m",
+				T(TKEY("spray_soft_depth_tooltip"), "Depth over which a particle fades where it meets the water or the ground."));
+			Util::SliderFloatTip(T(TKEY("spray_motion_stretch"), "Motion Stretch"), &e.MotionStretch, 0.0f, 0.1f, "%.3f s",
+				T(TKEY("spray_motion_stretch_tooltip"), "Draws each particle out along its motion over this much time, like a streak of falling water."));
+			if (Util::Button(T(TKEY("spray_reset_emitter"), "Reset Emitter")))
+				e = defaults[i];
+		}
+		ImGui::PopID();
+	}
 }
 
 void PBRWater::DrawSettings()
@@ -478,6 +652,14 @@ void PBRWater::DrawSettings()
 			T(TKEY("shore_curl_tooltip"), "How far plunging breakers curl over: the crest is thrown ahead of the wave and falls into the trough in front. 0 keeps the lip without the curl. Needs tessellation. Default 1."));
 		Util::SliderFloatTip(T(TKEY("swash_linger"), "Swash Linger"), &s.SwashLinger, 1.0f, 5.0f, "%.1fx",
 			T(TKEY("swash_linger_tooltip"), "How strongly the sand drags on each sheet of swash: higher, the water runs up less far and drains back down the beach more slowly, and its foam lingers on the sand. Default 2."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_height"), "Swash Churn Height"), &s.SwashChurnHeight, 0.0f, 0.2f, "%.3f m",
+			T(TKEY("swash_churn_height_tooltip"), "The tallest the swash's churning lumps stand: the small waves that run through it, meet and heap up. 0 leaves the swash a smooth sheet. Default 0.05 m."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_depth"), "Swash Churn Depth Share"), &s.SwashChurnDepth, 0.0f, 1.0f, "%.2f",
+			T(TKEY("swash_churn_depth_tooltip"), "How high the lumps stand as a share of the water's depth, up to Swash Churn Height: a deep, foaming uprush churns, a thin film barely moves. Default 0.35."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_size"), "Swash Churn Size"), &s.SwashChurnSize, 0.1f, 1.5f, "%.2f m",
+			T(TKEY("swash_churn_size_tooltip"), "How large the churning lumps are. Smaller is choppier; lumps finer than the mesh show only in the shading. Default 0.35 m."));
+		Util::SliderFloatTip(T(TKEY("swash_churn_speed"), "Swash Churn Speed"), &s.SwashChurnSpeed, 0.0f, 5.0f, "%.1fx",
+			T(TKEY("swash_churn_speed_tooltip"), "How fast the lumps boil and drift, relative to the waves. Default 1.7."));
 
 		if (ImGui::CollapsingHeader(T(TKEY("advanced"), "Advanced"))) {
 			Util::SliderFloatTip(T(TKEY("shore_shortest_period"), "Shortest Shore Period"), &s.ShoreShortestPeriod, 1.0f, 6.0f, "%.1f s",
@@ -603,6 +785,12 @@ void PBRWater::DrawSettings()
 		ImGui::EndTabItem();
 	}
 
+	if (ImGui::BeginTabItem(T(TKEY("tab_spray"), "Spray"))) {
+		IdScope id("spray");
+		DrawSpraySettings();
+		ImGui::EndTabItem();
+	}
+
 	if (ImGui::BeginTabItem(T(TKEY("tab_ripples"), "Ripples & Rivers"))) {
 		IdScope id("ripples");
 		Util::CheckboxTip(T(TKEY("enable_ripples"), "Interactive Ripples"), &s.EnableRipples,
@@ -668,11 +856,11 @@ void PBRWater::DrawSettings()
 			Util::HoverTip(T(TKEY("wave_resolution_tooltip"), "Resolution of each FFT wave cascade. Higher values add finer ripples close up at a small GPU cost; gameplay is unaffected."));
 		}
 		Util::CheckboxTip(T(TKEY("enable_tessellation"), "Tessellation"), &s.EnableTessellation,
-			T(TKEY("enable_tessellation_tooltip"), "Subdivides the water mesh on the GPU so waves are real geometry. Without it, waves are limited by the mesh resolution."));
+			T(TKEY("enable_tessellation_tooltip"), "Subdivides the water mesh adaptively once a frame so waves are real geometry, and evaluates each vertex's waves once for every pass that draws the water. Without it, waves are limited by the mesh resolution."));
 		Util::SliderFloatTip(T(TKEY("tessellation_triangle_size"), "Target Triangle Size"), &s.TessellationTriangleSize, 4.0f, 40.0f, "%.0f px",
 			T(TKEY("tessellation_triangle_size_tooltip"), "Smaller values give smoother waves at a higher GPU cost. Scales automatically with the render resolution. Default 10 px."));
 		Util::SliderFloatTip(T(TKEY("tessellation_max_factor"), "Maximum Tessellation"), &s.TessellationMaxFactor, 4.0f, 64.0f, "%.0f",
-			T(TKEY("tessellation_max_factor_tooltip"), "The most a single patch is subdivided. The hardware limit is 64. Default 32."));
+			T(TKEY("tessellation_max_factor_tooltip"), "Caps how finely the water is subdivided near the camera: the smallest triangle is the water mesh's grid (about 1.8 m) divided by this. Higher values make waves smoother up close but cost more. Default 32."));
 		Util::SliderFloatTip(T(TKEY("displacement_fade_start"), "Wave Fade Start"), &s.DisplacementFadeStart, 2000.0f, 60000.0f, "%.0f units",
 			T(TKEY("displacement_fade_start_tooltip"), "Distance at which the waves start to flatten towards the game's flat distant water (70 units are a metre). Default 16384 units."));
 		Util::SliderFloatTip(T(TKEY("displacement_fade_end"), "Wave Fade End"), &s.DisplacementFadeEnd, 4000.0f, 120000.0f, "%.0f units",
@@ -714,7 +902,11 @@ void PBRWater::DrawSettings()
 			ImGui::Text("Mean square slope %.3f", o.meanSquareSlope);
 			ImGui::Text("FFT %u x %u cascades: %s, gameplay mirror: %s", o.resolution, PBRWaterModel::NumCascades, oceanReady.load() ? "running" : "unavailable", snap->mirror0 ? "running" : "idle");
 		}
-		ImGui::Text("Water draws last frame: %u, %u tessellated with %u patches", lastDrawStats.draws, lastDrawStats.tessellated, lastDrawStats.patches);
+		ImGui::Text("Water draws last frame: %u, %u of them from the tessellated mesh", lastDrawStats.draws, lastDrawStats.computeDraws);
+		{
+			const auto& t = tessellator.GetStats();
+			ImGui::Text("Compute tessellation: %u meshes, %u triangles in view, %u leaves, %u vertices, %u triangles, target size x%.2f (CPU %.3f ms)", t.meshes, t.baseTriangles, t.leaves, t.vertices, t.triangles, t.detailScale, t.cpuMs);
+		}
 		{
 			const auto& n = lastDrawStats.byTechnique;
 			ImGui::Text("  surface %u, point lights %u, underwater %u, LOD %u, stencil %u, simple %u", n[0], n[1], n[2], n[3], n[4], n[5]);
@@ -775,6 +967,8 @@ void PBRWater::SetupResources()
 		}
 	}
 	flatDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::FlatDrawConstants");
+	swallowDrawBuffer = std::make_unique<ConstantBuffer>(ConstantBufferDesc<GpuData>(), "PBRWater::SwallowDrawConstants");
+	tessellator.SetupResources();
 
 	D3D11_SAMPLER_DESC samplerDesc{};
 	samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -796,6 +990,7 @@ void PBRWater::SetupResources()
 
 	ripples.SetupResources();
 	swash.SetupResources();
+	spray.SetupResources();
 
 	// The Skylighting occluder: a camera-centred grid of (OccluderQuads + 1)^2 vertices made by the vertex shader.
 	{
@@ -915,11 +1110,12 @@ void PBRWater::ClearShaderCache()
 {
 	ripples.ClearShaderCache();
 	swash.ClearShaderCache();
+	spray.ClearShaderCache();
 	CompileOccluder();
 	CompileSurfaceNoise();
 	ocean.ClearShaderCache();
 	oceanReady.store(ocean.IsReady(), std::memory_order_release);
-	tessellationFailureLogged = false;
+	tessellator.CompileShaders();
 }
 
 void PBRWater::Reset()
@@ -1083,8 +1279,6 @@ void PBRWater::Prepass()
 		auto context = globals::d3d::context;
 		ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
 		context->VSSetShaderResources(110, WaterSRVCount, nullSrvs);
-		context->HSSetShaderResources(110, WaterSRVCount, nullSrvs);
-		context->DSSetShaderResources(110, WaterSRVCount, nullSrvs);
 		context->PSSetShaderResources(110, WaterSRVCount, nullSrvs);
 		context->PSSetShaderResources(WaveHeightfieldSlot, 1, nullSrvs);
 	}
@@ -1134,7 +1328,113 @@ void PBRWater::Prepass()
 	UpdateFrameConstants();
 	UpdateSurfaceNoise();
 	UpdateSwash(dt);
+	UpdateSpray(dt);
+	UpdateTessellation();
 	ApplyCameraWater();
+}
+
+void PBRWater::UpdateTessellation()
+{
+	if (!gpuBuffer || !settings.EnableTessellation || !tessellator.IsReady() || !globals::shaderCache->IsEnabled()) {
+		tessellator.Reset();
+		PBRWaterProfiling::Skipped("PBRWater::Tessellate");
+		return;
+	}
+
+	// The vertices are evaluated as the tessellated draws evaluate them: this frame's constants (tessellated: Tess0.x
+	// set, so the breakers curl), textures, the surf's state and the river flowmap.
+	auto context = globals::d3d::context;
+	GpuData d = frameData;
+	d.Tess0.x = 1.0f;
+	d.Draw0.x = 0.0f;
+	// The budget's coarsening the subdivision starts from (last frame's), for ShoreCurlSpacing in the compute pass.
+	d.Draw0.w = std::max(tessellator.GetDetailScale(), 1.0f);
+	gpuBuffer->Update(d);
+	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
+	context->CSSetConstantBuffers(7, 1, cbs);
+	ID3D11Buffer* frameBuffers[1] = { *globals::game::perFrame.get() };
+	context->CSSetConstantBuffers(12, 1, frameBuffers);
+	ID3D11ShaderResourceView* srvs[WaterSRVCount];
+	GatherWaterSRVs(d, srvs);
+	context->CSSetShaderResources(110, WaterSRVCount, srvs);
+	ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
+	context->CSSetShaderResources(8, 1, &flowmap);
+	globals::features::fluidFieldShallowWater.BindForDisplacement(context);  // its surface, as the draws read it
+	ID3D11SamplerState* linearClamp = linearClampSampler.get();
+	ID3D11SamplerState* samplers[2] = { linearClamp, oceanSampler.get() };
+	context->CSSetSamplers(12, 2, samplers);
+	context->CSSetSamplers(8, 1, &linearClamp);
+
+	WaterTessellator::FrameParams p;
+	p.frame = globals::state->frameCount;
+	const auto& camera = globals::game::frameBufferCached.GetCameraPosAdjust();
+	p.cameraX = camera.x;
+	p.cameraY = camera.y;
+	p.cameraZ = camera.z;
+	const auto& viewProj = globals::game::frameBufferCached.GetCameraViewProj();
+	for (int r = 0; r < 4; ++r)
+		for (int c = 0; c < 4; ++c)
+			p.viewProj[r][c] = viewProj.m[r][c];
+	p.pixelsPerUnit = d.Tess0.w;
+	p.targetSize = d.Tess0.y;
+	// The finest spacing: the cell meshes' 128-unit grid over Maximum Tessellation. Finer triangles carry no wave the
+	// vertex program keeps, and cost the pixel shader whole quads.
+	p.minSpacing = 128.0f / std::max(settings.TessellationMaxFactor, 1.0f);
+	{
+		float width = static_cast<float>(globals::game::graphicsState->screenWidth);
+		float height = static_cast<float>(globals::game::graphicsState->screenHeight);
+		if (globals::features::upscaling.loaded) {
+			width *= globals::features::upscaling.resolutionScale.x;
+			height *= globals::features::upscaling.resolutionScale.y;
+		}
+		p.renderPixels = width * height;
+	}
+	// The waves' reach (PBRWater::DisplacementLimit) and the hull shader's slack for the run-up and the ripples.
+	const float shoreWaves = 2.0f * (std::max(d.Shore1.z, 0.0f) + std::max(d.Shore1.w, 0.0f));
+	// Not the hard clamp (DisplacementLimit: twice a five-sigma crest), which padded every leaf by its whole reach in
+	// every direction and kept everything within some 20 m of the camera, behind it too: that ring is where the mesh is
+	// densest, and it was most of the frame's triangles. The ocean moves a vertex about 3.5 sigma sideways at most
+	// (Params2.z is 5 sigma times the choppiness, in units) and 4 sigma up or down; the shore train's crests and lips,
+	// its run-up and the ripples on top. A culled leaf can only show as a moment's sliver at the screen's edge.
+	const float oceanReach = std::max(d.Params2.z - 1.0f, 0.0f);
+	const float choppy = std::max(d.Params2.x, 1.0f);
+	const float shoreReach = shoreWaves * std::max(1.0f, d.Tune4.y / 1.55f);
+	p.cullMarginXY = 0.7f * oceanReach + shoreReach + 32.0f;
+	p.cullMarginZ = 0.8f * oceanReach / choppy + shoreReach + std::max(d.Shore0.w, 0.0f) + 4.0f * std::max(d.Ripple1.x, 0.0f) + 32.0f;
+	p.fadeStart = d.Params1.z;
+	p.fadeEnd = d.Params1.w;
+	p.grid = d.Grid0;
+	p.ripples = d.Ripple0.w > 0.5f;
+	p.rippleX = d.Ripple0.x;
+	p.rippleY = d.Ripple0.y;
+	p.rippleInvExtent = d.Ripple0.z;
+	// Fluid Field's near water: as detailed as the ripples' area, and its surface lifts the water up to FluidHeightLimit
+	if (globals::features::fluidFieldShallowWater.NearArea(p.simMin, p.simMax))
+		p.cullMarginZ += 140.0f;
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (d.Shore0.x > 0.5f && snap && snap->shoreField) {
+		p.shore = snap->shoreField.get();
+		p.shoreMinX = d.ShoreMap.x;
+		p.shoreMinY = d.ShoreMap.y;
+		p.shoreInvX = d.ShoreMap.z;
+		p.shoreInvY = d.ShoreMap.w;
+	}
+	p.deepLength = d.Shore3.w;
+	p.curl = d.Shore3.z;
+	p.curlDetail = d.Shore1.y;
+	p.curlDepth = PBRWaterModel::ShoreCurlDepth(std::max(d.Shore1.z, d.Shore1.w) / UnitsPerMetre);
+	tessellator.Build(p);
+	// The draws' ShoreCurlSpacing: the coarsening the mesh was built at.
+	frameData.Draw0.w = std::max(tessellator.GetStats().detailScale, 1.0f);
+
+	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
+	context->CSSetShaderResources(110, WaterSRVCount, nullSrvs);
+	context->CSSetShaderResources(8, 1, nullSrvs);
+	ID3D11Buffer* nullCbs[1] = { nullptr };
+	context->CSSetConstantBuffers(7, 1, nullCbs);
+	ID3D11SamplerState* nullSamplers[2] = { nullptr, nullptr };
+	context->CSSetSamplers(12, 2, nullSamplers);
+	context->CSSetSamplers(8, 1, nullSamplers);
 }
 
 void PBRWater::UpdateShoreTextures()
@@ -1162,7 +1462,7 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 	// nearest point of the coast, where half floats would step them visibly. The slownesses (0.05-1 s/m) and the rest
 	// are fine as halves.
 	std::vector<float> times(count * 4);
-	std::vector<uint16_t> rays(count * 4), room(count);
+	std::vector<uint16_t> rays(count * 4), room(count * 2);
 	auto half = [](float v) { return DirectX::PackedVector::XMConvertFloatToHalf(v); };
 	for (size_t i = 0; i < count; ++i) {
 		times[i * 4 + 0] = field->travelTime[i];
@@ -1174,7 +1474,8 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 		rays[i * 4 + 1] = half(field->slownessY[i]);
 		rays[i * 4 + 2] = half(field->slope[i]);
 		rays[i * 4 + 3] = half(field->exposure[i]);
-		room[i] = half(field->room[i]);
+		room[i * 2 + 0] = half(field->room[i]);
+		room[i * 2 + 1] = half(field->crestDepth.size() == count ? field->crestDepth[i] : 0.0f);
 	}
 
 	auto create = [&](DXGI_FORMAT format, const void* data, UINT pitch, const char* name) -> std::unique_ptr<Texture2D> {
@@ -1203,7 +1504,7 @@ PBRWater::ShoreTextures PBRWater::UploadShoreField(std::shared_ptr<const PBRWate
 	};
 	result.times = create(DXGI_FORMAT_R32G32B32A32_FLOAT, times.data(), static_cast<UINT>(field->width * 4 * sizeof(float)), "PBRWater::ShoreTimes");
 	result.rays = create(DXGI_FORMAT_R16G16B16A16_FLOAT, rays.data(), static_cast<UINT>(field->width * 4 * sizeof(uint16_t)), "PBRWater::ShoreRays");
-	result.room = create(DXGI_FORMAT_R16_FLOAT, room.data(), static_cast<UINT>(field->width * sizeof(uint16_t)), "PBRWater::ShoreRoom");
+	result.room = create(DXGI_FORMAT_R16G16_FLOAT, room.data(), static_cast<UINT>(field->width * 2 * sizeof(uint16_t)), "PBRWater::ShoreRoom");
 	if (result.times && result.rays && result.room)
 		result.field = std::move(field);
 	else
@@ -1270,6 +1571,100 @@ void PBRWater::UpdateSwash(float dt)
 	// Lit terrain and objects read the wet sand, the foam on it and the water height from it.
 	ID3D11ShaderResourceView* wetSrv = swash.IsReady() ? swash.GetWetSRV() : nullptr;
 	context->PSSetShaderResources(123, 1, &wetSrv);
+}
+
+uint32_t PBRWater::SprayPoolSize() const
+{
+	constexpr uint32_t sizes[3] = { 16384, 65536, 131072 };
+	return sizes[std::clamp(settings.SprayQuality, 0, 2)];
+}
+
+void PBRWater::UpdateSpray(float dt)
+{
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (!gpuBuffer || !settings.EnableSpray || !spray.IsReady() || !snap || !snap->exterior || !globals::shaderCache->IsEnabled()) {
+		PBRWaterProfiling::Skipped("PBRWater::SprayEmit");
+		PBRWaterProfiling::Skipped("PBRWater::SpraySim");
+		return;
+	}
+
+	// The emit pass evaluates the waves as the draws do: this frame's constants, textures and the surf's state.
+	auto context = globals::d3d::context;
+	GpuData d = frameData;
+	d.Tess0.x = 0.0f;
+	gpuBuffer->Update(d);
+	ID3D11Buffer* cbs[1] = { gpuBuffer->CB() };
+	context->CSSetConstantBuffers(7, 1, cbs);
+	ID3D11Buffer* frameBuffers[1] = { *globals::game::perFrame.get() };
+	context->CSSetConstantBuffers(12, 1, frameBuffers);
+	ID3D11ShaderResourceView* srvs[WaterSRVCount];
+	GatherWaterSRVs(d, srvs);
+	context->CSSetShaderResources(110, WaterSRVCount, srvs);
+	ID3D11SamplerState* samplers[2] = { linearClampSampler.get(), oceanSampler.get() };
+	context->CSSetSamplers(12, 2, samplers);
+
+	const auto& cameraPos = globals::game::frameBufferCached.GetCameraPosAdjust();
+	SprayParticles::FrameInput input;
+	input.dt = dt;
+	const float windSpeed = d.Params0.y;
+	input.windSpeed = windSpeed;
+	// The wind the spray meets a metre or so over the water, not the 10 m wind the weather gives: the log profile over a
+	// rough sea, U(z) / U(10 m) = ln(z / z0) / ln(10 m / z0) with z0 ~ 0.2 mm (Charnock), about 0.8 at 1 m, and the spray
+	// thrown up in the lee of its own crest meets less still.
+	constexpr float NearSurfaceWind = 0.6f;
+	input.windVelocity = { d.Params1.x * windSpeed * NearSurfaceWind * UnitsPerMetre, d.Params1.y * windSpeed * NearSurfaceWind * UnitsPerMetre };
+	input.gravity = d.Params0.w;
+	input.cameraX = cameraPos.x;
+	input.cameraY = cameraPos.y;
+	input.cellSize = CellSize;
+	input.cellX = std::floor(cameraPos.x / CellSize);
+	input.cellY = std::floor(cameraPos.y / CellSize);
+	OccluderCB levels{};
+	FillOccluderLevels(levels, input.cellX, input.cellY);
+	for (size_t i = 0; i < input.cellLevels.size(); ++i)
+		input.cellLevels[i] = levels.cellLevels[i].x;
+
+	if (d.Foam2.w > 0.5f && swash.GetSpraySourceSRV()) {
+		input.shoreSource = swash.GetSpraySourceSRV();
+		input.shoreStage = swash.GetStageSRV();
+		input.shorePrep = swash.GetPrepSRV();
+		input.shoreOriginX = swash.GetFoamOriginX();
+		input.shoreOriginY = swash.GetFoamOriginY();
+		input.shoreTexelSize = ShoreSimulation::FoamTexelSize;
+		input.shoreGridSize = ShoreSimulation::FoamGridSize;
+	}
+
+	SprayParticles::Settings spraySettings;
+	spraySettings.emitters = &settings.SprayEmitters;
+	spraySettings.amount = settings.SprayAmount;
+	spraySettings.range = settings.SprayRange;
+	spraySettings.poolSize = SprayPoolSize();
+	spray.Update(input, spraySettings);
+
+	ID3D11ShaderResourceView* nullSrvs[WaterSRVCount] = {};
+	context->CSSetShaderResources(110, WaterSRVCount, nullSrvs);
+	ID3D11Buffer* nullCbs[1] = { nullptr };
+	context->CSSetConstantBuffers(7, 1, nullCbs);
+	ID3D11SamplerState* nullSamplers[2] = { nullptr, nullptr };
+	context->CSSetSamplers(12, 2, nullSamplers);
+}
+
+void PBRWater::DrawSpray()
+{
+	if (!loaded || !settings.EnableSpray || !spray.IsReady() || !globals::shaderCache->IsEnabled())
+		return;
+	auto* state = globals::state;
+	if (sprayDrawFrame == state->frameCount)
+		return;
+	const auto snap = snapshot.load(std::memory_order_acquire);
+	if (!snap || !snap->exterior)
+		return;
+	// From under the water the surface hides it.
+	if (const auto* water = RE::TESWaterSystem::GetSingleton(); water && water->playerUnderwater)
+		return;
+	sprayDrawFrame = state->frameCount;
+	auto* depth = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
+	spray.Draw(depth);
 }
 
 PBRWater::SharedSettings PBRWater::GetCommonBufferData() const
@@ -1590,7 +1985,9 @@ void PBRWater::UpdateFrameConstants()
 		const bool active = ocean.IsReady() && !o.calm;
 		d.Params0 = { active ? 1.0f : 0.0f, o.windSpeed, o.peakOmega, static_cast<float>(PBRWaterModel::Gravity) * UnitsPerMetre };
 		d.Params1 = { std::cos(snap->windDirection), std::sin(snap->windDirection), settings.DisplacementFadeStart, settings.DisplacementFadeEnd };
-		d.Params2 = { o.choppiness, 0.0f, active ? o.displacementBound : 0.0f, static_cast<float>(std::max(ocean.GetMipCount(), 1u) - 1) };
+		// y: with waves the surface is real geometry and Water Effects' parallax over the normal maps is skipped (Water.hlsl
+		// GetWaterNormal): its march cost a tenth of the surface pass for detail the waves already carry.
+		d.Params2 = { o.choppiness, settings.WaveHeight > 0.0f ? 1.0f : 0.0f, active ? o.displacementBound : 0.0f, static_cast<float>(std::max(ocean.GetMipCount(), 1u) - 1) };
 		d.RefCamPos = { static_cast<float>(snap->refX), static_cast<float>(snap->refY), static_cast<float>(snap->refZ), 0.0f };
 		// Shore waves need the coastline maps the snapshot blends between on the GPU. The clock runs at this frame's
 		// (eased) frequency, but each map's lag omega tau uses the frequency it was traced for: with the eased one, tau
@@ -1692,7 +2089,8 @@ void PBRWater::UpdateFrameConstants()
 	d.Light0 = { settings.Roughness, settings.Subsurface, settings.VanillaFresnel, settings.SunSpecular };
 	d.Light1 = { settings.Visibility, 0.0f, settings.RefractionDistortion, settings.PointLightSpecular };
 	// Where the waves break.
-	d.Foam1 = { 0.0f, 0.0f, 0.0f, settings.RiverWaveDamping };
+	// The open sea's foam test, for the shore waves' crests (PBRWater::ShoreCrestFoam).
+	d.Foam1 = { settings.FoamBias, settings.FoamThreshold, 0.0f, settings.RiverWaveDamping };
 
 	// Water clarity and the light in the water.
 	d.Clarity0 = { settings.SedimentDensity / UnitsPerMetre, settings.Turbidity, settings.TurbidityPatchiness, settings.TurbidityPatchSize * UnitsPerMetre };
@@ -1726,6 +2124,7 @@ void PBRWater::UpdateFrameConstants()
 	d.Tune3 = { settings.RippleHorizDisplace, settings.RippleDisplaceClamp, settings.ShoreTrainCycles, settings.ShoreResidualFoam };
 	d.Tune4 = { settings.ShoreWaveVariation, PBRWaterModel::ShoreCrestLength(settings.DirectionalSpread), settings.DetailNormalCalm, settings.DetailNormalGale };
 	d.Tune5 = { settings.PointLightEmitterRadius, settings.FoamFeather, settings.FoamBubbleSize, settings.ShoreFoamLifetime };
+	d.Swash1 = { settings.SwashChurnHeight * UnitsPerMetre, settings.SwashChurnDepth, settings.SwashChurnSize * UnitsPerMetre, settings.SwashChurnSpeed };
 
 	// The worldspace flowmap calms waves on rivers, looked up by position in every water pass.
 	worldFlowmap = nullptr;
@@ -1758,31 +2157,26 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// Fluid Field's simulated water displaces the surface where its area reaches (DisplaceSurface)
 	const bool hasWaves = waves && snap && ((snap->ocean && !snap->ocean->calm && ocean.IsReady()) || snap->shore.enabled || settings.EnableRipples || globals::features::fluidFieldShallowWater.Covers(pass->geometry->worldBound));
 
-	// Our hull/domain shaders only match our own vertex and pixel shaders of the same descriptor. While
-	// those are still compiling the vanilla shaders are bound, and tessellating them would break the
-	// stage signatures, so only tessellate once both are live.
+	// The compute tessellator's mesh is drawn by our own vertex shader (its modes, Tess0.x): while that is still
+	// compiling the vanilla shaders are bound, and the draw stays the engine's.
 	auto customShadersLive = [&] {
 		return shaderCache->IsEnabled() && shaderCache->GetVertexShader(*waterShader, vertexDescriptor) &&
 		       shaderCache->GetPixelShader(*waterShader, state->modifiedPixelDescriptor);
 	};
 
-	ID3D11HullShader* hullShader = nullptr;
-	ID3D11DomainShader* domainShader = nullptr;
-	if (settings.EnableTessellation && hasWaves && IsTessellatedTechnique(technique) && customShadersLive()) {
-		hullShader = shaderCache->GetHullShader(*waterShader, vertexDescriptor);
-		domainShader = shaderCache->GetDomainShader(*waterShader, vertexDescriptor);
-		// Async compiles are queued on first request, so only a shader still missing well after the
-		// compile queue drained is a real failure.
-		if ((hullShader && domainShader) || shaderCache->IsCompiling()) {
-			tessellationMissingSince = UINT32_MAX;
-		} else if (tessellationMissingSince == UINT32_MAX) {
-			tessellationMissingSince = state->frameCount;
-		} else if (state->frameCount - tessellationMissingSince > 300 && !tessellationFailureLogged) {
-			tessellationFailureLogged = true;
-			logger::warn("[PBR Water] Hull/domain shader unavailable for water descriptor {:X}; drawing without tessellation", vertexDescriptor);
-		}
+	// The compute tessellator's mesh is built for the main camera: every pass of the main view draws it (depth and
+	// motion, surface, point lights, underwater), each the same vertices. The other views (reflections, cubemaps, the
+	// map) see the water small or not at all, and draw it untessellated, as does a draw the mesh does not cover yet
+	// (its first frame, a mesh the tessellator leaves alone, a frame over its budget).
+	const bool mainView = state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections));
+	bool cached = false;
+	uint32_t cachedStart = 0;
+	uint32_t cachedCount = 0;
+	if (settings.EnableTessellation && tessellator.IsReady() && hasWaves && IsTessellatedTechnique(technique) && mainView && customShadersLive()) {
+		// Next frame's mesh covers this draw; this frame's does if the draw was there last frame too.
+		tessellator.Register(*pass->geometry);
+		cached = tessellator.BuiltFor(state->frameCount, globals::game::frameBufferCached.GetCameraPosAdjust()) && tessellator.Lookup(*pass->geometry, cachedStart, cachedCount);
 	}
-	const bool tessellate = hullShader && domainShader;
 
 	ID3D11GeometryShader* geometryShader = nullptr;
 	if (settings.WireframeMode > 0 && !IsStencilTechnique(technique) && customShadersLive())
@@ -1793,11 +2187,11 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	uint32_t triangleCount = 0;
 	if (const auto triShape = pass->geometry->AsTriShape()) {
 		triangleCount = triShape->GetTrishapeRuntimeData().triangleCount;
-		if (hasWaves && !tessellate && triangleCount)
+		if (hasWaves && !cached && triangleCount)
 			spacing = pass->geometry->worldBound.radius * std::numbers::sqrt2_v<float> / std::max(std::sqrt(triangleCount * 0.5f), 1.0f);
 	}
 
-	// What the tessellator is given (Debug section): its patches are the meshes' own triangles.
+	// The water draws and which of them the compute mesh drew (Debug section).
 	if (state->frameCount != drawStatsFrame) {
 		lastDrawStats = drawStats;
 		drawStats = {};
@@ -1805,26 +2199,29 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	}
 	++drawStats.draws;
 	++drawStats.byTechnique[DrawPassIndex(technique)];
-	if (tessellate) {
-		++drawStats.tessellated;
-		drawStats.patches += triangleCount;
-	}
+	if (cached)
+		++drawStats.computeDraws;
 
 	// Most water is flat distant tiles, hundreds of them: anything done per draw is paid hundreds of times per pass. The
-	// constants differ between draws only in whether they tessellate and, without tessellation, the spacing: both kinds
-	// are uploaded once and swapped by binding the other buffer.
+	// constants differ between draws only in the vertex shader's mode (Tess0.x) and, without tessellation, the spacing: the
+	// modes are uploaded once and swapped by binding another buffer.
 	GpuData& d = frameData;
 	if (std::memcmp(&uploadedDrawData, &d, sizeof(GpuData)) != 0) {
 		uploadedDrawData = d;
 		GpuData drawData = d;
 		drawData.Tess0.x = 1.0f;
 		drawBuffer->Update(drawData);
+		drawData.Tess0.x = 2.0f;
+		swallowDrawBuffer->Update(drawData);
 		drawData.Tess0.x = 0.0f;
 		flatDrawBuffer->Update(drawData);
 		GatherWaterSRVs(d, drawSRVs);
 		drawResourcesFrame = UINT32_MAX;
 	}
-	ID3D11Buffer* cb = tessellate ? drawBuffer->CB() : flatDrawBuffer->CB();
+	// The engine's own draw of a mesh the compute tessellator draws runs the vertex shader in its culling mode (Tess0.x =
+	// 2): it rasterises nothing, and RestoreDraw draws the mesh with the compute mode's constants, which the pixel stage
+	// gets now.
+	ID3D11Buffer* cb = cached ? drawBuffer->CB() : flatDrawBuffer->CB();
 	if (spacing > 0.0f) {
 		GpuData drawData = d;
 		drawData.Tess0.x = 0.0f;
@@ -1832,7 +2229,8 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		gpuBuffer->Update(drawData);
 		cb = gpuBuffer->CB();
 	}
-	context->VSSetConstantBuffers(7, 1, &cb);
+	ID3D11Buffer* vertexCb = cached ? swallowDrawBuffer->CB() : cb;
+	context->VSSetConstantBuffers(7, 1, &vertexCb);
 	context->PSSetConstantBuffers(7, 1, &cb);
 	globals::features::fluidFieldShallowWater.BindForDisplacement(context);
 
@@ -1843,17 +2241,11 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 		drawResourcesFrame = state->frameCount;
 		ID3D11ShaderResourceView* flowmap = d.Flow0.x != 0.0f ? worldFlowmap : nullptr;
 		context->VSSetShaderResources(110, WaterSRVCount, drawSRVs);
-		context->HSSetShaderResources(110, WaterSRVCount, drawSRVs);
-		context->DSSetShaderResources(110, WaterSRVCount, drawSRVs);
 		context->PSSetShaderResources(110, WaterSRVCount, drawSRVs);
 		context->VSSetSamplers(12, 2, samplers);
-		context->HSSetSamplers(12, 2, samplers);
-		context->DSSetSamplers(12, 2, samplers);
 		// The vertex program reads the worldspace flowmap to calm waves on rivers.
 		context->VSSetShaderResources(8, 1, &flowmap);
-		context->DSSetShaderResources(8, 1, &flowmap);
 		context->VSSetSamplers(8, 1, &linearClamp);
-		context->DSSetSamplers(8, 1, &linearClamp);
 	} else {
 		ID3D11ShaderResourceView* bound[2] = {};
 		context->PSGetShaderResources(110, 2, bound);
@@ -1877,39 +2269,9 @@ void PBRWater::SetupDraw(RE::BSShader* waterShader, RE::BSRenderPass* pass)
 	// pending updates for this draw. RestoreDraw() marks them again so the next draw gets the game's.
 	shadow.PSSamplerModifiedBits &= ~(3u << 12);
 
-	if (tessellate) {
-		// The domain shader runs the full vertex program: give it everything the vertex shader has.
-		ID3D11Buffer* vsBuffers[3] = {};
-		if (const auto* vertexShader = shadow.currentVertexShader) {
-			for (uint32_t i = 0; i < 3; ++i)
-				vsBuffers[i] = reinterpret_cast<ID3D11Buffer*>(vertexShader->constantBuffers[i].buffer);
-		}
-		ID3D11Buffer* frameBuffer = nullptr;
-		context->VSGetConstantBuffers(12, 1, &frameBuffer);
-		if (!frameBuffer)
-			context->PSGetConstantBuffers(12, 1, &frameBuffer);
-
-		context->HSSetConstantBuffers(0, 3, vsBuffers);
-		context->HSSetConstantBuffers(7, 1, &cb);
-		context->HSSetConstantBuffers(12, 1, &frameBuffer);
-		context->DSSetConstantBuffers(0, 3, vsBuffers);
-		context->DSSetConstantBuffers(7, 1, &cb);
-		context->DSSetConstantBuffers(12, 1, &frameBuffer);
-
-		if (frameBuffer)
-			frameBuffer->Release();
-
-		// The renderer only re-applies its cached topology when it changes, so make sure its cache
-		// says "triangle list" with nothing pending, then switch the device to patches behind it.
-		// RestoreDraw() puts the device back in sync before anything else is drawn.
-		shadow.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-		shadow.stateUpdateFlags.reset(RE::BSGraphics::ShaderFlags::DIRTY_PRIMITIVE_TOPO);
-		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
-
-		context->HSSetShader(hullShader, nullptr, 0);
-		context->DSSetShader(domainShader, nullptr, 0);
-		tessellationBound = true;
-	}
+	cachedDrawPending = cached;
+	cachedDrawStart = cachedStart;
+	cachedDrawCount = cachedCount;
 
 	if (geometryShader) {
 		context->GSSetConstantBuffers(7, 1, &cb);
@@ -1986,11 +2348,12 @@ void PBRWater::RestoreDraw()
 	auto context = globals::d3d::context;
 	// Rebound by the renderer's next flush: Lighting uses these slots.
 	globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits |= (3u << 12);
-	if (tessellationBound) {
-		context->HSSetShader(nullptr, nullptr, 0);
-		context->DSSetShader(nullptr, nullptr, 0);
-		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		tessellationBound = false;
+	if (std::exchange(cachedDrawPending, false)) {
+		// The engine's draw rasterised nothing (the vertex shader's culling mode): the compute mesh, with all of the
+		// draw's state, the vertex shader in its compute mode.
+		ID3D11Buffer* cb = drawBuffer->CB();
+		context->VSSetConstantBuffers(7, 1, &cb);
+		tessellator.Draw(cachedDrawStart, cachedDrawCount);
 	}
 	if (geometryShaderBound) {
 		context->GSSetShader(nullptr, nullptr, 0);
@@ -2550,6 +2913,9 @@ void PBRWater::PostPostLoad()
 	// Same Main::Update call site Grass Collision uses; write_thunk_call chains with it.
 	stl::write_thunk_call<MainUpdate>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
 
+	// The world's effects pass (Frame Annotations' "Effects"); Detours chains with its detour.
+	stl::detour_thunk<BSShaderAccumulator_RenderEffects>(REL::RelocationID(99940, 106585));
+
 	logger::info("[PBR Water] Installed hooks");
 }
 
@@ -2624,6 +2990,15 @@ void PBRWater::BSWaterShader_RestoreTechnique::thunk(RE::BSShader* waterShader, 
 {
 	func(waterShader, technique);
 	globals::features::pbrWater.EndDrawBatch();
+}
+
+void PBRWater::BSShaderAccumulator_RenderEffects::thunk(RE::BSShaderAccumulator* accumulator, uint32_t renderFlags)
+{
+	// The main view's world pass only: not the reflections, the cubemaps or the first person view.
+	const auto* state = globals::state;
+	if (state->inWorld && !(state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections)))
+		globals::features::pbrWater.DrawSpray();
+	func(accumulator, renderFlags);
 }
 
 #undef I18N_KEY_PREFIX

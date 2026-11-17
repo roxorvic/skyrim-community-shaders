@@ -53,7 +53,7 @@ wave train.
 
 | Consumer               | Code                                            | Purpose                                                         |
 | ---------------------- | ----------------------------------------------- | --------------------------------------------------------------- |
-| Vertex / domain shader | `PBRWater::DisplaceSurface`                     | displacement, current and previous frame, mip by vertex spacing |
+| Vertex program         | `PBRWater::DisplaceSurface`                     | displacement, current and previous frame, mip by vertex spacing |
 | Pixel shader           | `PBRWater::ShadeSurface`                        | filtered normals, LEAN roughness, breaking, aeration            |
 | CPU                    | `WaveSnapshot::SampleAt`, `ParcelDisplacements` | water height for swimming, buoyancy and floating objects        |
 
@@ -105,7 +105,7 @@ visibility, subsurface, roughness.
 ### Rivers
 
 Where Unified Water's worldspace flowmap shows a current, the waves are damped (`WaveParam.w`) and carried along it.
-The vertex/domain shader reads the flowmap once by position (`GetWaveFlowDamping`) and gets the current
+The vertex program reads the flowmap once by position (`GetWaveFlowDamping`) and gets the current
 (`PBRWater::FlowVelocity`: RG direction, B x A strength, the River Current Speed setting at full strength); the pixel shader gets it as
 a vertex interpolant (`FlowVelocity`). After Crest's `ShapeCombine` flow, `FlowPhases` gives each cascade two reads
 pushed back along the current by two phases of a sawtooth clock half a period apart (period from the cascade's texel, a
@@ -121,8 +121,10 @@ Within a few waves of the shore the random sea hands over to Fluid Flux 2-style 
 DaiZiLing's HLSL port of its `MF_SurfaceFlux_Coastline`, the Flux2-Shoreline-Wave-HLSL repository): a train of waves
 running up a coastline map that is traced over the real depths instead of baked. No per-shore setup: everything follows
 from the sea state and the terrain. Four parts: a coastline map (CPU, how long the waves take to reach the waterline
-from where), the train (GPU, what they look like), the swash (GPU, what they do on the beach) and a per-pixel waterline
-(where the water ends).
+from where), the train (GPU, analytic: each wave shoaling, curling and breaking), the surf simulation (GPU, shallow
+water: each broken wave running in as a bore, collapsing at the waterline and running up the beach and back) and a
+per-pixel waterline (where the water ends). The train hands each wave to the simulation over a fixed band of depths
+in the inner surf, and the drawn surface passes from the one to the other across it.
 
 -   **Coastline map** (`WaveModel::BuildShoreField`, rebuilt on a `WaterEnvironment` worker around the player:
     768^2 texels of 128 units, ~1.4 km across, from the terrain and each cell's water level from Unified Water's
@@ -156,10 +158,17 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
     are; the room fades the train where it drops below ~0.9 (Fluid Flux's coastline mask), and where no ray arrived.
 -   **Train** (`PBRWater::ShoreWaveAt` and `ShoreWaves`, mirrored by `WaveModel.cpp`'s `ShoreTrain` for gameplay):
     -   _Whole waves_: the phase, `clock + omega tau` plus the offset along the coast, is cut into cycles, one per wave
-        (as Fluid Flux's `frac` of its wave distance). Each wave is decided once, at its own crest half a wave away at
-        most, so all of it agrees: its height (the sea's `Hrms = Hs / sqrt(2)`, its set, Green's law shoaling over the
-        depth under the crest, up to the breaking limit `H = gamma h` and no steeper than Miche's `H / L = 0.142`) and its
-        life stage. The breaker index `gamma` is Weggel's (1972) `b(m) - a(m) Hb / (g T^2)`, `a = 43.75 (1 - e^-19m)`,
+        (as Fluid Flux's `frac` of its wave distance). Each wave is decided once, where its crest stands as it breaks
+        (phase 0.32, `ShoreCrestReference`), a third of a wave away at most, so all of it agrees: its height (the sea's
+        `Hrms = Hs / sqrt(2)`, its set, Green's law shoaling over the crest depth, up to the breaking limit `H = gamma h`
+        and no steeper than Miche's `H / L = 0.142`) and its life stage. The _crest depth_ (`ShoreField::crestDepth`,
+        baked with the coastline map, t124.y, `ShoreCrestDepth`) is the depth averaged along the crest (a LAND quad at
+        least, a quarter wave at most either way) and never more than the least the wave crossed on its way in, carried
+        shorewards along the rays: breaking is not undone, so a wave's stage only ever advances. Read from the bed under
+        the crest (five terrain lookups per vertex), the stage followed every crease and dip of the terrain, backwards as
+        well as forwards: the whole wave trembled as it came in, a curl unwound over the trough behind a bar, and
+        neighbouring stretches of one crest stood at different stages a few units apart. (A wave that breaks on a shoal
+        far out stays a bore to the shore; it does not re-form in the deeper water behind.) The breaker index `gamma` is Weggel's (1972) `b(m) - a(m) Hb / (g T^2)`, `a = 43.75 (1 - e^-19m)`,
         `b = 1.56 / (1 + e^-19.5m)` on the beach slope `m` (`ShoreBreakerIndex`): McCowan's 0.78 on a flat bed, higher on
         steep beaches. Up to the limit the stage is `r / (1 + r)` with `r` the shoaled height over the limit (the wave
         peaks as it shoals). Past it the stage runs on the distance travelled since the break point, in breaker heights,
@@ -169,15 +178,21 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         while the depth fell to a third of the breaking depth, tens of metres on a gentle beach. So a wave peaks where it
         shoals, breaks where it reaches its limit, on a sandbar as on the beach, and sooner if it is a big one; several
         waves at different stages stand along a ray at once.
-    -   _Shape_ (`ShoreProfile.cpp`, t114): Fluid Flux draws its waves from a canned profile animation, a texture by
-        position across the wave and life. This one is computed at start-up (256 x 64, two RGBA16F slices): forward and
-        upward displacement, their derivatives, and the white water. A sinusoid narrows into a peaked crest over long
-        flat troughs as it shoals (cnoidal), its water is thrown ahead of the front into a lip (each stage's forward motion is
-        scaled so the surface never stretches below 0.35 of itself: a fold drew as a flat top over a right-angled wall at
-        the mesh's vertex spacing)
-        (plunging), which falls into a bore: a short front and a long back (Svendsen 2006), lower than the wave that
-        broke. Displacement and surface vanish at both ends of a wave, so consecutive waves meet without a step. The sea's
-        level comes from the depth at the point (continuous), not from the wave.
+    -   _Shape_ (`ShoreProfile.cpp`, t114; `ShoreShapeAt` / `ShoreHump` in the shaders): Fluid Flux draws its waves from
+        a canned profile animation, a texture by position across the wave and life. This one is computed at start-up
+        (256 x 64, two RGBA16F slices): forward and upward displacement, their derivatives, the white water and each
+        stage's forward scale. The wave is one hump through all of its life: a sinusoid narrows into a peaked crest over
+        long flat troughs as it shoals (cnoidal), the crest moving to the front of the wave (phase 0.5 to 0.32); as it
+        breaks the crest runs ahead of the wave (to 0.16 by stage 0.72: where a plunger's lip comes down and the
+        splash-up rises) and the hump turns into a bore, a ramp of about 30 degrees with a long back (Svendsen 1984),
+        0.58 of the height of the wave that broke. The crest only ever moves forward. (Before, the bore was a second
+        hump faded in 0.16 of a wavelength ahead of the sinking crest, while the forward displacement that had thrown the
+        crest towards it was taken back: measured in the wave's own frame the crest fell back 0.065 of a wavelength,
+        sank to half its height, and a new one appeared ahead. That was the hesitation as a wave broke.) Each stage's
+        forward lean is scaled so the surface never stretches below 0.35 of itself (a fold drew as a flat top over a
+        right-angled wall at the mesh's vertex spacing). Displacement and surface vanish at both ends of a wave, so
+        consecutive waves meet without a step. The sea's level comes from the depth at the point (continuous), not from
+        the wave.
     -   _Hand-over_ (`ctx.train`): the train takes over within `ShoreTrainCycles` (setting, default 7) waves of the shore, faded over the
         outer half, counted in waves rather than depth: the beds fall away within a wave or two of the waterline, and a
         depth limit left room for one wave. Offshore it rides on the FFT sea. Only in the surf, as its shoaled height
@@ -195,8 +210,8 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         `ShoreResidualFoam`, "Foam Left Behind", of it), the water carries it semi-Lagrangian (as Crest 4 moves its foam)
         and it decays with the e-folding time `ShoreFoamLifetime` (default 12 s; surf foam outlasts the bubble plume under
         it where coastal surfactants stabilise it) on the water and within a second stranded on dry sand. Under the waves
-        the water moves at `u = c eta / (h + eta)` less the drawn displacement's own rate; at the waterline with the
-        simulated swash's own velocity. Up the beach the profile makes none: the swash carries its own (below). The advection
+        the water moves at `u = c eta / (h + eta)` less the drawn displacement's own rate. It is drawn where the train
+        is the water; inshore of the hand-over the surf simulation carries its own foam (below). The advection
         reads Catmull-Rom, clamped to the four texels around (a bilinear read every frame blurred the foam into smears over
         its lifetime), and the water shader reads the grid as a cubic B-spline (bilinear drew its 35 cm texels as
         diamonds). The breaking wave's own white water (`BreakerFoam`) follows its stages. Until the jet lands the face,
@@ -205,9 +220,8 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         splash-up and then the roller riding the bore's front are churned through (`ShoreAeration`; void fractions to 0.6,
         Na et al. 2016) and drawn opaque white with no pattern, the roller's surface boiling in lumps of half a wave height
         (`ShoreRollerLumps`); the folding of the surface (Jacobian below 0.6) counts from then on. Where the aeration thins
-        behind the roller the white water is the sea's lace (`BreakerFoamDrawn`). The swash's foam stranded on the dry sand
-        (the swash mark, the lace of a draining sheet) is drawn on the ground there, the mesh held on the sand under it. The foam texture is kept for the flat white water: the bore once it
-        has formed and lies near horizontal, what the surf left on the water and the swash sheet's; the two cross-fade by
+        behind the roller the white water is the sea's lace (`BreakerFoamDrawn`). The foam texture is kept for the flat white water: the bore once it
+        has formed and lies near horizontal, what the surf left on the water and the surf simulation's; the two cross-fade by
         the surface's flatness and the wave's stage. A texture on the face, projected from the side and climbing with the
         water (the former `ShoreFaceRise` / `ShoreFaceFoamPhases`), streaked. The pattern holds still where the surface is
         and the foam moves over it as its coverage. Every other way of carrying the pattern tore it: at the rest
@@ -240,11 +254,14 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         surging above 3.3; `ctx.iribarren`). Where the mesh is fine enough (`ShoreCurlWeight`:
         vertex spacing below 1/25 of the wavelength, full at 1/50; tessellated draws only) the plunging stages
         (0.40-0.80) turn the water above a pivot on the front face (45 % of the crest's height) forward about it, by up
-        to 2.3 rad at the crest and less behind it, and throw it 1.2 wave heights ahead, so the crest becomes the lip's
-        tip and falls into the trough in front. The curl grows over stages 0.44-0.64 (to Galvin's plunge point), then
-        the tube is crushed into the plunge point (0.62-0.70) while the bore, its front pushed up ahead of it, takes over
-        (to 0.78; `ShoreBreakerStage` gives the transition half a plunge length, Svendsen 1984, and shortens a spiller's
-        plunge to 0.35 of Galvin's). The bore then settles to the inner surf's saturated height, 0.4-0.6 of the depth with
+        to 2.3 rad at the crest and less behind it, and throw it a wave height ahead, so the crest becomes the lip's
+        tip and falls into the trough in front. The lip is turned out of the wave's own hump at that moment
+        (`ShoreCurlBackground`, the table's surface), so it rides the crest as that runs forward under it. The curl grows
+        over stages 0.44-0.64 (to Galvin's plunge point), then the tube's roof falls onto the water below it (0.62-0.70)
+        and slides back along that surface into the bore (to 0.80; `ShoreBreakerStage` gives the transition half a
+        plunge length, Svendsen 1984, and shortens a spiller's plunge to 0.35 of Galvin's). The lip is kept apart from
+        the surface it rides on (`ShoreTrain::lip`): in the hand-over that surface becomes the surf simulation's, and the
+        lip is drawn over whichever water is under it. The bore then settles to the inner surf's saturated height, 0.4-0.6 of the depth with
         the slope (`ShoreBoreHeight`; Thornton and Guza 1983, Raubenheimer et al. 1996), and keeps a front of 0.15 of the
         breaker's height to the waterline for the swash to carry on; unrolling the lip instead raised a wall of glassy water. The bore's front is a roller of about 30
         degrees (`frontWidth` 0.035 of a wave in ShoreProfile.cpp), not a step. It depends on the wave's aspect, so the shader works it out (three evaluations for the phase
@@ -267,8 +284,9 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
         endless there and only the bed shows through. The water is one depth-tested layer, so the nearest wave hides
         those behind it without any order-independent transparency. Foam is lit about the normal bent halfway up with the sun wrapped around it (whitewater scatters
         light through itself), so the foam on a lip's underside does not go dark.
-        The hull shader
-        divides the target triangle size by `ShoreCurlDetail` (default 2) on the shore wherever a curl can show.
+        The tessellator
+        divides the target triangle size by `ShoreCurlDetail` (default 2) in the surf zone, where a curl can show
+        (`ShoreCurlDepth`: deeper than a large wave of a set can curl in, no wave curls).
         Geometry only: the CPU mirror rides the table's uncurled wave.
 -   **Room for the train** (`ShoreField::room`, `t124`): a train of shoaling, breaking waves needs open water
     a few wavelengths across. Each water texel gets the width of the largest disc of water around it (twice
@@ -290,52 +308,67 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
     shortens with the directional spread (`ShoreCrestLength`: 20 deep wavelengths in a unidirectional swell to 2 in a
     confused sea; Baker et al. 2023), so stretches of one crest break at different distances from the shore. A wave keeps
     its height all the way in.
--   **Swash, simulated** (`SwashStepCS`, near the camera): every bore's uprush is water of its own. The shallow water
-    equations with wetting and drying run on the foam's grid (1024 x 1024, 17 cm, scrolled in whole texels): Rusanov
-    fluxes on the hydrostatic reconstruction of Audusse et al. (2004), which keeps water at rest over any bed, keeps
-    depths positive and lets the edge run over dry sand; explicit steps of at most 3.5 ms (up to ten a frame), the bed
-    held no deeper than 2 m; dry sand with dry neighbours and no foam is skipped. The surf hands its water over:
-    `ShoreFoamCS` lays out the bed and, from deeper than about 0.7 of the waves' height (while the bore is still a bore),
-    the analytic waves' level, their water's velocity (under a crest the bore's, Rankine-Hugoniot: `C = sqrt(g h2 (h1 +
-    h2) / (2 h1))`, `u2 = C (1 - h1 / h2)`, so collapsing bores launch uprushes of a few metres a second; Shen and Meyer
-    1963, Hughes 1992) and their foam, and the state is relaxed to them there (50 ms), so each bore enters
-    as itself. The hand-over (`SwashHandOver`) runs from about 0.7 of the waves' height deep and is finished by
-    about 0.4 m of water, before the drawn bore's front collapses, so the simulation carries the bore's water through
-    the collapse; the drawn shore waves give way to it in the same measure (`DrawnShoreWaves`), so only one crest runs in. Each wave comes in turned by up to 10 degrees of its own (a hash of its number and stretch of coast), so
-    neighbouring uprushes cross. Inshore of that the water is free: it runs up the slope, slows, drains back, meets the
-    next uprush (a hydraulic jump) and the ones beside it. Bed friction is implicit, its drag coefficient
-    `0.006 * SwashLinger` (setting, default 2): more drag, a shorter uprush that drains back more slowly. The foam is a
-    tracer per area carried upwind with the water: the bores' foam rides in with them, thins as the sheet spreads, decays
-    over `ShoreFoamLifetime` on the water and within a few seconds stranded on the sand (the swash mark), and white water
-    forms where the water converges hard (uprush into backwash or into another uprush) and at the uprush's front, where
-    the depth falls away ahead of fast water. `SwashOutCS` packs the swash's surface, depth
-    and foam with the surf's foam into `ShoreFoamTexture` (t127); the draws (`SwashSheet`, `SwashSurface`), the wet
-    sand (`ShoreSimCS`) and the foam read it. Where the surf holds the water the analytic waves are drawn and the swash
-    has no depth. Past the grid (beyond about 80 m, faded over its outer tenth) the analytic swash below takes over.
--   **Swash, analytic** (`PBRWater::SwashTip`, past the simulation's grid): from the crests that reached the waterline of the ray through a point
-    over the last four periods (an uprush each time a bore's front, `ShoreBoreFront` into the cycle, reaches the
-    waterline, each with its own height), the tip runs up as far as Stockdon et al. (2006) give and moves ballistically, decelerating at `g sin^2 beta` (Shen & Meyer 1963; Peregrine &
-    Williams 2001). The backwash takes `SwashLinger` (setting, default 2) times as long as the uprush (deceleration
-    divided by its square, and the sheet thins on the stretched time): the water soaks in and drags on the sand
-    on the way down, so the sheet and its foam stay on the beach longer. Stockdon's `L0` is the real sea's deep-water
-    wavelength (`ShoreParams::seaLength`, Shore4.z), not the shore train's held-short period: run-up grows with
-    `sqrt(H0 L0)`, and the train's 3 s wavelength cut it to about a third. The bore keeps its white water to the waterline
-    (the profile no longer fades it over the last stages); a fresh uprush is all foam and drains as lace, by its age
-    from the lens coefficient (`swashFresh`), its leading 15 cm white. The water over the beach is a thin sheet (`SwashTop`: 15 % of the height below the tip,
-    at most 30 cm), never a raised mesh. Once a crest has drained the tip keeps falling below the still water
-    rather than resting at it, so the vertices interpolate it linearly (a tip clamped at 0 put the swash front
-    on the triangle edges). The swash mark (the highest a drained crest reached) goes to the pixels with the
-    tip; up to it the mesh stays above the bed and both passes keep the pixels.
+-   **Surf and swash, simulated** (`SwashStepCS`, `ShoreSimulation::UpdateFoam`, near the camera): what a broken wave
+    does is no function of that one wave. Its bore runs into the backwash of the wave before, collapses at the waterline
+    and sends its water up the beach as a thin sheet that slows on the slope and drains back (Shen & Meyer 1963; Hibberd
+    & Peregrine 1979: the nonlinear shallow water equations carry all of it, the bore as their shock). So the inner surf
+    and the swash are the shallow water equations with wetting and drying on a camera-centred grid (1024 x 1024, 17 cm,
+    scrolled in whole texels).
+    -   _Scheme_: Stelling & Duinmeijer's (2003), the one the coastal models SWASH and XBeach use for the swash: depths
+        at the cell centres, velocities at the faces, the momentum advected in conservation form and the depth carried
+        by the upwind cell's. Two passes a step (the face velocities under the old depths, then the depths with the new
+        velocities), steps of at most 4 ms, no face moving water more than a quarter of a cell (so no depth goes
+        negative). It keeps the momentum balance across a bore, leaves water at rest over any bed, and lets a thin sheet
+        climb a slope on its momentum against gravity alone. The Rusanov fluxes on the hydrostatic reconstruction it
+        replaces (Audusse et al. 2004) smeared a bore over seven cells and stopped any sheet shallower than the bed's
+        rise from one cell to the next as if against a wall. Measured in one dimension at the grid's cell size against
+        the exact dam-break swash (Shen & Meyer; Peregrine & Williams 2001) on a 1:10 beach: the 1 cm contour of the
+        lens reaches 1.71 m of the exact 1.77 m (was 1.0-1.2 m; on 1:6.7, one cell), and a bore of 0.5 m into 0.2 m
+        travels at the Rankine-Hugoniot speed (11.62 of 11.72 m in 4 s) two cells wide.
+    -   _Bed_: Manning's drag, `n = 0.02` for sand (times `SwashLinger`, setting, default 2, on the drag: more of it,
+        a shorter uprush that drains back more slowly), implicit so it stops a thin sheet without turning it round; the
+        sand above the still water soaks the sheet up at 1 mm/s.
+    -   _Hand-over_ (`PBRWater::SurfSharesAt`, laid out each frame by `ShoreFoamCS`): fixed in space, by the break
+        ratio `r` of the place (`ShoreBreakRatio`: the mean wave's shoaled height over the breaker limit of the depth; 1
+        at the mean break point, growing as `depth^-5/4` inshore). Up to `r = 2` (a plunger's lip has landed by then on
+        beaches up to about 1:5) the simulation takes the train's waves, from `r = 3.5` it is free, and from `r = 2` to
+        `r = 5` the drawn surface passes from the train's to the simulation's (`ComposeSurf`: the heights blend, the
+        train's forward lean fades, the lip stays). Fixed weights between two surfaces that agree there: nothing
+        switches as a wave passes, and inshore of the band the simulation is the only water, so every uprush is the wave
+        that came in. (Before, the train was drawn to the waterline and faded out over the first 10 cm above it while a
+        sheet of the simulation's, capped at 25 cm, was laid over it from 10 cm of depth by `max`: two different
+        surfaces switching at the waterline.) The waves enter by their incoming Riemann invariant along their travel,
+        `u + 2 sqrt(g h)`, with the train's water moving as a simple wave over still water, `u = 2 (sqrt(g h) -
+        sqrt(g d))`; the simulation keeps its own outgoing invariant, so what the beach sends back leaves freely, and
+        water running out faster than its own waves takes nothing (Van Dongeren & Svendsen 1997; the seaward boundary of
+        swash theory, Guard & Baldock 2007). Further out (`r < 2`, fully by `r < 1`) the outgoing invariant is given up
+        too and the state is the train's. Relaxing the whole state to the train's instead made the hand-over a wall to
+        everything going out. What the simulation takes is the train's level where its water rests (a height field: no
+        forward lean, no lip). Each wave comes in turned by up to 10 degrees of its own, so neighbouring uprushes cross.
+    -   _In one dimension_ (a 1D port of the train into this scheme): every wave's path runs
+        unbroken through the hand-over into a parabolic swash, with run-ups of 0.16 m (1:10), 0.27 m (1:6.7) and 0.36 m
+        (1:5) for `Hs` 0.5 m at 3 s, against Stockdon et al.'s (2006) 0.25, 0.34 and 0.44 m.
+    -   _Foam_: a tracer per area carried upwind with the water. The train's white water comes in with its waves; a
+        bore makes more where the water runs together hard across a step in its depth (the shock, where its energy goes;
+        gated by the step, as the edge of a thin sheet converges too and drew white lines along the water's edge when it
+        counted); the roller's dense foam thins within 0.4 s to what lingers (`ShoreResidualFoam`), which decays over
+        `ShoreFoamLifetime` on the water and within a few seconds stranded on the sand (the swash mark).
+    -   _Drawn_: `SwashOutCS` packs the simulation's surface (the bed where dry, so it is continuous across the water's
+        edge), depth and foam with the surf's foam into `ShoreFoamTexture` (t127). `ComposeSurf` reads it for the
+        geometry (averaged over the vertex spacing where the mesh is coarser than the grid: a bore's front is two cells
+        wide and stepped from vertex to vertex) and for the pixels (exact, with its gradient for the normal; where it is
+        dry the pixel is not water). Past the grid (about 80 m, faded over its outer tenth) the train runs to the
+        waterline and ends there: nothing runs up the beach.
 -   **Waterline per pixel**: near the waterline the vertex shader holds the mesh just above the bed
     (`WaterlineLift`), so where the water ends is decided per pixel. The bed is read where the waves have carried the
     vertex, not under its rest position, and as high as the game's terrain triangles can stand there
     (`TerrainCeiling`: the bilinear height plus a quarter of the LAND quad's twist): held above the bed at its rest
     position, a vertex carried up the slope sank its triangles into the sand and left pockets of ground in the water. Both passes first drop the pixels whose
-    bed (terrain heights at the pixel) lies more than 5 cm above the interpolated waves and the swash sheet
-    rebuilt over that bed (`AboveWaterline`), so the stencil pass (water mask, motion vectors) and the colour
-    pass cover the same pixels; the vertices carry the waves without the sheet, as the sheet ends abruptly at its
-    tip and cannot be interpolated. The colour pass then sets the water's surface at the pixel (the waves, or
-    the swash sheet) against the ground seen through it (depth buffer), so the edge follows the rendered terrain
+    bed (terrain heights at the pixel) lies more than 5 cm above the water (`AboveWaterline`: the interpolated waves,
+    blended with the surf simulation read at the pixel by its interpolated share), so the stencil pass (water mask,
+    motion vectors) and the colour pass cover the same pixels; the vertices carry the waves without the simulation's
+    sheet, which ends abruptly at its front and cannot be interpolated. The colour pass then sets the water's surface
+    at the pixel (`ComposeSurf`) against the ground seen through it (depth buffer), so the edge follows the rendered terrain
     and whatever stands in the water. The thinnest water fades into the ground over 6 cm, and dry pixels inside
     the mask output the ground (`RefractionTex`) instead of discarding: `ISWaterBlend` composites `kRAW_WATER`
     wherever the mask is set, and that target is not cleared, so a discard showed an older frame's water.
@@ -360,61 +393,67 @@ from where), the train (GPU, what they look like), the swash (GPU, what they do 
 
 ## Tessellation
 
-Hull, domain and geometry shaders are first-class `ShaderCache` classes (`ShaderClass::Hull/Domain/Geometry`,
-`GetHullShader()` etc.): compiled per descriptor, async, disk cached (`.hso/.dso/.gso`), hot-reloadable.
+The water is tessellated by a compute tessellator (`WaterTessellator`, `src/Features/PBRWater/ComputeTessellation.*`,
+`TessellationCS.hlsl`). It replaced a hull/domain shader path, which is gone: both need Direct3D 11 feature level 11.0,
+so no GPU could run one and not the other, and the compute path was faster on the CPU and the GPU alike.
 
-While a draw is tessellated the vertex shader only forwards the raw vertex (`PackControlPoint`); the domain
-shader re-runs the complete vertex program (`WaterVertex`) on every generated vertex. All per-vertex
-attributes (texcoords, fog, refraction coordinates, motion-vector positions) therefore come from the exact
-same code path for every permutation.
+Once a frame (`PBRWater::UpdateTessellation`, in the prepass) the CPU cuts the water meshes the main view drew last
+frame into an adaptive, 2:1 balanced quadtree of triangles (leaves) with the same on-screen size at every distance; each
+leaf is an N x N grid whose border is clamped onto its sides' points, so neighbouring leaves, triangles and meshes share
+their edges' points and never crack. `TessellationCS` then evaluates every vertex's waves once (`VertexCS`, the whole
+expensive part of the vertex program), geomorphs the vertices a coarser level lacks (`MorphCS`) and writes the indices
+(`IndexCS`). Every pass of the main view (stencil, surface, point lights, underwater) draws the same vertices: the water
+vertex shader reads them by `SV_VertexID` from t109 and runs only the cheap rest of its program
+(`CachedWaterVertex`). The engine still issues its own draw of each mesh; the vertex shader's culling mode (Tess0.x = 2)
+puts every vertex outside the frustum, and `RestoreDraw` draws the tessellated range with the engine's state. Reflections,
+cubemaps and draws the mesh does not cover yet (a mesh's first frame, meshes over 4096 triangles, a frame over budget)
+are drawn untessellated, their waves filtered to the mesh's spacing.
+
+What decides the cost, measured at 1440p over a stormy sea (PBRWaterTest; Nsight Perf and a leaf dump):
+
+-   **Base triangles.** The cells' water is a 32 x 32 grid of quads (2048 triangles each), and every one was a base
+    triangle the CPU visited every frame: 45 ms of the render thread. A mesh that is one flat rectangle with affine UVs
+    and colours is merged into its rectangle's two triangles (`MergeRectangle`), so the quadtree alone sets the detail:
+    about 0.6 ms. Leaves span 32 target-sized triangles.
+-   **Culling.** The frustum test's margin was the waves' hard clamp (`DisplacementLimit`, a storm's worst crest
+    everywhere: 112 m), which kept everything near the camera, behind it too: 71 % of the triangles never reached the
+    screen. `VertexCS` now records how far the waves moved this frame's vertices and the CPU reads it back a few frames
+    later without stalling; the margin is that reach with room to spare.
+-   **Density.** The pixel shader is some 6000 instructions per pixel, and triangles of a few pixels cost it whole 2 x 2
+    quads. The point count follows the screen area a segment covers (the grazing angle's sine from the camera's height,
+    floored at the waves' slope), no edge is finer than 128 units over Maximum Tessellation, the curl's extra detail is
+    limited to the surf zone (`ShoreCurlDepth`, from the shore field's crest depth), and a vertex budget of one vertex
+    per 7 render pixels coarsens the target size when a view needs more.
+
+With those the tessellated surface pass cost 6.4 ms against 3.6 ms untessellated and 13.5 ms for the old hull/domain
+path, and the frame 21 ms against 18 ms and 29 ms.
 
 ### Why the old branches broke on STENCIL and with DLSS / frame generation
 
-1. **One hull/domain shader for every permutation.** The old code compiled HS/DS once with a fixed
-   descriptor and bound them to all water passes. The STENCIL pass (water mask + motion vectors) has a
-   different `VS_OUTPUT` than the colour passes, so the stage signatures did not match. Now HS/DS/GS are
-   compiled with the draw's own vertex descriptor (`state->modifiedVertexDescriptor`).
-2. **Motion vectors described the flat plane.** The old domain shader interpolated `WorldPosition` /
-   `PreviousWorldPosition` without displacing them, so DLSS / FSR / frame generation reprojected waves as if
-   they were flat. Now both are displaced, the previous position with the previous frame's phases.
-3. **Vanilla shaders during async compilation.** Until our vertex/pixel shaders for a descriptor are
-   compiled the game binds its own, whose signatures do not match our HS/DS. Tessellation is only enabled
-   for a draw once our VS and PS for that descriptor are live.
-4. **Depth must match across passes.** The STENCIL and colour passes tessellate with identical inputs,
-   edge factors are computed from canonically ordered endpoints, the domain shader sums corners in a
-   canonical order, and the position chain is `precise`, so both passes rasterise the same depth and
-   shared edges never crack.
-5. **Topology.** The renderer only re-applies its cached topology when it changes, so the shadow state is
-   kept at "triangle list, not dirty" while the device is switched to a 3-control-point patch list;
-   `RestoreGeometry` switches it back before anything else draws.
-
-Edge factors target an on-screen triangle size in pixels using the _internal_ render height (so they scale
-with upscalers): the target size near the shore and in the ripple simulation (`EdgeTessFactor`: one shore-field lookup
-per edge), twice it on the open water. The hull shader reads no waves: it runs for every edge of every patch, and its
-old curvature term (the wave context and three cascades per edge) made it one of the most expensive stages. Edges
-drop to 1 where waves have faded out, and patches outside the (displacement-padded) frustum are culled. The domain
-shader reads each cascade from the mip whose texels match the vertex spacing the tessellation aims for at that
-distance (`TessellatedSpacing`, a function of position only, so neighbouring patches agree and shared edges never
-crack), so waves the mesh cannot carry are averaged out instead of aliasing. Only the stencil pass works out last
-frame's surface (motion vectors); the colour pass skips it.
+1. **Motion vectors described the flat plane.** An early domain shader interpolated `WorldPosition` /
+   `PreviousWorldPosition` without displacing them, so DLSS / FSR / frame generation reprojected waves as if they were
+   flat. Both are displaced now, the previous position with the previous frame's phases (`VertexCS` stores both).
+2. **Vanilla shaders during async compilation.** Until our vertex/pixel shaders for a descriptor are compiled the game
+   binds its own, which know nothing of the tessellated vertices: a draw uses the tessellated mesh only once our VS and
+   PS for its descriptor are live.
+3. **Depth must match across passes.** The STENCIL and colour passes draw the same vertices, and the position chain is
+   `precise`, so both passes rasterise the same depth.
 
 ### Draw cost
 
 Unified Water draws its distant water as hundreds of small tiles, each a draw call in both the stencil and the colour
 pass (836 at the Solitude docks), and nearly all of them flat. Setting each one up as a full PBR draw (the constants
-uploaded, 17 views bound on four stages, samplers saved and restored, tessellation bound and unbound) cost 8.6 ms of
-the water's 16.4 ms there while the GPU executed almost nothing. Now a tile wholly outside the waves' reach
-(`WavesReach`: outside the loaded cells or past the displacement fade) is drawn untessellated, the constants are
-uploaded once per frame into two buffers (with and without tessellation) that the draws swap between, and the views
-stay bound for the frame (only the pixel stage's t110-t111, which Landscape Seams shares, is checked per draw). The
-water's draws went from 16.4 to 10.9 ms there.
+uploaded, 17 views bound, samplers saved and restored) cost 8.6 ms of the water's 16.4 ms there while the GPU executed
+almost nothing. Now a tile wholly outside the waves' reach (`WavesReach`: outside the loaded cells or past the
+displacement fade) is drawn untessellated, the constants are uploaded once per frame into one buffer per vertex shader
+mode that the draws swap between, and the views stay bound for the frame (only the pixel stage's t110-t111, which
+Landscape Seams shares, is checked per draw). The water's draws went from 16.4 to 10.9 ms there.
 
-### Tessellation cost
+### Vertex program cost
 
-The domain shader runs the whole vertex program on every generated vertex, in both the stencil and the colour pass,
-so its cost is per generated vertex; the hull shader runs once per patch, and the patches are the water meshes' own
-triangles. Measured with `d3dcompiler_47` (static instruction slots of the domain shader, colour / stencil pass, and
-its texture operations):
+The vertex program's wave evaluation runs once per tessellated vertex per frame (`VertexCS`). Measured with
+`d3dcompiler_47` on the old domain shader, which ran the same program (static instruction slots, colour / stencil pass,
+and its texture operations):
 
 | Change                                                                                                                            | Colour    | Stencil   |
 | --------------------------------------------------------------------------------------------------------------------------------- | --------- | --------- |
@@ -424,47 +463,27 @@ its texture operations):
 | Surface noise baked once per frame (`SurfaceNoiseCS`, t126): one bilinear lookup instead of ~30 value noises (433 slots)          | (433)     | -         |
 | After                                                                                                                             | 2343 (39) | 2202 (43) |
 
-The noise's direct evaluation stays as the fallback beyond the bake, so it still counts statically; near the camera,
-where the tessellator puts its vertices, the colour pass runs 433 slots fewer than the table shows. The bake is a
+The noise's direct evaluation stays as the fallback beyond the bake, so it still counts statically. The bake is a
 128^2 grid around the camera with four texels across a cell of the noise's finest octave (the gusts' second octave,
 half Gust Size; the sediment patches' third, a quarter of Patch Size): 5 m texels at the defaults, so it covers 630 m,
 the tessellated water. Its bilinear lookup is within 0.7 % rms of the direct evaluation for the gusts and 0.2 % for
-the sediment patches (at most 4 % of their range). It costs what 16k vertices did, so it pays for itself whenever
-the tessellator generates more than that per frame. The terrain and swash changes give the same values as before (to
-rounding).
+the sediment patches (at most 4 % of their range).
 
 What the research says, and what it means here:
 
 -   **Small triangles are the expensive part.** Rasterizers walk 8 x 8 pixel tiles and shade 2 x 2 quads, so
     triangles much below 8 pixels a side waste both (Fatahalian et al., _Reducing Shading on GPUs using
-    Quad-Fragment Merging_, SIGGRAPH 2010). Hence the target triangle size.
--   **Moderate factors.** AMD's GCN guidance capped tessellation factors at 15 (Unity HDRP still applies it on GCN
-    consoles, `MAX_TESSELLATION_FACTORS 15`); NVIDIA and AMD's GDC 2010 "Tessellation Performance" talk advises
-    tessellating only where it improves the image, drawing untessellated where the factor would be ~1, and culling
-    patches outside the frustum by setting their factors to 0 (~30% in their example). PBR Water does all of these
-    except the cap.
--   **Per-vertex work belongs in the vertex shader.** Unity HDRP's tessellation computes every per-vertex attribute
-    in the vertex shader and only interpolates them in the domain shader, which re-evaluates displacement alone; the
-    vertex shader's results are shared through the post-transform cache, the hull shader's per-edge work is not.
+    Quad-Fragment Merging_, SIGGRAPH 2010). Hence the target triangle size and the vertex budget.
+-   **Per-vertex work belongs before the passes.** Unity HDRP's tessellation computes every per-vertex attribute in the
+    vertex shader and only interpolates them in the domain shader; here the waves are evaluated once a frame in
+    compute and every pass reuses them.
 -   **Shipped ocean renderers do not use hardware tessellation.** Crest renders a camera-centred LOD mesh
     (CDClipmaps: clipmaps with CDLOD's continuous morphing, Strugar 2010; Losasso & Hoppe 2004), GodotOceanWaves a
     camera-snapped clipmap mesh (329k vertices at high quality) whose vertex shader only samples the displacement
     cascades, the projected grid spaces vertices evenly on screen instead of in the world (Johanson 2004), and Unreal's
     water plugin draws instanced tiles from a quadtree with concentric LODs (`FWaterQuadTree`); Unreal 5 removed
-    hardware tessellation altogether.
-
-**The base meshes limit the tessellator.** The tessellator subdivides each mesh triangle uniformly at the density
-of its densest edge, and caps that at 64 segments. Unified Water's distant tiles are a single quad (`WaterMesh.nif`: 4
-vertices, scaled to 1-n cells); if the loaded cells' water is as coarse (Debug shows the tessellated draws' patch
-count and vertex spacing each frame), every patch is half a cell, 29 x 58 m: the half under the camera is subdivided
-as finely everywhere as its nearest edge needs, so most of its vertices land where they are not needed, and next to the
-camera 64 segments are still 0.9 m apart. The bigger saving from here is structural, not in the shaders:
-
-1. Give the tessellator small patches: a 16 x 16 grid per cell (3.6 m patches; the untessellated path gets waves too)
-   with the edge factors computed per vertex in the vertex shader (once per vertex instead of twice per edge) and
-   culled per patch, including patches under the terrain.
-2. Or follow Crest and GodotOceanWaves: replace the cells' water with one camera-centred CDLOD mesh with a cheap
-   vertex program, and no hardware tessellation.
+    hardware tessellation altogether. The compute tessellator is a CDLOD-like quadtree on the game's own water meshes,
+    after John Hable's "Compute Tessellation" posts.
 
 ## Shading
 
@@ -664,8 +683,8 @@ re-centres its grid when the texel size changes); all settings are clamped by `S
     depth/shore, cascade foam (red the open sea's foam, green the shore waves' foam, blue the shore waves' break stage),
     roughness, wave height, fetch), plus
     live sea-state values (mean square slope) and whether
-    the GPU ocean and the gameplay mirror are running, and last frame's water draws: how many were tessellated, with
-    how many patches (the meshes' triangles) and what vertex spacing.
+    the GPU ocean and the gameplay mirror are running, last frame's water draws and how many came from the
+    tessellated mesh, and the tessellator's meshes, leaves, vertices, budget coarsening and CPU time.
 -   Every resource is named for RenderDoc (`PBRWater::*`).
 -   The GPU work is wrapped in perf events (`PBR Water - Simulation`, `- Ocean FFT`, `- Ripples`, `- Surface Noise`, `- Swash`, `- Foam`,
     `- Skylighting Occluder`, `- Draw` per water draw), so RenderDoc, Nsight and the devbench
@@ -733,10 +752,12 @@ against the CPU mirror, including slopes and compression against finite differen
 -   Only the dominant sea is refracted: the train is traced for its period, the shorter FFT bands near the shore are
     only shoaled and depth-limited. The map follows the player every ~175 m or a change of the dominant period or the
     swell's direction (blended over 4 s). The shore waves are one regular train in sets, not a random sea: Fluid
-    Flux's offsets vary their timing along the coast, but every crest of a set has the same height. The wet level is resolved
-    at the swash grid's ~0.9 m; the swash itself is evaluated per vertex and per pixel.
--   Gameplay water heights include the shore wave train but not the swash: swimming and buoyancy see the
-    shoaled waves, not the run-up's thin sheet.
+    Flux's offsets vary their timing along the coast. The wet level is resolved at its grid's ~0.9 m; the surf simulation
+    at 17 cm, within about 80 m of the camera: beyond, the train runs to the waterline and nothing runs up the beach.
+-   A wave that breaks on a shoal stays a bore to the shore (the crest depth never recovers): no re-forming in a
+    lagoon behind a bar.
+-   Gameplay water heights include the shore wave train but not the surf simulation: swimming and buoyancy see the
+    train's waves to the waterline, not the simulated bores and run-up.
 -   The waves occlude Skylighting where the cells' own water is (sea, lakes); separate river meshes are not
     drawn into its occlusion map.
 -   The underwater view switches on the surface height above the camera; the lens line across the screen is
@@ -799,8 +820,15 @@ against the CPU mirror, including slopes and compression against finite differen
     Engineering 2006) - run-up
 -   Shen & Meyer (1963); Peregrine & Williams, _Swash Overtopping a Truncated Plane Beach_ (JFM 2001) -
     ballistic swash and the swash lens
--   Audusse, Bouchut, Bristeau, Klein & Perthame, _A Fast and Stable Well-Balanced Scheme with Hydrostatic
-    Reconstruction for Shallow Water Flows_ (SIAM J. Sci. Comput. 2004) - the simulated swash's wetting and drying
+-   Stelling & Duinmeijer, _A Staggered Conservative Scheme for Every Froude Number in Rapidly Varied Shallow Water
+    Flows_ (Int. J. Numer. Meth. Fluids 2003); Zijlema, Stelling & Smit, _SWASH_ (Coastal Engineering 2011) - the surf
+    simulation's scheme
+-   Hibberd & Peregrine, _Surf and Run-up on a Beach: a Uniform Bore_ (JFM 1979) - bores and swash in the shallow
+    water equations; Guard & Baldock (Coastal Engineering 2007), Van Dongeren & Svendsen (1997) - the incoming
+    characteristic as the swash's seaward boundary
+-   Galvin (1969) - plunge distance; Peregrine, _Breaking Waves on Beaches_ (Annu. Rev. Fluid Mech. 1983)
+-   Thuerey, Mueller-Fischer, Schirm & Gross, _Real-time Breaking Waves for Shallow Water Simulations_ (Pacific
+    Graphics 2007) - an overturning sheet drawn over a height-field simulation
 -   Whitlock, Bartlett & Gurganus, _Sea Foam Reflectance_ (GRL 1982) - foam albedo
 -   Bobbing Framework (RavenKZP, GPL-3.0-or-later WITH Modding Exception) - moving placed references with
     keyframed collision, their children and the actors standing on them; the floating objects build on it

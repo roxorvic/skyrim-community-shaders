@@ -1,11 +1,13 @@
 #pragma once
 
 #include "Feature.h"
+#include "PBRWater/ComputeTessellation.h"
 #include "PBRWater/FloatingObjects.h"
 #include "PBRWater/FoamPattern.h"
 #include "PBRWater/OceanSimulation.h"
 #include "PBRWater/RippleSimulation.h"
 #include "PBRWater/ShoreSimulation.h"
+#include "PBRWater/SprayParticles.h"
 #include "PBRWater/WaterEnvironment.h"
 #include "PBRWater/WaveModel.h"
 
@@ -79,6 +81,10 @@ struct PBRWater : Feature
 		float ShoreCurl = 1.0f;           ///< how far plunging breakers curl over (0: lip only)
 		float ShoreCurlDetail = 2.0f;     ///< tessellation multiplier where shore waves can curl
 		float SwashLinger = 2.0f;         ///< backwash duration over the uprush's
+		float SwashChurnHeight = 0.05f;   ///< m: the tallest the swash's churning lumps stand
+		float SwashChurnDepth = 0.35f;    ///< the lumps' height as a share of the water's depth
+		float SwashChurnSize = 0.35f;     ///< m: the lumps' size
+		float SwashChurnSpeed = 1.7f;     ///< how fast the lumps boil, relative to the waves' clock
 
 		// Surface and light
 		float Roughness = 0.06f;
@@ -125,6 +131,13 @@ struct PBRWater : Feature
 		float FoamFeather = 0.12f;           ///< how soft the edge of the foam pattern is
 		float FoamBubbleSize = 0.03f;        ///< m: the bubbles of the foam pattern (surf foam is a microfoam of centimetre bubbles)
 
+		// Spray (SprayParticles)
+		bool EnableSpray = true;
+		float SprayAmount = 1.0f;   ///< multiplier on every emitter's rate
+		float SprayRange = 128.0f;  ///< m around the camera in which the waves throw spray
+		int SprayQuality = 1;       ///< particles alive at most: 0 = 16384, 1 = 65536, 2 = 131072
+		SprayParticles::Emitters SprayEmitters = SprayParticles::DefaultEmitters();
+
 		// Ripples and rivers
 		bool EnableRipples = true;
 		float RippleExtent = 64.0f;  ///< m covered around the camera
@@ -151,7 +164,7 @@ struct PBRWater : Feature
 		// Performance
 		bool EnableTessellation = true;
 		float TessellationTriangleSize = 10.0f;  ///< target triangle edge on screen (pixels)
-		float TessellationMaxFactor = 32.0f;
+		float TessellationMaxFactor = 32.0f;     ///< the finest triangle edge is 128 units (a cell mesh's grid) over this
 		float DisplacementFadeStart = 16384.0f;  ///< units
 		float DisplacementFadeEnd = 32768.0f;
 		int WaveResolution = 1;  ///< FFT size per cascade: 0 = 128, 1 = 256, 2 = 512
@@ -164,6 +177,8 @@ struct PBRWater : Feature
 	Settings settings;
 
 	virtual void DrawSettings() override;
+	/** @brief The Spray tab: the spray's switches and every emitter's parameters. */
+	void DrawSpraySettings();
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
@@ -237,6 +252,7 @@ struct PBRWater : Feature
 		float4 Foam2;                                 // xy shore foam grid corner (absolute units), z 1 / extent, w enabled
 		float4 SunMap0;                               // xy wave heightfield centre (absolute units), z 1 / extent, w drawn this frame
 		float4 SunMap1;                               // x its reference level (absolute z), y height range either side (units), zw unused
+		float4 Swash1;                                // swash churn: x tallest lump (units), y share of the depth, z lump size (units), w boil speed
 	};
 	STATIC_ASSERT_ALIGNAS_16(GpuData);
 
@@ -316,6 +332,13 @@ struct PBRWater : Feature
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	/// The world's effects pass (vanilla particles and effect shaders), after the water: the sea spray draws first.
+	struct BSShaderAccumulator_RenderEffects
+	{
+		static void thunk(RE::BSShaderAccumulator* accumulator, uint32_t renderFlags);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 private:
 	static constexpr uint32_t WaterSRVCount = 18;        ///< t110-t127
 	static constexpr uint32_t WaveHeightfieldSlot = 27;  ///< t27, pixel stage: the waves' heightfield (sunMapTexture)
@@ -345,7 +368,7 @@ private:
 		std::shared_ptr<const PBRWaterModel::ShoreField> field;
 		std::unique_ptr<Texture2D> times;  ///< travel time to the waterline, signed distance to it, still water level
 		std::unique_ptr<Texture2D> rays;   ///< grad of the travel time, beach slope, exposure to the swell
-		std::unique_ptr<Texture2D> room;   ///< room for the wave train (width of the water against the wavelength, coherent fronts)
+		std::unique_ptr<Texture2D> room;   ///< x room for the wave train (width of the water against the wavelength, coherent fronts), y the depth a wave's crest answers to (m; ShoreField::crestDepth)
 	};
 	/** @brief Render thread: uploads the shore fields the snapshot blends between, when they change. */
 	void UpdateShoreTextures();
@@ -361,6 +384,12 @@ private:
 	bool UpdateShoreReset(float dt);
 	/** @brief Render thread: steps the swash history: how wet the shore is (needs this frame's constants). */
 	void UpdateSwash(float dt);
+	/** @brief Render thread: emits and flies the sea spray (needs this frame's constants and the surf's state). */
+	void UpdateSpray(float dt);
+	/** @brief Render thread, the world's effects pass: draws the sea spray once a frame, after the water. */
+	void DrawSpray();
+	/** @brief Particles alive at most for the SprayQuality setting. */
+	uint32_t SprayPoolSize() const;
 	/** @brief Main thread: the game's camera-under-water state follows the displaced surface. */
 	void UpdateCameraWater(const PBRWaterModel::WaveSnapshot& snapshot, bool exterior);
 	/** @brief Render thread, before the world is drawn: applies the main thread's camera-under-water state again. */
@@ -376,8 +405,12 @@ private:
 	void UpdateSurfaceNoise();
 
 	std::unique_ptr<ConstantBuffer> gpuBuffer;
-	std::unique_ptr<ConstantBuffer> drawBuffer;      ///< this frame's constants for the tessellated water draws
-	std::unique_ptr<ConstantBuffer> flatDrawBuffer;  ///< and for the rest
+	std::unique_ptr<ConstantBuffer> drawBuffer;         ///< this frame's constants for the compute tessellator's mesh (Tess0.x = 1)
+	std::unique_ptr<ConstantBuffer> flatDrawBuffer;     ///< for the untessellated draws (Tess0.x = 0)
+	std::unique_ptr<ConstantBuffer> swallowDrawBuffer;  ///< for the engine's own draw of a mesh the compute tessellator draws instead (Tess0.x = 2: culled)
+	WaterTessellator tessellator;
+	/** @brief Render thread (Prepass): subdivides and evaluates this frame's tessellated water, for every pass to draw. */
+	void UpdateTessellation();
 	GpuData frameData{};
 	ID3D11ShaderResourceView* worldFlowmap = nullptr;  ///< render thread: Unified Water's worldspace flowmap (not owned)
 	uint32_t frameDataFrame = UINT32_MAX;
@@ -405,10 +438,12 @@ private:
 	winrt::com_ptr<ID3D11SamplerState> oceanSampler;
 
 	RippleSimulation ripples;
-	ShoreSimulation swash;                ///< render thread
-	ShoreTextures shoreTextures;          ///< render thread: the current shore field
-	ShoreTextures previousShoreTextures;  ///< render thread: the one it replaces, while they blend
-	OceanSimulation ocean;                ///< render thread
+	ShoreSimulation swash;                 ///< render thread
+	SprayParticles spray;                  ///< render thread (its definitions load on the main thread)
+	uint32_t sprayDrawFrame = UINT32_MAX;  ///< State frame the spray was last drawn in
+	ShoreTextures shoreTextures;           ///< render thread: the current shore field
+	ShoreTextures previousShoreTextures;   ///< render thread: the one it replaces, while they blend
+	OceanSimulation ocean;                 ///< render thread
 
 	// Skylighting occluder (render thread)
 	static constexpr uint32_t OccluderQuads = 176;     ///< grid quads per side
@@ -474,16 +509,17 @@ private:
 
 	// Render thread
 
-	// Per-draw tessellation state (render thread)
-	bool tessellationBound = false;
+	// Per-draw state (render thread)
 	bool geometryShaderBound = false;
-	bool tessellationFailureLogged = false;
+	/// The compute tessellator's range for the current draw, issued in RestoreDraw once the engine's state is bound.
+	bool cachedDrawPending = false;
+	uint32_t cachedDrawStart = 0;
+	uint32_t cachedDrawCount = 0;
 	/// The water draws of one frame, for the Debug section.
 	struct DrawStats
 	{
 		uint32_t draws = 0;
-		uint32_t tessellated = 0;
-		uint32_t patches = 0;          ///< triangles of the tessellated draws: the tessellator's patches
+		uint32_t computeDraws = 0;     ///< draws of the compute tessellator's mesh
 		uint32_t byTechnique[6] = {};  ///< draws per technique (DrawPassIndex)
 	};
 	GpuData uploadedDrawData{};                              ///< what the draw buffers hold
@@ -502,5 +538,4 @@ private:
 	std::atomic<float> mainUpdatePeakMs{ 0.0f };  ///< decaying peak
 	DrawStats lastDrawStats;                      ///< the last complete frame
 	uint32_t drawStatsFrame = UINT32_MAX;
-	uint32_t tessellationMissingSince = UINT32_MAX;
 };

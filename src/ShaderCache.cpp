@@ -154,8 +154,6 @@ namespace SIE
 		constexpr const char* VertexShaderProfile = "vs_5_0";
 		constexpr const char* PixelShaderProfile = "ps_5_0";
 		constexpr const char* ComputeShaderProfile = "cs_5_0";
-		constexpr const char* HullShaderProfile = "hs_5_0";
-		constexpr const char* DomainShaderProfile = "ds_5_0";
 		constexpr const char* GeometryShaderProfile = "gs_5_0";
 
 		static std::wstring GetShaderPath(const std::string_view& name)
@@ -172,10 +170,6 @@ namespace SIE
 				return PixelShaderProfile;
 			case ShaderClass::Compute:
 				return ComputeShaderProfile;
-			case ShaderClass::Hull:
-				return HullShaderProfile;
-			case ShaderClass::Domain:
-				return DomainShaderProfile;
 			case ShaderClass::Geometry:
 				return GeometryShaderProfile;
 			default:
@@ -1468,10 +1462,6 @@ namespace SIE
 				return std::format(L"Data/ShaderCache/{}/{:X}{}.vso", wname, descriptor, suffix);
 			case ShaderClass::Compute:
 				return std::format(L"Data/ShaderCache/{}/{:X}{}.cso", wname, descriptor, suffix);
-			case ShaderClass::Hull:
-				return std::format(L"Data/ShaderCache/{}/{:X}{}.hso", wname, descriptor, suffix);
-			case ShaderClass::Domain:
-				return std::format(L"Data/ShaderCache/{}/{:X}{}.dso", wname, descriptor, suffix);
 			case ShaderClass::Geometry:
 				return std::format(L"Data/ShaderCache/{}/{:X}{}.gso", wname, descriptor, suffix);
 			default:
@@ -1777,6 +1767,7 @@ namespace SIE
 								shader.fxpFilename);
 						const auto sourceTime = std::filesystem::last_write_time(shaderSourcePath, ec);
 						if (ec) {
+							diskCacheOutdated = true;
 							logger::debug("Failed to read source mtime for {}: {}", Util::WStringToString(shaderSourcePath), ec.message());
 						} else if (sourceTime > diskCacheTime) {
 							diskCacheOutdated = true;
@@ -1808,10 +1799,6 @@ namespace SIE
 				defines[lastIndex++] = { "PSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Compute) {
 				defines[lastIndex++] = { "CSHADER", nullptr };
-			} else if (shaderClass == ShaderClass::Hull) {
-				defines[lastIndex++] = { "HSHADER", nullptr };
-			} else if (shaderClass == ShaderClass::Domain) {
-				defines[lastIndex++] = { "DSHADER", nullptr };
 			} else if (shaderClass == ShaderClass::Geometry) {
 				defines[lastIndex++] = { "GSHADER", nullptr };
 			}
@@ -2461,16 +2448,6 @@ namespace SIE
 		return MakeAndAddStageShader(shaderClass, shader, descriptor);
 	}
 
-	ID3D11HullShader* ShaderCache::GetHullShader(const RE::BSShader& shader, uint32_t descriptor)
-	{
-		return static_cast<ID3D11HullShader*>(GetStageShader(ShaderClass::Hull, shader, descriptor));
-	}
-
-	ID3D11DomainShader* ShaderCache::GetDomainShader(const RE::BSShader& shader, uint32_t descriptor)
-	{
-		return static_cast<ID3D11DomainShader*>(GetStageShader(ShaderClass::Domain, shader, descriptor));
-	}
-
 	ID3D11GeometryShader* ShaderCache::GetGeometryShader(const RE::BSShader& shader, uint32_t descriptor)
 	{
 		return static_cast<ID3D11GeometryShader*>(GetStageShader(ShaderClass::Geometry, shader, descriptor));
@@ -2492,14 +2469,6 @@ namespace SIE
 		winrt::com_ptr<ID3D11DeviceChild> newShader;
 		HRESULT result = E_FAIL;
 		switch (shaderClass) {
-		case ShaderClass::Hull:
-			result = device->CreateHullShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
-				reinterpret_cast<ID3D11HullShader**>(newShader.put()));
-			break;
-		case ShaderClass::Domain:
-			result = device->CreateDomainShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
-				reinterpret_cast<ID3D11DomainShader**>(newShader.put()));
-			break;
 		case ShaderClass::Geometry:
 			result = device->CreateGeometryShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
 				reinterpret_cast<ID3D11GeometryShader**>(newShader.put()));
@@ -2682,8 +2651,6 @@ namespace SIE
 			case SIE::ShaderClass::Compute:
 				ReleaseShader(computeShaders, computeShadersMutex, entry.type, entry.descriptor);
 				break;
-			case SIE::ShaderClass::Hull:
-			case SIE::ShaderClass::Domain:
 			case SIE::ShaderClass::Geometry:
 				{
 					std::lock_guard lockGuardS(stageShadersMutex);

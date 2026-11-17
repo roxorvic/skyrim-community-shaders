@@ -152,8 +152,9 @@ float LowestVanillaLevel(float2 worldPos)
 		height = (surfaced ? sheet : carried) - vanillaLevel;
 		if (!surfaced)
 			height = min(height, max(cellMap.x - vanillaLevel - SKIN_MARGIN, min(height, 0.0)));
-		if (wetCount < 25.0)
-			height = max(height, -SHORE_DIP);
+		// Eased out away from the wall (full within about a cell of it, none two cells out): cut off at two cells it left a
+		// step parallel to every wall, a line of glints
+		height = lerp(max(height, -SHORE_DIP), height, saturate((wetCount - 10.0) / 15.0));
 		height += vanillaLevel - RefZ;
 	}
 

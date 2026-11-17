@@ -93,6 +93,8 @@ struct FluidFieldShallowWater : Feature
 	void BindForDisplacement(ID3D11DeviceContext* a_context) const;
 	/** @brief Whether a water draw's bounds reach the simulated area (PBR Water then displaces and tessellates it). */
 	bool Covers(const RE::NiBound& a_bound) const;
+	/** @brief The near water's world rectangle while it drives PBR Water's surface; false (and nothing written) otherwise. */
+	bool NearArea(float a_min[2], float a_max[2]) const;
 
 	/** @brief Water grid placement for the water shader (SharedData::fluidFieldSettings); 16-byte sized. */
 	struct WaterShaderData
