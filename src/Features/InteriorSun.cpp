@@ -19,6 +19,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SkyLitGlass,
 	SkyLitGlassStrength,
 	AutoSunlitInteriors,
+	ShellBlocksSun,
+	ShellOffset,
 	CloseShadowGaps,
 	ShadowGapTexels,
 	FrameShadowsFromGlowMaps,
@@ -190,6 +192,14 @@ void InteriorSun::DrawSettings()
 							  "Lets the sun into any interior with window glass or openings, even when no mod has set it up for sun. "
 							  "Caves and dungeons are left out. Takes effect after entering the interior."));
 	}
+	ImGui::Checkbox(T(TKEY("shell_blocks_sun"), "Room Shell Blocks The Sun"), &settings.ShellBlocksSun);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("shell_blocks_sun_tooltip"),
+							  "Draws the interior's own walls, floors and roofs into the sun's shadows from both sides, "
+							  "so walls only built to be seen from inside still stop the sun. Needs Detect Openings."));
+	}
+	if (settings.ShellBlocksSun)
+		ImGui::SliderFloat(T(TKEY("shell_offset"), "Room Shell Offset"), &settings.ShellOffset, 0.0f, 32.0f);
 	ImGui::Checkbox(T(TKEY("close_shadow_gaps"), "Close Shadow Gaps"), &settings.CloseShadowGaps);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("close_shadow_gaps_tooltip"),
@@ -284,6 +294,9 @@ void InteriorSun::DrawDebugSection()
 		for (const auto& hit : traceHits)
 			ImGui::BulletText("%7.0f  %s  %s", hit.distance, kinds[hit.kind], hit.what.c_str());  // i18n-ignore: debug data
 	}
+	ImGui::Text(T(TKEY("debug_sun_caster_passes"), "Sun caster draws last frame: %u (kept one-sided: %u with the glass flag, %u skinned)"), sunCasterPassesLast[0], sunCasterPassesLast[1], sunCasterPassesLast[2]);
+	ImGui::Text(T(TKEY("debug_shell"), "Room shell: %u solid shapes (%u without the cast-shadows flag, %u with the glass flag), %u triangles"), shellShapes, shellShapesNoCastFlag, shellShapesGlassFlag, shellCasterVertexCount / 3);
+	ImGui::Checkbox(T(TKEY("debug_all_casters_two_sided"), "Every Sun Caster Double-Sided (ignore the glass and skinned conditions)"), &debugAllCastersTwoSided);
 	ImGui::Checkbox(T(TKEY("debug_all_rooms_cast"), "All Rooms Cast Sun Shadows (ignore the sun-direction room filter)"), &debugAllRoomsCast);
 	ImGui::Text(T(TKEY("debug_rooms_added"), "Rooms and portals added to the sun's casters: %u of %u"), roomsAddedLastFrame, roomsInCell);
 	ImGui::Checkbox(T(TKEY("debug_show_hole_beams"), "Show Hole Beams (sun through every hole, ignoring what blocks it)"), &debugShowHoleBeams);
@@ -392,6 +405,9 @@ void InteriorSun::EarlyPrepass()
 		CloseShadowGaps();
 
 	windowHolesDrawnLastFrame = std::exchange(windowHolesDrawn, 0);
+	sunCasterPassesLast[0] = sunCasterPasses.exchange(0);
+	sunCasterPassesLast[1] = sunCasterPassesGlassFlag.exchange(0);
+	sunCasterPassesLast[2] = sunCasterPassesSkinned.exchange(0);
 	windowHolesByTargetLastFrame = std::exchange(windowHolesByTarget, {});
 	renderThread = std::this_thread::get_id();
 }
@@ -422,6 +438,10 @@ void InteriorSun::SetupResources()
 	depthDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
 	DX::ThrowIfFailed(device->CreateDepthStencilState(&depthDesc, windowHolesDepthState.put()));
 	Util::SetResourceName(windowHolesDepthState.get(), "InteriorSun::WindowHolesDepthState");
+
+	depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+	DX::ThrowIfFailed(device->CreateDepthStencilState(&depthDesc, shellDepthState.put()));
+	Util::SetResourceName(shellDepthState.get(), "InteriorSun::ShellDepthState");
 }
 
 void InteriorSun::ClearShaderCache()
@@ -558,7 +578,13 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 				if (AppendWorldTriangles(geometry, scan->occluders)) {
 					scan->occluderShapes.push_back(first);
 					const auto model = base->As<RE::TESModel>();
-					scan->occluderNames.push_back(std::format("ref {:08X} | {} | {}", ref->GetFormID(), model ? model->GetModel() : "", geometry->name.c_str()));
+					const bool casts = property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kCastShadows);
+					const bool glassFlag = property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kAssumeShadowmask);
+					const bool twoSided = property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided);
+					scan->occludersNoCastFlag += !casts;
+					scan->occludersGlassFlag += glassFlag;
+					scan->occluderNames.push_back(std::format("ref {:08X} | {} | {}{}{}{}", ref->GetFormID(), model ? model->GetModel() : "", geometry->name.c_str(),
+						casts ? "" : " [no cast flag]", glassFlag ? " [glass flag]" : "", twoSided ? " [two-sided]" : ""));
 				}
 			}
 			return RE::BSVisit::BSVisitControl::kContinue;
@@ -673,6 +699,39 @@ void InteriorSun::TakeOpeningScan()
 
 	UploadWindowHoles(scan->cell);
 	UpdateAutoSunlit(scan->cell);
+
+	// The room's shell for the sun maps, from the same triangles the shell test used
+	shellShapes = static_cast<uint32_t>(scan->occluderNames.size());
+	shellShapesNoCastFlag = scan->occludersNoCastFlag;
+	shellShapesGlassFlag = scan->occludersGlassFlag;
+	logger::info("[Interior Sun] Room shell in cell {:08X}: {} solid shapes ({} without the cast-shadows flag, {} with the glass flag), {} triangles",
+		scan->cell->GetFormID(), shellShapes, shellShapesNoCastFlag, shellShapesGlassFlag, scan->occluders.size() / 3);
+	shellCasters.reset();
+	shellCasterVertexCount = 0;
+	if (!scan->occluders.empty()) {
+		struct ShellVertex
+		{
+			float3 position;
+			float2 uv;
+		};
+		std::vector<ShellVertex> vertices;
+		vertices.reserve(scan->occluders.size());
+		for (const auto& position : scan->occluders)
+			vertices.push_back({ position, float2(0, 0) });
+		try {
+			D3D11_SUBRESOURCE_DATA init{ vertices.data(), 0, 0 };
+			shellCasters = std::make_unique<Buffer>(StructuredBufferDesc<ShellVertex>(vertices.size(), false), &init, "InteriorSun::ShellCasters");
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+			srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			srvDesc.Buffer.NumElements = static_cast<UINT>(vertices.size());
+			shellCasters->CreateSRV(srvDesc);
+			shellCasterVertexCount = static_cast<uint32_t>(vertices.size());
+		} catch (...) {
+			logger::error("[Interior Sun] Failed to create the room shell buffer");
+			shellCasters.reset();
+		}
+	}
 }
 
 void InteriorSun::RunOpeningScan(OpeningScan& scan)
@@ -816,6 +875,8 @@ void InteriorSun::ReleaseWindowGlass()
 	glassEmissives.clear();
 	openingScan.reset();
 	lastOpeningScan.reset();
+	shellCasters.reset();
+	shellCasterVertexCount = 0;
 	windowGlassShapeInfo.clear();
 	lastCandidateTriangles.reset();
 	windowOpeningVertices.clear();
@@ -1047,6 +1108,64 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 	context->ClearDepthStencilView(dsv.get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
 	DrawHolesInto(data, viewport);
 	globals::profiler->EndPass();
+
+	if (settings.ShellBlocksSun && shellCasters && shellCasterVertexCount) {
+		globals::profiler->BeginPass("InteriorSun::ShellCasters");
+		const auto& v = sunLight->GetShadowDirectionalLightRuntimeData().sunVector;
+		float3 awayFromSun(v.x, v.y, v.z);
+		awayFromSun.Normalize();
+		WindowHolesCB shell = data;
+		shell.Mode = kShellCaster;
+		shell.ShellOffset = awayFromSun * settings.ShellOffset;
+		windowHolesCB->Update(shell);
+
+		winrt::com_ptr<ID3D11VertexShader> oldVS;
+		winrt::com_ptr<ID3D11PixelShader> oldPS;
+		winrt::com_ptr<ID3D11Buffer> oldCB;
+		winrt::com_ptr<ID3D11ShaderResourceView> oldSRV;
+		winrt::com_ptr<ID3D11InputLayout> oldInputLayout;
+		D3D11_PRIMITIVE_TOPOLOGY oldTopology;
+		winrt::com_ptr<ID3D11RasterizerState> oldRasterState;
+		winrt::com_ptr<ID3D11DepthStencilState> oldDepthState;
+		UINT oldStencilRef;
+		D3D11_VIEWPORT oldViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+		UINT oldViewportCount = static_cast<UINT>(std::size(oldViewports));
+		context->VSGetShader(oldVS.put(), nullptr, nullptr);
+		context->PSGetShader(oldPS.put(), nullptr, nullptr);
+		context->VSGetConstantBuffers(0, 1, oldCB.put());
+		context->VSGetShaderResources(0, 1, oldSRV.put());
+		context->IAGetInputLayout(oldInputLayout.put());
+		context->IAGetPrimitiveTopology(&oldTopology);
+		context->RSGetState(oldRasterState.put());
+		context->RSGetViewports(&oldViewportCount, oldViewports);
+		context->OMGetDepthStencilState(oldDepthState.put(), &oldStencilRef);
+
+		auto cb = windowHolesCB->CB();
+		auto srv = shellCasters->srv.get();
+		context->IASetInputLayout(nullptr);
+		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		context->VSSetShader(GetWindowHolesVS(), nullptr, 0);
+		context->PSSetShader(nullptr, nullptr, 0);
+		context->VSSetConstantBuffers(0, 1, &cb);
+		context->VSSetShaderResources(0, 1, &srv);
+		context->RSSetState(windowHolesRasterState.get());  // no culling: walls block from outside too
+		context->RSSetViewports(1, &viewport);
+		context->OMSetDepthStencilState(shellDepthState.get(), 0);
+		context->Draw(shellCasterVertexCount, 0);
+
+		cb = oldCB.get();
+		srv = oldSRV.get();
+		context->VSSetShader(oldVS.get(), nullptr, 0);
+		context->PSSetShader(oldPS.get(), nullptr, 0);
+		context->VSSetConstantBuffers(0, 1, &cb);
+		context->VSSetShaderResources(0, 1, &srv);
+		context->IASetInputLayout(oldInputLayout.get());
+		context->IASetPrimitiveTopology(oldTopology);
+		context->RSSetState(oldRasterState.get());
+		context->RSSetViewports(oldViewportCount, oldViewports);
+		context->OMSetDepthStencilState(oldDepthState.get(), oldStencilRef);
+		globals::profiler->EndPass();
+	}
 
 	if (debugShowHoleBeams)
 		holeTargetsThisFrame.push_back({ dsv.get(), data.ViewProj, data.PosAdjust, viewport });

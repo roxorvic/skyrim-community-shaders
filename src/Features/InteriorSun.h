@@ -38,6 +38,18 @@ public:
 	virtual bool IsOverlayVisible() const override { return debugShowHoles || traceValid; }
 	bool debugShowHoles = false;
 	bool debugAllRoomsCast = false;
+	bool debugAllCastersTwoSided = false;  // test: every sun caster double-sided, whatever its flags
+	// Sun shadow-map draws seen by the double-sided switch this frame, and those it kept one-sided (per reason)
+	mutable std::atomic<uint32_t> sunCasterPasses = 0;
+	mutable std::atomic<uint32_t> sunCasterPassesGlassFlag = 0;
+	mutable std::atomic<uint32_t> sunCasterPassesSkinned = 0;
+	uint32_t sunCasterPassesLast[3] = {};
+	std::unique_ptr<Buffer> shellCasters;  // the cell's solid statics, drawn double-sided into the sun maps
+	uint32_t shellCasterVertexCount = 0;
+	uint32_t shellShapesNoCastFlag = 0;
+	uint32_t shellShapesGlassFlag = 0;
+	uint32_t shellShapes = 0;
+	winrt::com_ptr<ID3D11DepthStencilState> shellDepthState;
 
 	/** @brief One shape the traced sun ray crosses. Kind: 0 glass, 1 opening, 2 rejected see-through shape, 3 solid. */
 	struct TraceHit
@@ -75,6 +87,8 @@ public:
 		bool SkyLitGlass = false;
 		float SkyLitGlassStrength = 1.0f;
 		bool AutoSunlitInteriors = false;
+		bool ShellBlocksSun = false;
+		float ShellOffset = 4.0f;
 		bool CloseShadowGaps = false;
 		int ShadowGapTexels = 2;
 		bool FrameShadowsFromGlowMaps = true;
@@ -122,7 +136,11 @@ public:
 	{
 		if (isInteriorWithSun && settings.ForceDoubleSidedRendering && technique & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmap)) {
 			const auto flags = pass->shaderProperty->flags;
-			const auto renderTwoSided = flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) || flags.none(RE::BSShaderProperty::EShaderPropertyFlag::kAssumeShadowmask, RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
+			auto renderTwoSided = flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) || flags.none(RE::BSShaderProperty::EShaderPropertyFlag::kAssumeShadowmask, RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
+			++sunCasterPasses;
+			if (!renderTwoSided)
+				++(flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kSkinned) ? sunCasterPassesSkinned : sunCasterPassesGlassFlag);
+			renderTwoSided = renderTwoSided || debugAllCastersTwoSided;
 			if (renderTwoSided && *rasterStateCullMode != 0) {
 				*rasterStateCullMode = 0;
 				globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_RASTER_CULL_MODE);
@@ -205,13 +223,16 @@ private:
 		uint32_t Mode;         // HoleMode: how the bound texture decides where the hole opens
 		float AlphaThreshold;  // openings open only where their texture is see-through (below this alpha)
 		float pad0[2];
+		float3 ShellOffset;  // shell casters: moved this far away from the sun, so lit faces don't shadow themselves
+		float pad1;
 	};
 
 	enum HoleMode : uint32_t
 	{
-		kWhole = 0,       // the whole shape opens
-		kBrightGlow = 1,  // glass: opens where its glow map is bright (panes), not on the frame
-		kSeeThrough = 2,  // openings: opens only where its own texture is see-through
+		kWhole = 0,        // the whole shape opens
+		kBrightGlow = 1,   // glass: opens where its glow map is bright (panes), not on the frame
+		kSeeThrough = 2,   // openings: opens only where its own texture is see-through
+		kShellCaster = 3,  // the room's shell drawn as a caster at its real depth
 	};
 
 	/** @brief A run of hole triangles sharing one glow map (none: the whole shape opens). */
@@ -262,6 +283,8 @@ private:
 		std::vector<float3> occluders;           // triangle list of everything that blocks light
 		std::vector<uint32_t> occluderShapes;    // first triangle of each occluder shape, plus the end
 		std::vector<std::string> occluderNames;  // per occluder shape: ref, mesh and shape, for the sun trace
+		uint32_t occludersNoCastFlag = 0;
+		uint32_t occludersGlassFlag = 0;
 		std::vector<float3> candidateTriangles;  // triangle list of the candidates
 		std::vector<float2> candidateUVs;
 		std::vector<OpeningCandidate> candidates;
