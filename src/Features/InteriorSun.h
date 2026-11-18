@@ -49,6 +49,8 @@ public:
 		bool SkyLitGlass = false;
 		float SkyLitGlassStrength = 1.0f;
 		bool AutoSunlitInteriors = false;
+		bool CloseShadowGaps = false;
+		int ShadowGapTexels = 2;
 	};
 
 	Settings settings;
@@ -236,6 +238,23 @@ private:
 	std::vector<RE::NiPointer<RE::NiAVObject>> hiddenFakeGlows;
 	std::vector<GlassEmissive> glassEmissives;
 	std::unordered_map<RE::TESObjectCELL*, uint16_t> autoSunlitCells;  // cells given the sun, with their own flags to restore
+
+	struct alignas(16) ShadowGapsCB
+	{
+		uint32_t Size[2];
+		uint32_t Slice;
+		int32_t Radius;
+	};
+
+	ConstantBuffer* shadowGapsCB = nullptr;
+	std::unique_ptr<Texture2D> shadowGapsGrown;
+	winrt::com_ptr<ID3D11ComputeShader> shadowGapsMinCS[2];  // plain and array shadow textures
+	winrt::com_ptr<ID3D11VertexShader> shadowGapsVS;
+	winrt::com_ptr<ID3D11PixelShader> shadowGapsPS;
+	uint32_t shadowGapsClosedLastFrame = 0;
+
+	/** @brief Closes slivers of light in the sun cascades of a sunlit interior that has no window holes. */
+	void CloseShadowGaps();
 
 	std::vector<float3> windowGlassVertices;
 	std::unique_ptr<Buffer> windowGlass;
