@@ -37,6 +37,9 @@ public:
 	virtual void DrawOverlay() override;
 	virtual bool IsOverlayVisible() const override { return debugShowHoles; }
 	bool debugShowHoles = false;
+	bool debugAllRoomsCast = false;  // every room of the cell into the sun's shadow maps, not only those toward the sun
+	uint32_t roomsAddedLastFrame = 0;
+	uint32_t roomsInCell = 0;
 
 	/** @brief Registers the menu open/close event handler for tracking main menu state. */
 	virtual void DataLoaded() override

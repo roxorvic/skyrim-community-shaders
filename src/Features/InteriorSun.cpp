@@ -271,6 +271,8 @@ void InteriorSun::DrawDebugSection()
 		ImGui::Text(T(TKEY("debug_openings_facing_sun"), "Openings with the sun in front of them now: %u of %u"), facing, total);
 	}
 
+	ImGui::Checkbox(T(TKEY("debug_all_rooms_cast"), "All Rooms Cast Sun Shadows (ignore the sun-direction room filter)"), &debugAllRoomsCast);
+	ImGui::Text(T(TKEY("debug_rooms_added"), "Rooms and portals added to the sun's casters: %u of %u"), roomsAddedLastFrame, roomsInCell);
 	ImGui::Checkbox(T(TKEY("debug_show_hole_beams"), "Show Hole Beams (sun through every hole, ignoring what blocks it)"), &debugShowHoleBeams);
 	if (Util::Button(T(TKEY("debug_rescan"), "Rescan Window Glass")))
 		windowGlassCellFrames = 0;
@@ -1287,13 +1289,17 @@ void InteriorSun::PopulateReplacementJobArrays(RE::TESObjectCELL* cell, const RE
 	lightDir.Unitize();
 
 	// Add extra rooms and portals that are in the direction of the sun
+	uint32_t added = 0;
 	for (const auto& object : currentCellRoomsAndPortals) {
-		if (addedSet.find(object.get()) != addedSet.end() || !IsInSunDirectionAndWithinShadowDistance(object, lightDir, playerPos))
+		if (addedSet.find(object.get()) != addedSet.end() || (!debugAllRoomsCast && !IsInSunDirectionAndWithinShadowDistance(object, lightDir, playerPos)))
 			continue;
 
 		addedSet.insert(object.get());
 		replacementJobArrays[count++ % jobArraySize].push_back(object);
+		++added;
 	}
+	roomsAddedLastFrame = added;
+	roomsInCell = static_cast<uint32_t>(currentCellRoomsAndPortals.size());
 
 	arraysCleared = false;
 }
