@@ -331,6 +331,8 @@ private:
 	std::vector<RE::NiPointer<RE::NiAVObject>> hiddenFakeGlows;
 	std::vector<GlassEmissive> glassEmissives;
 	std::unordered_map<RE::TESObjectCELL*, uint16_t> autoSunlitCells;  // cells given the sun, with their own flags to restore
+	RE::TESObjectCELL* debugSunCell = nullptr;                         // given the sun from the debug section until left; its own flags below
+	uint16_t debugSunCellFlags = 0;
 
 	struct alignas(16) ShadowGapsCB
 	{

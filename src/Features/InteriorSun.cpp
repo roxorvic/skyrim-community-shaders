@@ -306,6 +306,16 @@ void InteriorSun::DrawDebugSection()
 	ImGui::Checkbox(T(TKEY("debug_all_rooms_cast"), "All Rooms Cast Sun Shadows (ignore the sun-direction room filter)"), &debugAllRoomsCast);
 	ImGui::Text(T(TKEY("debug_rooms_added"), "Rooms and portals added to the sun's casters: %u of %u"), roomsAddedLastFrame, roomsInCell);
 	ImGui::Checkbox(T(TKEY("debug_show_hole_beams"), "Show Hole Beams (sun through every hole, ignoring what blocks it)"), &debugShowHoleBeams);
+	if (const auto cell = RE::TES::GetSingleton()->interiorCell; cell && !IsInteriorWithSun(cell) && !debugSunCell) {
+		if (Util::Button(T(TKEY("debug_give_sun"), "Give This Interior The Sun (until you leave it)"))) {
+			debugSunCell = cell;
+			debugSunCellFlags = cell->cellFlags.underlying();
+			cell->cellFlags.set(RE::TESObjectCELL::Flag::kShowSky, RE::TESObjectCELL::Flag::kUseSkyLighting, static_cast<RE::TESObjectCELL::Flag>(CellFlagExt::kSunlightShadows));
+			logger::info("[Interior Sun] Debug: gave cell {:08X} the sun", cell->GetFormID());
+		}
+	}
+	if (debugSunCell)
+		ImGui::Text(T(TKEY("debug_sun_cell"), "Given the sun from here: cell %08X"), debugSunCell->GetFormID());
 	if (Util::Button(T(TKEY("debug_rescan"), "Rescan Window Glass")))
 		windowGlassCellFrames = 0;
 }
@@ -372,6 +382,12 @@ void InteriorSun::EarlyPrepass()
 		ClearArrays();
 		currentCell = nullptr;
 		currentPortalGraph = nullptr;
+	}
+
+	// The debug sun lasts until the cell is left
+	if (debugSunCell && debugSunCell != RE::TES::GetSingleton()->interiorCell) {
+		debugSunCell->cellFlags = static_cast<RE::TESObjectCELL::Flag>(debugSunCellFlags);
+		debugSunCell = nullptr;
 	}
 
 	if (!settings.AutoSunlitInteriors && !autoSunlitCells.empty())
@@ -1668,7 +1684,8 @@ void InteriorSun::BSShaderAccumulator_StartAccumulating::thunk(RE::BSShaderAccum
 {
 	auto& singleton = globals::features::interiorSun;
 	// Accumulators are also started from culling jobs, which must not touch the D3D context
-	if (singleton.isInteriorWithSun && singleton.settings.WindowLightOnly && singleton.windowGlassVertexCount && std::this_thread::get_id() == singleton.renderThread)
+	// Only real window glass switches a cell to sun through its holes: openings alone (a cave's grate) would darken a cave mouth
+	if (singleton.isInteriorWithSun && singleton.settings.WindowLightOnly && singleton.windowGlassVertexCount && !singleton.windowGlassVertices.empty() && std::this_thread::get_id() == singleton.renderThread)
 		singleton.DrawWindowHoles(a_camera);
 	func(a_accumulator, a_camera);
 }
