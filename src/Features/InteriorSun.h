@@ -44,6 +44,11 @@ public:
 		bool ForceDoubleSidedRendering = true;
 		float InteriorShadowDistance = 5000;
 		bool WindowLightOnly = true;
+		bool DetectOpenings = true;
+		bool HideFakeWindowGlows = true;
+		bool SkyLitGlass = false;
+		float SkyLitGlassStrength = 1.0f;
+		bool AutoSunlitInteriors = false;
 	};
 
 	Settings settings;
@@ -172,6 +177,40 @@ private:
 	// Rescans after entering a cell, in frames: its 3D can still be loading on the first ones
 	static constexpr uint32_t WindowGlassScanFrames[] = { 1, 60, 300 };
 
+	/** @brief A see-through shape that may be an opening in the cell's shell, and what the shell test found. */
+	struct OpeningCandidate
+	{
+		std::string model;
+		std::string shape;
+		RE::FormID ref = 0;
+		uint32_t firstTriangle = 0;
+		uint32_t triangleCount = 0;
+		uint32_t openSamples = 0;
+		uint32_t samples = 0;
+		float nearSide = 0.0f;  // mean distance to the room on the side that hits something
+		bool opening = false;
+	};
+
+	/** @brief Shell test of one cell's candidates, run on a worker thread on copies of the cell's triangles. */
+	struct OpeningScan
+	{
+		RE::TESObjectCELL* cell = nullptr;
+		std::vector<float3> occluders;           // triangle list of everything that blocks light
+		std::vector<uint32_t> occluderShapes;    // first triangle of each occluder shape, plus the end
+		std::vector<float3> candidateTriangles;  // triangle list of the candidates
+		std::vector<OpeningCandidate> candidates;
+		std::vector<float3> openings;  // result: triangle list of the shapes found to be openings
+		float milliseconds = 0.0f;
+		std::atomic<bool> done = false;
+	};
+
+	struct GlassEmissive
+	{
+		RE::NiPointer<RE::BSLightingShaderProperty> property;
+		RE::NiColor color;
+		float mult;
+	};
+
 	std::thread::id renderThread;
 	RE::TESObjectCELL* windowGlassCell = nullptr;
 	uint32_t windowGlassCellFrames = 0;
@@ -181,6 +220,22 @@ private:
 	uint32_t windowHolesDrawn = 0;
 	uint32_t windowHolesDrawnLastFrame = 0;
 	uint32_t windowHolesTargetMismatches = 0;
+	// Holes drawn per depth target, this frame and the last: the sun cascades and volumetric lighting's maps apart
+	std::array<uint32_t, RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL> windowHolesByTarget{};
+	std::array<uint32_t, RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL> windowHolesByTargetLastFrame{};
+	float windowGlassScanMilliseconds = 0.0f;
+
+	std::shared_ptr<OpeningScan> openingScan;  // in flight or finished; dropped on leaving the cell
+	std::shared_ptr<std::vector<float3>> lastCandidateTriangles;
+	bool glassEmissivesLit = false;
+	std::vector<float3> windowOpeningVertices;
+	uint32_t openingCandidates = 0;
+	uint32_t openingShapes = 0;
+	float openingScanMilliseconds = 0.0f;
+
+	std::vector<RE::NiPointer<RE::NiAVObject>> hiddenFakeGlows;
+	std::vector<GlassEmissive> glassEmissives;
+	std::unordered_map<RE::TESObjectCELL*, uint16_t> autoSunlitCells;  // cells given the sun, with their own flags to restore
 
 	std::vector<float3> windowGlassVertices;
 	std::unique_ptr<Buffer> windowGlass;
@@ -193,7 +248,29 @@ private:
 
 	void UpdateWindowGlass(RE::TESObjectCELL* cell);
 
-	void CollectWindowGlass(const RE::TESObjectCELL* cell);
+	void CollectWindowGlass(RE::TESObjectCELL* cell);
+
+	/** @brief Rebuilds the GPU triangle list from the glass and the openings found so far. */
+	void UploadWindowHoles(const RE::TESObjectCELL* cell);
+
+	/** @brief Takes the result of a finished opening scan, if any. */
+	void TakeOpeningScan();
+
+	/** @brief The shell test: marks the candidates that have the room on one side and nothing on the other. */
+	static void RunOpeningScan(OpeningScan& scan);
+
+	/** @brief Gives a cell with windows or openings the sun, unless it is a cave or dungeon. */
+	void UpdateAutoSunlit(RE::TESObjectCELL* cell);
+
+	/** @brief Puts back the flags of every cell given the sun automatically. */
+	void RestoreAutoSunlitCells();
+
+	void RestoreFakeGlows();
+
+	void RestoreGlassEmissives();
+
+	/** @brief Lights the glass from the sky's colour while the cell has the sun. */
+	void UpdateSkyLitGlass();
 
 	void ReleaseWindowGlass();
 
