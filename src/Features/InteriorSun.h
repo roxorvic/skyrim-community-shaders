@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include "Buffer.h"
 #include "ShaderCache.h"
 
 struct InteriorSun : Feature
@@ -26,6 +27,11 @@ public:
 	virtual void PostPostLoad() override;
 	/** @brief Updates the interior sun state based on the current cell during the early prepass. */
 	virtual void EarlyPrepass() override;
+	/** @brief Creates the GPU resources used to draw window glass into the sun shadow maps. */
+	virtual void SetupResources() override;
+	virtual void ClearShaderCache() override;
+	virtual bool HasDebugSection() const override { return true; }
+	virtual void DrawDebugSection() override;
 
 	/** @brief Registers the menu open/close event handler for tracking main menu state. */
 	virtual void DataLoaded() override
@@ -37,6 +43,7 @@ public:
 	{
 		bool ForceDoubleSidedRendering = true;
 		float InteriorShadowDistance = 5000;
+		bool WindowLightOnly = true;
 	};
 
 	Settings settings;
@@ -61,6 +68,13 @@ public:
 	struct BSBatchRenderer_RenderPassImmediately
 	{
 		static void thunk(RE::BSRenderPass* a_pass, uint32_t a_technique, bool a_alphaTest, uint32_t a_renderFlags);
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/** @brief Hook that runs before a camera's accumulated geometry is drawn, once its targets are bound and cleared. */
+	struct BSShaderAccumulator_StartAccumulating
+	{
+		static void thunk(RE::BSShaderAccumulator* a_accumulator, RE::NiCamera* a_camera);
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
@@ -147,4 +161,42 @@ private:
 	void PopulateReplacementJobArrays(RE::TESObjectCELL* cell, const RE::NiPointer<RE::BSPortalGraph>& portalGraph, const RE::BSShadowDirectionalLight* dirLight, RE::BSTArray<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>>& jobArrays);
 
 	static void SetShadowDistance(bool inInterior);
+
+	struct alignas(16) WindowHolesCB
+	{
+		float4x4 ViewProj;
+		float3 PosAdjust;
+		float pad0;
+	};
+
+	// Rescans after entering a cell, in frames: its 3D can still be loading on the first ones
+	static constexpr uint32_t WindowGlassScanFrames[] = { 1, 60, 300 };
+
+	std::thread::id renderThread;
+	RE::TESObjectCELL* windowGlassCell = nullptr;
+	uint32_t windowGlassCellFrames = 0;
+	uint32_t windowGlassVertexCount = 0;
+	uint32_t windowGlassShapes = 0;
+	uint32_t windowGlassShapesSkipped = 0;
+	uint32_t windowHolesDrawn = 0;
+	uint32_t windowHolesDrawnLastFrame = 0;
+	uint32_t windowHolesTargetMismatches = 0;
+
+	std::vector<float3> windowGlassVertices;
+	std::unique_ptr<Buffer> windowGlass;
+	ConstantBuffer* windowHolesCB = nullptr;
+	winrt::com_ptr<ID3D11VertexShader> windowHolesVS;
+	winrt::com_ptr<ID3D11RasterizerState> windowHolesRasterState;
+	winrt::com_ptr<ID3D11DepthStencilState> windowHolesDepthState;
+
+	ID3D11VertexShader* GetWindowHolesVS();
+
+	void UpdateWindowGlass(RE::TESObjectCELL* cell);
+
+	void CollectWindowGlass(const RE::TESObjectCELL* cell);
+
+	void ReleaseWindowGlass();
+
+	/** @brief Turns the bound sun shadow map into "all shadowed" with a hole at each window pane. */
+	void DrawWindowHoles(const RE::NiCamera* camera);
 };
