@@ -1559,6 +1559,7 @@
     "feature.interior_sun.debug_holes_open": "Open now (facing the sun): glass %u of %u, openings %u of %u",
     "feature.interior_sun.debug_openings": "Openings: %u of %u candidate shapes, %u triangles",
     "feature.interior_sun.debug_openings_facing_sun": "Openings with the sun in front of them now: %u of %u",
+    "feature.interior_sun.debug_panes_placed": "Panes placed: %u by the open side, %u by the farther side, %u away from the room's centre",
     "feature.interior_sun.debug_rescan": "Rescan Window Glass",
     "feature.interior_sun.debug_rooms_added": "Rooms and portals added to the sun's casters: %u of %u",
     "feature.interior_sun.debug_scan_times": "Scan times: glass %.2f ms (render thread), openings %.1f ms (worker)",

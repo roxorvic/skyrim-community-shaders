@@ -226,6 +226,7 @@ void InteriorSun::DrawDebugSection()
 	ImGui::Text(T(TKEY("debug_auto_sunlit"), "Interiors given the sun automatically: %u"), static_cast<uint32_t>(autoSunlitCells.size()));
 	ImGui::Text(T(TKEY("debug_shadow_gaps"), "Sun cascades with gaps closed last frame: %u"), shadowGapsClosedLastFrame);
 	ImGui::Text(T(TKEY("debug_holes_open"), "Open now (facing the sun): glass %u of %u, openings %u of %u"), holesOpenGlass, static_cast<uint32_t>(windowGlassRuns.size()), holesOpenOpenings, static_cast<uint32_t>(windowOpeningRuns.size()));
+	ImGui::Text(T(TKEY("debug_panes_placed"), "Panes placed: %u by the open side, %u by the farther side, %u away from the room's centre"), panesPlacedBy[0], panesPlacedBy[1], panesPlacedBy[2]);
 	ImGui::Checkbox(T(TKEY("debug_show_holes"), "Show Holes On Screen (green glass, yellow openings, red rejected)"), &debugShowHoles);
 
 	// The sun as the shadow maps use it, in this cell's own axes (indoors these need not match the building outside)
@@ -742,8 +743,17 @@ void InteriorSun::TakeOpeningScan()
 	windowOpeningRuns = std::move(scan->openingRuns);
 	if (scan->glassOutward.size() == windowGlassRuns.size())
 		windowGlassOutward = scan->glassOutward;
-	logger::info("[Interior Sun] Panes placed in cell {:08X}: {} of {} with an outward side", scan->cell->GetFormID(),
-		std::ranges::count_if(scan->glassOutward, [](const float3& v) { return v.LengthSquared() > 1e-6f; }), scan->glassOutward.size());
+	std::ranges::fill(panesPlacedBy, 0u);
+	for (const auto method : scan->glassMethod)
+		++panesPlacedBy[std::min<uint8_t>(method, 2)];
+	logger::info("[Interior Sun] Panes placed in cell {:08X}: {} by the open side, {} by the farther side, {} away from the room's centre", scan->cell->GetFormID(),
+		panesPlacedBy[0], panesPlacedBy[1], panesPlacedBy[2]);
+	static constexpr const char* methods[] = { "open side", "farther side", "room centre" };
+	for (size_t i = 0; i < scan->glassOutward.size() && i < windowGlassShapeInfo.size() && i < scan->glassMethod.size(); ++i) {
+		const auto& pane = windowGlassShapeInfo[i];
+		const auto& v = scan->glassOutward[i];
+		logger::info("[Interior Sun]   pane ref {:08X} | {} | {} | outward {:.2f} {:.2f} {:.2f} | by {}", pane.ref, pane.model, pane.shape, v.x, v.y, v.z, methods[std::min<uint8_t>(scan->glassMethod[i], 2)]);
+	}
 	openingCandidates = static_cast<uint32_t>(scan->candidates.size());
 	openingShapes = static_cast<uint32_t>(std::ranges::count_if(scan->candidates, [](const auto& candidate) { return candidate.opening; }));
 	openingScanMilliseconds = scan->milliseconds;
@@ -834,10 +844,55 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 		return m;
 	};
 
+	// Panes sit recessed in their frames, so both rays often hit something: outside trim a few units off, the room far
+	// away. The open side wins, then a clearly farther side, then the side away from the middle of the cell's walls.
+	float3 roomMin(FLT_MAX), roomMax(-FLT_MAX);
+	for (const auto& point : scan.occluders) {
+		roomMin = float3::Min(roomMin, point);
+		roomMax = float3::Max(roomMax, point);
+	}
+	const float3 roomCentre = (roomMin + roomMax) * 0.5f;
 	for (const auto& [first, count] : scan.glassShapes) {
-		const auto m = measure(scan.glassTriangles, first, count);
-		// A pane the test can't place stays open whatever the sun does
-		scan.glassOutward.push_back(m.samples && m.openSamples * 2 > m.samples ? m.outward : float3(0, 0, 0));
+		float3 openVote(0, 0, 0), fartherVote(0, 0, 0), largestNormal(0, 0, 0), largestCentre(0, 0, 0);
+		float largestArea = 0.0f;
+		for (uint32_t t = 0; t + 2 < count; t += 3) {
+			const auto& tri = scan.glassTriangles;
+			const uint32_t i = first + t;
+			float3 normal = (tri[i + 1] - tri[i]).Cross(tri[i + 2] - tri[i]);
+			const float area = normal.Length();
+			if (area < 1e-3f)
+				continue;
+			normal /= area;
+			const float3 centre = (tri[i] + tri[i + 1] + tri[i + 2]) / 3.0f;
+			if (area > largestArea) {
+				largestArea = area;
+				largestNormal = normal;
+				largestCentre = centre;
+			}
+			if (t / 3 >= SamplesPerShape)
+				continue;
+			const float front = cast(centre + normal * 2.0f, normal);
+			const float back = cast(centre - normal * 2.0f, -normal);
+			if ((front == FLT_MAX) != (back == FLT_MAX))
+				openVote += front == FLT_MAX ? normal : -normal;
+			else if (front != FLT_MAX && std::max(front, back) >= 64.0f && std::max(front, back) >= 3.0f * std::min(front, back))
+				fartherVote += front > back ? normal : -normal;
+		}
+		float3 outward(0, 0, 0);
+		uint8_t method = 2;
+		if (openVote.LengthSquared() > 1e-6f) {
+			outward = openVote;
+			method = 0;
+		} else if (fartherVote.LengthSquared() > 1e-6f) {
+			outward = fartherVote;
+			method = 1;
+		} else if (largestArea > 0.0f) {
+			outward = largestNormal.Dot(largestCentre - roomCentre) >= 0.0f ? largestNormal : -largestNormal;
+		}
+		if (outward.LengthSquared() > 1e-6f)
+			outward.Normalize();
+		scan.glassOutward.push_back(outward);
+		scan.glassMethod.push_back(method);
 	}
 
 	for (auto& candidate : scan.candidates) {
