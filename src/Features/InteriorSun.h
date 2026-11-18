@@ -37,6 +37,8 @@ public:
 	virtual void DataLoaded() override
 	{
 		MenuOpenCloseEventHandler::Register();
+		const auto dataHandler = RE::TESDataHandler::GetSingleton();
+		heliosLoaded = dataHandler && dataHandler->LookupModByName("Helios.esp");
 	}
 
 	struct Settings
@@ -315,4 +317,28 @@ private:
 
 	/** @brief Turns the bound sun shadow map into "all shadowed" with a hole at each window pane. */
 	void DrawWindowHoles(const RE::NiCamera* camera);
+
+	/** @brief Draws the holes into the bound depth target with the given camera data; puts back every state it changes. */
+	void DrawHolesInto(WindowHolesCB data, const D3D11_VIEWPORT& viewport);
+
+	/** @brief One sun shadow map given holes this frame, kept so the debug view can draw them again after the casters. */
+	struct HoleTarget
+	{
+		ID3D11DepthStencilView* dsv;  // the engine's view, alive for the session
+		float4x4 viewProj;
+		float3 posAdjust;
+		D3D11_VIEWPORT viewport;
+	};
+	std::vector<HoleTarget> holeTargetsThisFrame;
+	bool debugShowHoleBeams = false;
+
+	/** @brief Debug view: the holes drawn again over the casters, so every hole lets the sun straight through. */
+	void DrawHoleBeams();
+
+	// Settings whose change needs the cell scanned or the holes rebuilt again
+	bool lastDetectOpenings = true;
+	bool lastFrameShadows = true;
+	bool lastHideFakeGlows = true;
+	bool forceHolesUpload = false;
+	bool heliosLoaded = false;  // Helios drives window glow itself, so Sky-Lit Glass stands down
 };

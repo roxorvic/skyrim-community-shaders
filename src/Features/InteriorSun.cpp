@@ -180,7 +180,9 @@ void InteriorSun::DrawSettings()
 							  "Makes glowing window glass follow the sky's colour and brightness in interiors lit by the sun. "
 							  "Leave off when a weather mod already drives window glow."));
 	}
-	if (settings.SkyLitGlass)
+	if (heliosLoaded && settings.SkyLitGlass)
+		ImGui::TextDisabled("%s", T(TKEY("sky_lit_glass_helios"), "Off while Helios is loaded: Helios drives window glow itself."));
+	if (settings.SkyLitGlass && !heliosLoaded)
 		ImGui::SliderFloat(T(TKEY("sky_lit_glass_strength"), "Sky-Lit Glass Strength"), &settings.SkyLitGlassStrength, 0.0f, 4.0f);
 	ImGui::Checkbox(T(TKEY("auto_sunlit_interiors"), "Automatic Sunlit Interiors"), &settings.AutoSunlitInteriors);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -216,6 +218,7 @@ void InteriorSun::DrawDebugSection()
 	ImGui::Text(T(TKEY("debug_glass_emissives"), "Glowing glass shapes: %u"), static_cast<uint32_t>(glassEmissives.size()));
 	ImGui::Text(T(TKEY("debug_auto_sunlit"), "Interiors given the sun automatically: %u"), static_cast<uint32_t>(autoSunlitCells.size()));
 	ImGui::Text(T(TKEY("debug_shadow_gaps"), "Sun cascades with gaps closed last frame: %u"), shadowGapsClosedLastFrame);
+	ImGui::Checkbox(T(TKEY("debug_show_hole_beams"), "Show Hole Beams (sun through every hole, ignoring what blocks it)"), &debugShowHoleBeams);
 	if (Util::Button(T(TKEY("debug_rescan"), "Rescan Window Glass")))
 		windowGlassCellFrames = 0;
 }
@@ -297,7 +300,23 @@ void InteriorSun::EarlyPrepass()
 		RestoreFakeGlows();
 	UpdateSkyLitGlass();
 
-	// The shadow maps were drawn just before this callback; holes drawn into them make gap closing needless
+	// The shadow maps were drawn just before this callback, casters included
+	if (debugShowHoleBeams && !holeTargetsThisFrame.empty())
+		DrawHoleBeams();
+	holeTargetsThisFrame.clear();
+
+	// Changing these needs the cell scanned again (openings, glows) and the holes rebuilt
+	if (settings.DetectOpenings != lastDetectOpenings || settings.FrameShadowsFromGlowMaps != lastFrameShadows || settings.HideFakeWindowGlows != lastHideFakeGlows) {
+		lastDetectOpenings = settings.DetectOpenings;
+		lastFrameShadows = settings.FrameShadowsFromGlowMaps;
+		lastHideFakeGlows = settings.HideFakeWindowGlows;
+		lastCandidateTriangles.reset();
+		windowOpeningVertices.clear();
+		windowGlassCellFrames = 0;
+		forceHolesUpload = true;
+	}
+
+	// Holes drawn into the maps make gap closing needless
 	shadowGapsClosedLastFrame = 0;
 	if (isInteriorWithSun && settings.CloseShadowGaps && !windowHolesDrawn)
 		CloseShadowGaps();
@@ -475,7 +494,7 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 		}).detach();
 	}
 
-	if (vertices != windowGlassVertices) {
+	if (vertices != windowGlassVertices || std::exchange(forceHolesUpload, false)) {
 		windowGlassVertices = std::move(vertices);
 		windowGlassUVs = std::move(uvs);
 		windowGlassRuns = std::move(runs);
@@ -665,7 +684,7 @@ void InteriorSun::RestoreGlassEmissives()
 
 void InteriorSun::UpdateSkyLitGlass()
 {
-	if (!settings.SkyLitGlass || !isInteriorWithSun) {
+	if (!settings.SkyLitGlass || !isInteriorWithSun || heliosLoaded) {
 		if (glassEmissivesLit) {
 			RestoreGlassEmissives();
 			glassEmissivesLit = false;
@@ -894,10 +913,6 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 		return;
 	}
 
-	const auto vs = GetWindowHolesVS();
-	if (!vs)
-		return;
-
 	D3D11_TEXTURE2D_DESC textureDesc;
 	depthStencils[target].texture->GetDesc(&textureDesc);
 
@@ -918,6 +933,25 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 	viewport.Width = (eye.viewPort[1] - eye.viewPort[0]) * textureDesc.Width;
 	viewport.Height = (eye.viewPort[2] - eye.viewPort[3]) * textureDesc.Height;
 	viewport.MaxDepth = 1.0f;
+
+	globals::profiler->BeginPass("InteriorSun::WindowHoles");
+	// Everything is shadowed from the sun except through the panes; the casters drawn next still shadow that light
+	context->ClearDepthStencilView(dsv.get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
+	DrawHolesInto(data, viewport);
+	globals::profiler->EndPass();
+
+	if (debugShowHoleBeams)
+		holeTargetsThisFrame.push_back({ dsv.get(), data.ViewProj, data.PosAdjust, viewport });
+	++windowHolesDrawn;
+	++windowHolesByTarget[target];
+}
+
+void InteriorSun::DrawHolesInto(WindowHolesCB data, const D3D11_VIEWPORT& viewport)
+{
+	auto context = globals::d3d::context;
+	const auto vs = GetWindowHolesVS();
+	if (!vs || !windowGlass)
+		return;
 
 	// The engine caches its D3D state, so everything this draw changes is put back
 	winrt::com_ptr<ID3D11InputLayout> oldInputLayout;
@@ -946,11 +980,6 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 	context->RSGetState(oldRasterState.put());
 	context->RSGetViewports(&oldViewportCount, oldViewports);
 	context->OMGetDepthStencilState(oldDepthState.put(), &oldStencilRef);
-
-	globals::profiler->BeginPass("InteriorSun::WindowHoles");
-
-	// Everything is shadowed from the sun except through the panes; the casters drawn next still shadow that light
-	context->ClearDepthStencilView(dsv.get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
 
 	auto cb = windowHolesCB->CB();
 	auto srv = windowGlass->srv.get();
@@ -994,10 +1023,24 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 	context->RSSetState(oldRasterState.get());
 	context->RSSetViewports(oldViewportCount, oldViewports);
 	context->OMSetDepthStencilState(oldDepthState.get(), oldStencilRef);
+}
 
-	globals::profiler->EndPass();
-	++windowHolesDrawn;
-	++windowHolesByTarget[target];
+void InteriorSun::DrawHoleBeams()
+{
+	auto context = globals::d3d::context;
+	winrt::com_ptr<ID3D11RenderTargetView> oldRTV;
+	winrt::com_ptr<ID3D11DepthStencilView> oldDSV;
+	context->OMGetRenderTargets(1, oldRTV.put(), oldDSV.put());
+	for (const auto& holeTarget : holeTargetsThisFrame) {
+		WindowHolesCB data{};
+		data.ViewProj = holeTarget.viewProj;
+		data.PosAdjust = holeTarget.posAdjust;
+		data.GlowThreshold = settings.GlowMapThreshold;
+		context->OMSetRenderTargets(0, nullptr, holeTarget.dsv);
+		DrawHolesInto(data, holeTarget.viewport);
+	}
+	auto restoreRTV = oldRTV.get();
+	context->OMSetRenderTargets(1, &restoreRTV, oldDSV.get());
 }
 
 inline bool InteriorSun::IsInteriorWithSun(const RE::TESObjectCELL* cell)
