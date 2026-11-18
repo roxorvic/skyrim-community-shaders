@@ -16,6 +16,7 @@
 #include "FeatureIssues.h"
 #include "Features/Effects11/Editor/Effects11Editor.h"
 #include "Features/Effects11/EffectManager.h"
+#include "Features/InteriorSun.h"
 #include "Features/RenderDoc.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
@@ -353,6 +354,7 @@ bool OverlayRenderer::ShouldSkipRendering()
 			 effectFailed ||
 			 globals::features::performanceOverlay.settings.ShowInOverlay ||
 			 globals::features::performanceOverlay.settings.ShowWeatherPicker ||
+			 globals::features::interiorSun.debugShowHoles ||
 			 renderDoc->ShouldShowOverlay());
 }
 

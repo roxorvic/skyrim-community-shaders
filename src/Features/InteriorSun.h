@@ -1,8 +1,9 @@
 ﻿#pragma once
 #include "Buffer.h"
+#include "OverlayFeature.h"
 #include "ShaderCache.h"
 
-struct InteriorSun : Feature
+struct InteriorSun : OverlayFeature
 {
 public:
 	virtual inline std::string GetName() override { return "Interior Sun"; }
@@ -32,6 +33,10 @@ public:
 	virtual void ClearShaderCache() override;
 	virtual bool HasDebugSection() const override { return true; }
 	virtual void DrawDebugSection() override;
+	/** @brief Debug view: every hole and rejected candidate tinted on screen. */
+	virtual void DrawOverlay() override;
+	virtual bool IsOverlayVisible() const override { return debugShowHoles; }
+	bool debugShowHoles = false;
 
 	/** @brief Registers the menu open/close event handler for tracking main menu state. */
 	virtual void DataLoaded() override
@@ -203,9 +208,21 @@ private:
 		uint32_t triangleCount = 0;
 		uint32_t openSamples = 0;
 		uint32_t samples = 0;
-		float nearSide = 0.0f;  // mean distance to the room on the side that hits something
+		float nearSide = 0.0f;             // mean distance to the room on the side that hits something
+		float3 outward = float3(0, 0, 0);  // mean direction of the open side
 		bool opening = false;
 	};
+
+	/** @brief One glass shape, for the debug views. */
+	struct GlassShape
+	{
+		RE::FormID ref;
+		std::string model;
+		std::string shape;
+		uint32_t first;
+		uint32_t count;
+	};
+	std::vector<GlassShape> windowGlassShapeInfo;
 
 	/** @brief Shell test of one cell's candidates, run on a worker thread on copies of the cell's triangles. */
 	struct OpeningScan
@@ -243,6 +260,7 @@ private:
 
 	std::shared_ptr<OpeningScan> openingScan;  // in flight or finished; dropped on leaving the cell
 	std::shared_ptr<std::vector<float3>> lastCandidateTriangles;
+	std::shared_ptr<OpeningScan> lastOpeningScan;  // the finished scan of this cell, for the debug views
 	bool glassEmissivesLit = false;
 	std::vector<float3> windowOpeningVertices;
 	uint32_t openingCandidates = 0;

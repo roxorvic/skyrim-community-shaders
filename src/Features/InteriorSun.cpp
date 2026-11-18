@@ -218,6 +218,59 @@ void InteriorSun::DrawDebugSection()
 	ImGui::Text(T(TKEY("debug_glass_emissives"), "Glowing glass shapes: %u"), static_cast<uint32_t>(glassEmissives.size()));
 	ImGui::Text(T(TKEY("debug_auto_sunlit"), "Interiors given the sun automatically: %u"), static_cast<uint32_t>(autoSunlitCells.size()));
 	ImGui::Text(T(TKEY("debug_shadow_gaps"), "Sun cascades with gaps closed last frame: %u"), shadowGapsClosedLastFrame);
+	ImGui::Checkbox(T(TKEY("debug_show_holes"), "Show Holes On Screen (green glass, yellow openings, red rejected)"), &debugShowHoles);
+
+	// The sun as the shadow maps use it, in this cell's own axes (indoors these need not match the building outside)
+	const auto shadowSceneNode = globals::game::smState->shadowSceneNode[0];
+	const auto sunLight = shadowSceneNode ? shadowSceneNode->GetRuntimeData().sunShadowDirLight : nullptr;
+	float3 toSun(0, 0, 0);
+	if (sunLight) {
+		const auto& v = sunLight->GetShadowDirectionalLightRuntimeData().sunVector;
+		toSun = -float3(v.x, v.y, v.z);
+		if (toSun.LengthSquared() > 1e-6f)
+			toSun.Normalize();
+		const float azimuth = std::atan2(toSun.x, toSun.y) * 180.0f / std::numbers::pi_v<float>;
+		ImGui::Text(T(TKEY("debug_sun"), "Sun: azimuth %.0f deg (0 = cell +Y, clockwise), elevation %.0f deg"), azimuth < 0 ? azimuth + 360 : azimuth, std::asin(std::clamp(toSun.z, -1.0f, 1.0f)) * 180.0f / std::numbers::pi_v<float>);
+	}
+
+	// What the camera points at: the nearest scanned shape along its view
+	if (const auto camera = RE::Main::WorldRootCamera()) {
+		const auto& rotate = camera->world.rotate;
+		const float3 origin(camera->world.translate.x, camera->world.translate.y, camera->world.translate.z);
+		const float3 forward(rotate.entry[0][0], rotate.entry[1][0], rotate.entry[2][0]);
+		float best = FLT_MAX;
+		std::string what;
+		for (const auto& glass : windowGlassShapeInfo) {
+			const float t = CastRay(origin, forward, 100000.0f, windowGlassVertices, glass.first, glass.first + glass.count);
+			if (t < best) {
+				best = t;
+				what = std::format("GLASS | ref {:08X} | {} | {}", glass.ref, glass.model, glass.shape);  // i18n-ignore: debug identifiers
+			}
+		}
+		if (lastOpeningScan) {
+			for (const auto& candidate : lastOpeningScan->candidates) {
+				const float t = CastRay(origin, forward, 100000.0f, lastOpeningScan->candidateTriangles, candidate.firstTriangle, candidate.firstTriangle + candidate.triangleCount);
+				if (t < best) {
+					best = t;
+					what = std::format("{} | ref {:08X} | {} | {} | {}/{} samples open | room side {:.0f} | sun in front: {}", candidate.opening ? "OPENING" : "REJECTED", candidate.ref, candidate.model, candidate.shape,  // i18n-ignore: debug identifiers
+						candidate.openSamples, candidate.samples, candidate.nearSide, candidate.outward.Dot(toSun) > 0.0f ? "yes" : "no");
+				}
+			}
+		}
+		ImGui::TextWrapped(T(TKEY("debug_aimed"), "Aimed at (%.0f units): %s"), best == FLT_MAX ? 0.0f : best, best == FLT_MAX ? T(TKEY("debug_aimed_none"), "no scanned shape") : what.c_str());
+	}
+
+	if (lastOpeningScan) {
+		uint32_t facing = 0, total = 0;
+		for (const auto& candidate : lastOpeningScan->candidates) {
+			if (candidate.opening) {
+				++total;
+				facing += candidate.outward.Dot(toSun) > 0.0f;
+			}
+		}
+		ImGui::Text(T(TKEY("debug_openings_facing_sun"), "Openings with the sun in front of them now: %u of %u"), facing, total);
+	}
+
 	ImGui::Checkbox(T(TKEY("debug_show_hole_beams"), "Show Hole Beams (sun through every hole, ignoring what blocks it)"), &debugShowHoleBeams);
 	if (Util::Button(T(TKEY("debug_rescan"), "Rescan Window Glass")))
 		windowGlassCellFrames = 0;
@@ -399,6 +452,7 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 	std::vector<float3> vertices;
 	std::vector<float2> uvs;
 	std::vector<HoleDraw> runs;
+	std::vector<GlassShape> glassInfo;
 	windowGlassShapes = 0;
 	windowGlassShapesWithGlow = 0;
 	windowGlassShapesSkipped = 0;
@@ -447,6 +501,8 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 					else
 						glow = nullptr;
 					runs.push_back({ first, static_cast<uint32_t>(vertices.size()) - first, glow });
+					const auto model = base->As<RE::TESModel>();
+					glassInfo.push_back({ ref->GetFormID(), model ? model->GetModel() : "", geometry->name.c_str(), first, static_cast<uint32_t>(vertices.size()) - first });
 				} else
 					++windowGlassShapesSkipped;
 				if (lighting && lighting->emissiveColor && property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kOwnEmit, RE::BSShaderProperty::EShaderPropertyFlag::kGlowMap) &&
@@ -498,6 +554,7 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 		windowGlassVertices = std::move(vertices);
 		windowGlassUVs = std::move(uvs);
 		windowGlassRuns = std::move(runs);
+		windowGlassShapeInfo = std::move(glassInfo);
 		logger::info("[Interior Sun] Window glass in cell {:08X}: {} shapes ({} with glow maps), {} triangles, {} unreadable shapes, {:.2f} ms", cell->GetFormID(), windowGlassShapes, windowGlassShapesWithGlow, windowGlassVertices.size() / 3, windowGlassShapesSkipped, windowGlassScanMilliseconds);
 		UploadWindowHoles(cell);
 	}
@@ -563,6 +620,7 @@ void InteriorSun::TakeOpeningScan()
 	const auto scan = std::exchange(openingScan, nullptr);
 	if (scan->cell != windowGlassCell)
 		return;
+	lastOpeningScan = scan;
 
 	windowOpeningVertices = std::move(scan->openings);
 	openingCandidates = static_cast<uint32_t>(scan->candidates.size());
@@ -636,9 +694,12 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 			if ((front == FLT_MAX) != (back == FLT_MAX)) {
 				++candidate.openSamples;
 				nearSum += std::min(front, back);
+				candidate.outward += front == FLT_MAX ? normal : -normal;
 			}
 		}
 		candidate.nearSide = candidate.openSamples ? nearSum / candidate.openSamples : 0.0f;
+		if (candidate.outward.LengthSquared() > 1e-6f)
+			candidate.outward.Normalize();
 		candidate.opening = candidate.samples && candidate.openSamples * 2 > candidate.samples;
 		if (candidate.opening) {
 			const auto begin = scan.candidateTriangles.begin() + candidate.firstTriangle;
@@ -711,6 +772,8 @@ void InteriorSun::ReleaseWindowGlass()
 	glassEmissivesLit = false;
 	glassEmissives.clear();
 	openingScan.reset();
+	lastOpeningScan.reset();
+	windowGlassShapeInfo.clear();
 	lastCandidateTriangles.reset();
 	windowOpeningVertices.clear();
 	openingCandidates = 0;
@@ -1041,6 +1104,39 @@ void InteriorSun::DrawHoleBeams()
 	}
 	auto restoreRTV = oldRTV.get();
 	context->OMSetRenderTargets(1, &restoreRTV, oldDSV.get());
+}
+
+void InteriorSun::DrawOverlay()
+{
+	const auto camera = RE::Main::WorldRootCamera();
+	if (!debugShowHoles || !camera || !windowGlassCell)
+		return;
+
+	auto drawList = ImGui::GetBackgroundDrawList();
+	const auto size = ImGui::GetIO().DisplaySize;
+	const auto& port = camera->GetRuntimeData2().port;
+	const auto project = [&](const float3& point, ImVec2& out) {
+		float x, y, z;
+		if (!RE::NiCamera::WorldPtToScreenPt3(camera->GetRuntimeData().worldToCam, port, RE::NiPoint3(point.x, point.y, point.z), x, y, z, 1e-5f) || z < 0.0f)
+			return false;
+		out = ImVec2(x * size.x, (1.0f - y) * size.y);
+		return true;
+	};
+	const auto draw = [&](const std::vector<float3>& triangles, uint32_t first, uint32_t count, ImU32 color) {
+		for (uint32_t i = first; i + 2 < first + count; i += 3) {
+			ImVec2 a, b, c;
+			if (project(triangles[i], a) && project(triangles[i + 1], b) && project(triangles[i + 2], c))
+				drawList->AddTriangleFilled(a, b, c, color);
+		}
+	};
+
+	// Drawn over everything, walls included: what matters is where each hole is
+	draw(windowGlassVertices, 0, static_cast<uint32_t>(windowGlassVertices.size()), ImGui::GetColorU32(ImVec4(0.1f, 1.0f, 0.2f, 0.35f)));
+	if (lastOpeningScan) {
+		for (const auto& candidate : lastOpeningScan->candidates)
+			draw(lastOpeningScan->candidateTriangles, candidate.firstTriangle, candidate.triangleCount,
+				ImGui::GetColorU32(candidate.opening ? ImVec4(1.0f, 0.9f, 0.1f, 0.35f) : ImVec4(1.0f, 0.15f, 0.1f, 0.25f)));
+	}
 }
 
 inline bool InteriorSun::IsInteriorWithSun(const RE::TESObjectCELL* cell)
