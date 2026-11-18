@@ -6,8 +6,6 @@ cbuffer WindowHolesCB : register(b0)
 	uint Mode;            // 1: glass, opens where its glow map is bright; 2: opening, opens where its texture is see-through
 	float AlphaThreshold;
 	float2 pad0;
-	float3 ShellOffset;  // shell casters: moved away from the sun, so lit faces don't shadow themselves
-	float pad1;
 };
 
 struct HoleVertex
@@ -31,12 +29,6 @@ struct VSOutput
 VSOutput main(uint vertexId : SV_VertexID)
 {
 	VSOutput output;
-	if (Mode == 3) {
-		// The room's shell as a caster, at its own depth
-		output.Position = mul(float4(WindowGlass[vertexId].Position + ShellOffset - PosAdjust, 1), ViewProj);
-		output.UV = 0;
-		return output;
-	}
 	float4 positionCS = mul(float4(WindowGlass[vertexId].Position - PosAdjust, 1), ViewProj);
 	// Far depth: the pane opens the sun ray whatever its distance along it
 	output.Position = float4(positionCS.xy, positionCS.w, positionCS.w);

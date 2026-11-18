@@ -44,12 +44,9 @@ public:
 	mutable std::atomic<uint32_t> sunCasterPassesGlassFlag = 0;
 	mutable std::atomic<uint32_t> sunCasterPassesSkinned = 0;
 	uint32_t sunCasterPassesLast[3] = {};
-	std::unique_ptr<Buffer> shellCasters;  // the cell's solid statics, drawn double-sided into the sun maps
-	uint32_t shellCasterVertexCount = 0;
 	uint32_t shellShapesNoCastFlag = 0;
 	uint32_t shellShapesGlassFlag = 0;
 	uint32_t shellShapes = 0;
-	winrt::com_ptr<ID3D11DepthStencilState> shellDepthState;
 
 	/** @brief One shape the traced sun ray crosses. Kind: 0 glass, 1 opening, 2 rejected see-through shape, 3 solid. */
 	struct TraceHit
@@ -87,8 +84,7 @@ public:
 		bool SkyLitGlass = false;
 		float SkyLitGlassStrength = 1.0f;
 		bool AutoSunlitInteriors = false;
-		bool ShellBlocksSun = false;
-		float ShellOffset = 4.0f;
+		bool SunFacingHolesOnly = true;
 		bool CloseShadowGaps = false;
 		int ShadowGapTexels = 2;
 		bool FrameShadowsFromGlowMaps = true;
@@ -223,16 +219,13 @@ private:
 		uint32_t Mode;         // HoleMode: how the bound texture decides where the hole opens
 		float AlphaThreshold;  // openings open only where their texture is see-through (below this alpha)
 		float pad0[2];
-		float3 ShellOffset;  // shell casters: moved this far away from the sun, so lit faces don't shadow themselves
-		float pad1;
 	};
 
 	enum HoleMode : uint32_t
 	{
-		kWhole = 0,        // the whole shape opens
-		kBrightGlow = 1,   // glass: opens where its glow map is bright (panes), not on the frame
-		kSeeThrough = 2,   // openings: opens only where its own texture is see-through
-		kShellCaster = 3,  // the room's shell drawn as a caster at its real depth
+		kWhole = 0,       // the whole shape opens
+		kBrightGlow = 1,  // glass: opens where its glow map is bright (panes), not on the frame
+		kSeeThrough = 2,  // openings: opens only where its own texture is see-through
 	};
 
 	/** @brief A run of hole triangles sharing one glow map (none: the whole shape opens). */
@@ -243,6 +236,7 @@ private:
 		RE::NiPointer<RE::NiSourceTexture> texture;
 		HoleMode mode = kWhole;
 		float alphaThreshold = 0.5f;
+		float3 outward = float3(0, 0, 0);  // the side the sun must be on to come through; zero when unknown (always open)
 	};
 
 	// Rescans after entering a cell, in frames: its 3D can still be loading on the first ones
@@ -287,6 +281,9 @@ private:
 		uint32_t occludersGlassFlag = 0;
 		std::vector<float3> candidateTriangles;  // triangle list of the candidates
 		std::vector<float2> candidateUVs;
+		std::vector<float3> glassTriangles;                      // the glass, to find which way each pane faces outward
+		std::vector<std::pair<uint32_t, uint32_t>> glassShapes;  // first and count per pane
+		std::vector<float3> glassOutward;                        // result per pane; zero when the test can't tell
 		std::vector<OpeningCandidate> candidates;
 		std::vector<float3> openings;  // result: triangle list of the shapes found to be openings
 		std::vector<float2> openingUVs;
@@ -350,7 +347,17 @@ private:
 
 	std::vector<float3> windowGlassVertices;
 	std::vector<float2> windowGlassUVs;
-	std::vector<HoleDraw> windowGlassRuns;  // per glass shape, in windowGlassVertices
+	std::vector<HoleDraw> windowGlassRuns;   // per glass shape, in windowGlassVertices
+	std::vector<float3> windowGlassOutward;  // per glass shape, from the shell test
+	std::vector<uint8_t> lastOpenMask;       // which holes were open at the last upload, glass then openings
+	uint32_t holesOpenGlass = 0, holesOpenOpenings = 0;
+
+	/** @brief Direction toward the sun in world space; zero when there is none. */
+	static float3 GetToSun();
+	/** @brief Whether a hole lets the sun through now: open unless the sun is behind its outward side. */
+	bool IsHoleOpen(const float3& outward, const float3& toSun) const;
+	/** @brief Which holes are open now, glass then openings, to rebuild the holes when it changes. */
+	std::vector<uint8_t> ComputeOpenMask(const float3& toSun) const;
 	std::vector<HoleDraw> windowHoleDraws;  // what the hole pass draws, grouped by glow map
 	uint32_t windowGlassShapesWithGlow = 0;
 	winrt::com_ptr<ID3D11PixelShader> windowHolesPS;
@@ -417,6 +424,7 @@ private:
 	bool lastDetectOpenings = true;
 	bool lastFrameShadows = true;
 	bool lastHideFakeGlows = true;
+	bool lastSunFacing = true;
 	bool forceHolesUpload = false;
 	bool heliosLoaded = false;  // Helios drives window glow itself, so Sky-Lit Glass stands down
 };
