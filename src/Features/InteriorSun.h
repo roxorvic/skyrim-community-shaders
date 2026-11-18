@@ -51,6 +51,8 @@ public:
 		bool AutoSunlitInteriors = false;
 		bool CloseShadowGaps = false;
 		int ShadowGapTexels = 2;
+		bool FrameShadowsFromGlowMaps = true;
+		float GlowMapThreshold = 0.5f;
 	};
 
 	Settings settings;
@@ -173,7 +175,17 @@ private:
 	{
 		float4x4 ViewProj;
 		float3 PosAdjust;
-		float pad0;
+		float GlowThreshold;  // glass opens only where its glow map is at least this bright
+		uint32_t UseGlow;
+		float pad0[3];
+	};
+
+	/** @brief A run of hole triangles sharing one glow map (none: the whole shape opens). */
+	struct HoleDraw
+	{
+		uint32_t first;
+		uint32_t count;
+		RE::NiPointer<RE::NiSourceTexture> glow;
 	};
 
 	// Rescans after entering a cell, in frames: its 3D can still be loading on the first ones
@@ -257,6 +269,12 @@ private:
 	void CloseShadowGaps();
 
 	std::vector<float3> windowGlassVertices;
+	std::vector<float2> windowGlassUVs;
+	std::vector<HoleDraw> windowGlassRuns;  // per glass shape, in windowGlassVertices
+	std::vector<HoleDraw> windowHoleDraws;  // what the hole pass draws, grouped by glow map
+	uint32_t windowGlassShapesWithGlow = 0;
+	winrt::com_ptr<ID3D11PixelShader> windowHolesPS;
+	winrt::com_ptr<ID3D11SamplerState> windowHolesSampler;
 	std::unique_ptr<Buffer> windowGlass;
 	ConstantBuffer* windowHolesCB = nullptr;
 	winrt::com_ptr<ID3D11VertexShader> windowHolesVS;
@@ -264,6 +282,8 @@ private:
 	winrt::com_ptr<ID3D11DepthStencilState> windowHolesDepthState;
 
 	ID3D11VertexShader* GetWindowHolesVS();
+
+	ID3D11PixelShader* GetWindowHolesPS();
 
 	void UpdateWindowGlass(RE::TESObjectCELL* cell);
 
