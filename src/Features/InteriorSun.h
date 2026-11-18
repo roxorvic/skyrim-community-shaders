@@ -28,6 +28,8 @@ public:
 	virtual void PostPostLoad() override;
 	/** @brief Updates the interior sun state based on the current cell during the early prepass. */
 	virtual void EarlyPrepass() override;
+	/** @brief Binds the window planes for the lighting shader (t99), or nothing when they are off. */
+	virtual void Prepass() override;
 	/** @brief Creates the GPU resources used to draw window glass into the sun shadow maps. */
 	virtual void SetupResources() override;
 	virtual void ClearShaderCache() override;
@@ -85,6 +87,7 @@ public:
 		float SkyLitGlassStrength = 1.0f;
 		bool AutoSunlitInteriors = false;
 		bool SunFacingHolesOnly = true;
+		bool LightOnlyPastWindow = true;
 		bool CloseShadowGaps = false;
 		int ShadowGapTexels = 2;
 		bool FrameShadowsFromGlowMaps = true;
@@ -353,6 +356,18 @@ private:
 	std::vector<uint8_t> lastOpenMask;       // which holes were open at the last upload, glass then openings
 	uint32_t holesOpenGlass = 0, holesOpenOpenings = 0;
 	uint32_t panesPlacedBy[3] = {};  // open side, nearer side, room centre
+
+	// Per sun cascade, the plane of the window each shadow-map texel's light came through (outward xyz, offset w)
+	static constexpr uint32_t WindowPlaneSize = 1024;
+	winrt::com_ptr<ID3D11Texture2D> windowPlanes;
+	winrt::com_ptr<ID3D11ShaderResourceView> windowPlanesSRV;
+	winrt::com_ptr<ID3D11RenderTargetView> windowPlanesRTV[2];
+	winrt::com_ptr<ID3D11PixelShader> windowPlanesPS;
+	uint32_t windowPlanesWritten = 0;  // cascades written this frame (bits)
+	bool windowPlanesValid = false;    // the lighting shader may read them this frame
+
+	/** @brief Writes the holes' window planes for one sun cascade, at the plane texture's resolution. */
+	void DrawWindowPlanes(uint32_t cascade, WindowHolesCB data, const D3D11_VIEWPORT& shadowViewport, uint32_t shadowWidth, uint32_t shadowHeight);
 
 	/** @brief Direction toward the sun in world space; zero when there is none. */
 	static float3 GetToSun();

@@ -993,6 +993,9 @@ bool UseSkylightingShadowVisibility()
 
 #	include "Common/ShadowSampling.hlsli"
 
+// Interior Sun: per sun cascade, the plane of the window each shadow-map texel's light came through (zero: none)
+Texture2DArray<float4> InteriorSunWindowPlanes : register(t99);
+
 #	if defined(IBL)
 #		include "IBL/IBL.hlsli"
 #	endif
@@ -2567,6 +2570,28 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		dirSoftShadow *= faceTowardSun;
 	}
 #	endif
+
+	// Interior sun: light that came in through a window lights only the room side of that window (never a room behind it)
+	if (SharedData::InInterior && SharedData::HasDirectionalShadows) {
+		uint planesWidth, planesHeight, planesSlices;
+		InteriorSunWindowPlanes.GetDimensions(planesWidth, planesHeight, planesSlices);
+		DirectionalShadowLightData windowShadowData = DirectionalShadowLights[0];
+		const float windowShadowDepth = SharedData::GetScreenDepth(FrameBuffer::GetShadowDepth(input.WorldPosition.xyz));
+		if (planesWidth > 0 && windowShadowDepth < windowShadowData.EndSplitDistances.y) {
+			const float cascadeSelect = saturate((windowShadowDepth - windowShadowData.StartSplitDistances.y) / (windowShadowData.EndSplitDistances.x - windowShadowData.StartSplitDistances.y));
+			const uint windowCascade = uint(cascadeSelect);
+			const float3 positionWS = input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
+			const float2 windowUV = mul(windowShadowData.ShadowProj[windowCascade], float4(positionWS, 1)).xy;
+			if (all(windowUV > 0.0) && all(windowUV < 1.0)) {
+				const float4 windowPlane = InteriorSunWindowPlanes.Load(int4(windowUV * float2(planesWidth, planesHeight), windowCascade, 0));
+				// A few units of margin keep the window's own frame and sill lit
+				if (dot(windowPlane.xyz, windowPlane.xyz) > 0.5 && dot(windowPlane.xyz, positionWS) - windowPlane.w > 8.0) {
+					dirDetailedShadow = 0.0;
+					dirSoftShadow = 0.0;
+				}
+			}
+		}
+	}
 
 	// Directiontal Lighting
 	DirectContext dirLightContext;
