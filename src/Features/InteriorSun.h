@@ -35,9 +35,25 @@ public:
 	virtual void DrawDebugSection() override;
 	/** @brief Debug view: every hole and rejected candidate tinted on screen. */
 	virtual void DrawOverlay() override;
-	virtual bool IsOverlayVisible() const override { return debugShowHoles; }
+	virtual bool IsOverlayVisible() const override { return debugShowHoles || traceValid; }
 	bool debugShowHoles = false;
-	bool debugAllRoomsCast = false;  // every room of the cell into the sun's shadow maps, not only those toward the sun
+	bool debugAllRoomsCast = false;
+
+	/** @brief One shape the traced sun ray crosses. Kind: 0 glass, 1 opening, 2 rejected see-through shape, 3 solid. */
+	struct TraceHit
+	{
+		float distance;
+		int kind;
+		std::string what;
+	};
+	bool traceValid = false;
+	float3 traceStart = float3(0, 0, 0);
+	float3 traceDirection = float3(0, 0, 1);
+	std::string traceStartWhat;
+	std::vector<TraceHit> traceHits;
+
+	/** @brief Debug: from the point under the crosshair, follows the sun's ray outward and records every shape it crosses. */
+	void TraceSunFromCrosshair();  // every room of the cell into the sun's shadow maps, not only those toward the sun
 	uint32_t roomsAddedLastFrame = 0;
 	uint32_t roomsInCell = 0;
 
@@ -245,6 +261,7 @@ private:
 		RE::TESObjectCELL* cell = nullptr;
 		std::vector<float3> occluders;           // triangle list of everything that blocks light
 		std::vector<uint32_t> occluderShapes;    // first triangle of each occluder shape, plus the end
+		std::vector<std::string> occluderNames;  // per occluder shape: ref, mesh and shape, for the sun trace
 		std::vector<float3> candidateTriangles;  // triangle list of the candidates
 		std::vector<float2> candidateUVs;
 		std::vector<OpeningCandidate> candidates;

@@ -354,7 +354,7 @@ bool OverlayRenderer::ShouldSkipRendering()
 			 effectFailed ||
 			 globals::features::performanceOverlay.settings.ShowInOverlay ||
 			 globals::features::performanceOverlay.settings.ShowWeatherPicker ||
-			 globals::features::interiorSun.debugShowHoles ||
+			 globals::features::interiorSun.IsOverlayVisible() ||
 			 renderDoc->ShouldShowOverlay());
 }
 
