@@ -284,7 +284,7 @@ private:
 		std::vector<float3> glassTriangles;                      // the glass, to find which way each pane faces outward
 		std::vector<std::pair<uint32_t, uint32_t>> glassShapes;  // first and count per pane
 		std::vector<float3> glassOutward;                        // result per pane; zero when the test can't tell
-		std::vector<uint8_t> glassMethod;                        // how each pane was placed: 0 open side, 1 farther side, 2 away from the room's centre
+		std::vector<uint8_t> glassMethod;                        // how each pane was placed: 0 open side, 1 nearer side, 2 away from the room's centre
 		std::vector<OpeningCandidate> candidates;
 		std::vector<float3> openings;  // result: triangle list of the shapes found to be openings
 		std::vector<float2> openingUVs;
@@ -352,7 +352,7 @@ private:
 	std::vector<float3> windowGlassOutward;  // per glass shape, from the shell test
 	std::vector<uint8_t> lastOpenMask;       // which holes were open at the last upload, glass then openings
 	uint32_t holesOpenGlass = 0, holesOpenOpenings = 0;
-	uint32_t panesPlacedBy[3] = {};  // open side, farther side, room centre
+	uint32_t panesPlacedBy[3] = {};  // open side, nearer side, room centre
 
 	/** @brief Direction toward the sun in world space; zero when there is none. */
 	static float3 GetToSun();

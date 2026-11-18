@@ -226,7 +226,7 @@ void InteriorSun::DrawDebugSection()
 	ImGui::Text(T(TKEY("debug_auto_sunlit"), "Interiors given the sun automatically: %u"), static_cast<uint32_t>(autoSunlitCells.size()));
 	ImGui::Text(T(TKEY("debug_shadow_gaps"), "Sun cascades with gaps closed last frame: %u"), shadowGapsClosedLastFrame);
 	ImGui::Text(T(TKEY("debug_holes_open"), "Open now (facing the sun): glass %u of %u, openings %u of %u"), holesOpenGlass, static_cast<uint32_t>(windowGlassRuns.size()), holesOpenOpenings, static_cast<uint32_t>(windowOpeningRuns.size()));
-	ImGui::Text(T(TKEY("debug_panes_placed"), "Panes placed: %u by the open side, %u by the farther side, %u away from the room's centre"), panesPlacedBy[0], panesPlacedBy[1], panesPlacedBy[2]);
+	ImGui::Text(T(TKEY("debug_panes_placed"), "Panes placed: %u by the open side, %u by the nearer side, %u away from the room's centre"), panesPlacedBy[0], panesPlacedBy[1], panesPlacedBy[2]);
 	ImGui::Checkbox(T(TKEY("debug_show_holes"), "Show Holes On Screen (green glass, yellow openings, red rejected)"), &debugShowHoles);
 
 	// The sun as the shadow maps use it, in this cell's own axes (indoors these need not match the building outside)
@@ -746,9 +746,9 @@ void InteriorSun::TakeOpeningScan()
 	std::ranges::fill(panesPlacedBy, 0u);
 	for (const auto method : scan->glassMethod)
 		++panesPlacedBy[std::min<uint8_t>(method, 2)];
-	logger::info("[Interior Sun] Panes placed in cell {:08X}: {} by the open side, {} by the farther side, {} away from the room's centre", scan->cell->GetFormID(),
+	logger::info("[Interior Sun] Panes placed in cell {:08X}: {} by the open side, {} by the nearer side, {} away from the room's centre", scan->cell->GetFormID(),
 		panesPlacedBy[0], panesPlacedBy[1], panesPlacedBy[2]);
-	static constexpr const char* methods[] = { "open side", "farther side", "room centre" };
+	static constexpr const char* methods[] = { "open side", "nearer side", "room centre" };
 	for (size_t i = 0; i < scan->glassOutward.size() && i < windowGlassShapeInfo.size() && i < scan->glassMethod.size(); ++i) {
 		const auto& pane = windowGlassShapeInfo[i];
 		const auto& v = scan->glassOutward[i];
@@ -845,7 +845,7 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 	};
 
 	// Panes sit recessed in their frames, so both rays often hit something: outside trim a few units off, the room far
-	// away. The open side wins, then a clearly farther side, then the side away from the middle of the cell's walls.
+	// away. The open side wins, then the side with the clearly nearer hit, then the side away from the middle of the cell's walls.
 	float3 roomMin(FLT_MAX), roomMax(-FLT_MAX);
 	for (const auto& point : scan.occluders) {
 		roomMin = float3::Min(roomMin, point);
@@ -876,7 +876,7 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 			if ((front == FLT_MAX) != (back == FLT_MAX))
 				openVote += front == FLT_MAX ? normal : -normal;
 			else if (front != FLT_MAX && std::max(front, back) >= 64.0f && std::max(front, back) >= 3.0f * std::min(front, back))
-				fartherVote += front > back ? normal : -normal;
+				fartherVote += front < back ? normal : -normal;  // the near hit is the outside trim; the room is the far one
 		}
 		float3 outward(0, 0, 0);
 		uint8_t method = 2;
