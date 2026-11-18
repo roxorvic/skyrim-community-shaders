@@ -3,8 +3,9 @@ cbuffer WindowHolesCB : register(b0)
 	row_major float4x4 ViewProj;
 	float3 PosAdjust;
 	float GlowThreshold;  // glass opens only where its glow map is at least this bright
-	uint UseGlow;
-	float3 pad0;
+	uint Mode;            // 1: glass, opens where its glow map is bright; 2: opening, opens where its texture is see-through
+	float AlphaThreshold;
+	float2 pad0;
 };
 
 struct HoleVertex
@@ -16,8 +17,8 @@ struct HoleVertex
 // World-space triangle list of the cell's window glass and openings
 StructuredBuffer<HoleVertex> WindowGlass : register(t0);
 
-Texture2D<float4> GlowMap : register(t0);
-SamplerState GlowSampler : register(s0);
+Texture2D<float4> HoleTexture : register(t0);
+SamplerState HoleSampler : register(s0);
 
 struct VSOutput
 {
@@ -35,11 +36,13 @@ VSOutput main(uint vertexId : SV_VertexID)
 	return output;
 }
 
-// Glow maps are white on the panes and black on the frame: the frame keeps the "shadowed" depth
+// Glass: glow maps are white on the panes and black on the frame. Openings: only their see-through pixels open.
+// Anything clipped keeps the "shadowed" depth.
 void psmain(VSOutput input)
 {
-	if (UseGlow) {
-		const float3 glow = GlowMap.Sample(GlowSampler, input.UV).rgb;
-		clip(max(glow.r, max(glow.g, glow.b)) - GlowThreshold);
-	}
+	const float4 texel = HoleTexture.Sample(HoleSampler, input.UV);
+	if (Mode == 1)
+		clip(max(texel.r, max(texel.g, texel.b)) - GlowThreshold);
+	else if (Mode == 2)
+		clip(AlphaThreshold - texel.a);
 }

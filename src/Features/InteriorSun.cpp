@@ -365,6 +365,8 @@ void InteriorSun::EarlyPrepass()
 		lastHideFakeGlows = settings.HideFakeWindowGlows;
 		lastCandidateTriangles.reset();
 		windowOpeningVertices.clear();
+		windowOpeningUVs.clear();
+		windowOpeningRuns.clear();
 		windowGlassCellFrames = 0;
 		forceHolesUpload = true;
 	}
@@ -519,11 +521,22 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 			if (alpha && alpha->GetAlphaTesting()) {
 				if (!property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kCastShadows))
 					return RE::BSVisit::BSVisitControl::kContinue;
+				// Only its see-through pixels can let light in, so it needs a readable diffuse texture
+				const auto lighting = netimmerse_cast<RE::BSLightingShaderProperty*>(property);
+				const auto material = lighting ? static_cast<const RE::BSLightingShaderMaterialBase*>(lighting->material) : nullptr;
+				const auto diffuse = material ? material->diffuseTexture : nullptr;
+				if (!diffuse || !diffuse->rendererTexture || !diffuse->rendererTexture->resourceView)
+					return RE::BSVisit::BSVisitControl::kContinue;
+				const float2 uvScale(material->texCoordScale[0].x, material->texCoordScale[0].y);
+				const float2 uvOffset(material->texCoordOffset[0].x, material->texCoordOffset[0].y);
 				const auto first = static_cast<uint32_t>(scan->candidateTriangles.size());
-				if (AppendWorldTriangles(geometry, scan->candidateTriangles)) {
+				if (AppendWorldTriangles(geometry, scan->candidateTriangles, &scan->candidateUVs, uvScale, uvOffset)) {
 					const auto model = base->As<RE::TESModel>();
-					scan->candidates.push_back({ model ? model->GetModel() : "", geometry->name.c_str(), ref->GetFormID(), first,
-						static_cast<uint32_t>(scan->candidateTriangles.size()) - first });
+					OpeningCandidate candidate{ model ? model->GetModel() : "", geometry->name.c_str(), ref->GetFormID(), first,
+						static_cast<uint32_t>(scan->candidateTriangles.size()) - first };
+					candidate.diffuse = diffuse;
+					candidate.alphaThreshold = alpha->alphaThreshold / 255.0f;
+					scan->candidates.push_back(std::move(candidate));
 				}
 			} else if (!alpha || !alpha->GetAlphaBlending()) {
 				const auto first = static_cast<uint32_t>(scan->occluders.size());
@@ -573,22 +586,27 @@ void InteriorSun::UploadWindowHoles(const RE::TESObjectCELL* cell)
 
 	// Glass grouped by glow map, so each map is bound once; without frame shadows every pane opens whole
 	auto runs = windowGlassRuns;
-	if (!settings.FrameShadowsFromGlowMaps)
-		for (auto& run : runs)
-			run.glow = nullptr;
-	std::ranges::stable_sort(runs, {}, [](const HoleDraw& run) { return run.glow.get(); });
-	for (const auto& run : runs) {
-		if (windowHoleDraws.empty() || windowHoleDraws.back().glow != run.glow)
-			windowHoleDraws.push_back({ static_cast<uint32_t>(holes.size()), 0, run.glow });
-		for (uint32_t i = run.first; i < run.first + run.count; ++i)
-			holes.push_back({ windowGlassVertices[i], windowGlassUVs[i] });
-		windowHoleDraws.back().count += run.count;
+	for (auto& run : runs) {
+		if (!settings.FrameShadowsFromGlowMaps)
+			run.texture = nullptr;
+		run.mode = run.texture ? kBrightGlow : kWhole;
 	}
-	if (settings.DetectOpenings && !windowOpeningVertices.empty()) {
-		windowHoleDraws.push_back({ static_cast<uint32_t>(holes.size()), static_cast<uint32_t>(windowOpeningVertices.size()), nullptr });
-		for (const auto& position : windowOpeningVertices)
-			holes.push_back({ position, float2(0, 0) });
-	}
+	auto openingRuns = settings.DetectOpenings ? windowOpeningRuns : std::vector<HoleDraw>{};
+	const auto sameDraw = [](const HoleDraw& a, const HoleDraw& b) { return a.texture == b.texture && a.mode == b.mode && a.alphaThreshold == b.alphaThreshold; };
+	const auto byTexture = [](const HoleDraw& run) { return run.texture.get(); };
+	std::ranges::stable_sort(runs, {}, byTexture);
+	std::ranges::stable_sort(openingRuns, {}, byTexture);
+	const auto append = [&](const std::vector<HoleDraw>& list, const std::vector<float3>& positions, const std::vector<float2>& uvs) {
+		for (const auto& run : list) {
+			if (windowHoleDraws.empty() || !sameDraw(windowHoleDraws.back(), run))
+				windowHoleDraws.push_back({ static_cast<uint32_t>(holes.size()), 0, run.texture, run.mode, run.alphaThreshold });
+			for (uint32_t i = run.first; i < run.first + run.count; ++i)
+				holes.push_back({ positions[i], uvs[i] });
+			windowHoleDraws.back().count += run.count;
+		}
+	};
+	append(runs, windowGlassVertices, windowGlassUVs);
+	append(openingRuns, windowOpeningVertices, windowOpeningUVs);
 
 	windowGlass.reset();
 	windowGlassVertexCount = 0;
@@ -623,6 +641,8 @@ void InteriorSun::TakeOpeningScan()
 	lastOpeningScan = scan;
 
 	windowOpeningVertices = std::move(scan->openings);
+	windowOpeningUVs = std::move(scan->openingUVs);
+	windowOpeningRuns = std::move(scan->openingRuns);
 	openingCandidates = static_cast<uint32_t>(scan->candidates.size());
 	openingShapes = static_cast<uint32_t>(std::ranges::count_if(scan->candidates, [](const auto& candidate) { return candidate.opening; }));
 	openingScanMilliseconds = scan->milliseconds;
@@ -700,10 +720,15 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 		candidate.nearSide = candidate.openSamples ? nearSum / candidate.openSamples : 0.0f;
 		if (candidate.outward.LengthSquared() > 1e-6f)
 			candidate.outward.Normalize();
-		candidate.opening = candidate.samples && candidate.openSamples * 2 > candidate.samples;
+		// Sun never comes up through a floor: rugs and floor pieces have only the void below them
+		candidate.opening = candidate.samples && candidate.openSamples * 2 > candidate.samples && candidate.outward.z > -0.7f;
 		if (candidate.opening) {
+			const auto first = static_cast<uint32_t>(scan.openings.size());
 			const auto begin = scan.candidateTriangles.begin() + candidate.firstTriangle;
+			const auto uvBegin = scan.candidateUVs.begin() + candidate.firstTriangle;
 			scan.openings.insert(scan.openings.end(), begin, begin + candidate.triangleCount);
+			scan.openingUVs.insert(scan.openingUVs.end(), uvBegin, uvBegin + candidate.triangleCount);
+			scan.openingRuns.push_back({ first, candidate.triangleCount, candidate.diffuse, kSeeThrough, candidate.alphaThreshold });
 		}
 	}
 	scan.milliseconds = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -776,6 +801,8 @@ void InteriorSun::ReleaseWindowGlass()
 	windowGlassShapeInfo.clear();
 	lastCandidateTriangles.reset();
 	windowOpeningVertices.clear();
+	windowOpeningUVs.clear();
+	windowOpeningRuns.clear();
 	openingCandidates = 0;
 	openingShapes = 0;
 	windowGlass.reset();
@@ -1059,13 +1086,16 @@ void InteriorSun::DrawHolesInto(WindowHolesCB data, const D3D11_VIEWPORT& viewpo
 	context->OMSetDepthStencilState(windowHolesDepthState.get(), 0);
 	const auto ps = GetWindowHolesPS();
 	for (const auto& draw : windowHoleDraws) {
-		// With a glow map, a pixel shader keeps the frame shadowed; without one, depth only
-		const bool useGlow = draw.glow && ps;
-		data.UseGlow = useGlow;
+		// With a texture, a pixel shader keeps the solid parts shadowed (frames, lattice bars); without one, depth only
+		const bool textured = draw.mode != kWhole && draw.texture && ps;
+		if (draw.mode == kSeeThrough && !textured)
+			continue;  // an opening that can't be told see-through from solid stays closed
+		data.Mode = textured ? draw.mode : kWhole;
+		data.AlphaThreshold = draw.alphaThreshold;
 		windowHolesCB->Update(data);
-		ID3D11ShaderResourceView* glow = useGlow ? draw.glow->rendererTexture->resourceView : nullptr;
-		context->PSSetShader(useGlow ? ps : nullptr, nullptr, 0);
-		context->PSSetShaderResources(0, 1, &glow);
+		ID3D11ShaderResourceView* texture = textured ? draw.texture->rendererTexture->resourceView : nullptr;
+		context->PSSetShader(textured ? ps : nullptr, nullptr, 0);
+		context->PSSetShaderResources(0, 1, &texture);
 		context->Draw(draw.count, draw.first);
 	}
 

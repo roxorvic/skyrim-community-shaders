@@ -182,9 +182,17 @@ private:
 	{
 		float4x4 ViewProj;
 		float3 PosAdjust;
-		float GlowThreshold;  // glass opens only where its glow map is at least this bright
-		uint32_t UseGlow;
-		float pad0[3];
+		float GlowThreshold;   // glass opens only where its glow map is at least this bright
+		uint32_t Mode;         // HoleMode: how the bound texture decides where the hole opens
+		float AlphaThreshold;  // openings open only where their texture is see-through (below this alpha)
+		float pad0[2];
+	};
+
+	enum HoleMode : uint32_t
+	{
+		kWhole = 0,       // the whole shape opens
+		kBrightGlow = 1,  // glass: opens where its glow map is bright (panes), not on the frame
+		kSeeThrough = 2,  // openings: opens only where its own texture is see-through
 	};
 
 	/** @brief A run of hole triangles sharing one glow map (none: the whole shape opens). */
@@ -192,7 +200,9 @@ private:
 	{
 		uint32_t first;
 		uint32_t count;
-		RE::NiPointer<RE::NiSourceTexture> glow;
+		RE::NiPointer<RE::NiSourceTexture> texture;
+		HoleMode mode = kWhole;
+		float alphaThreshold = 0.5f;
 	};
 
 	// Rescans after entering a cell, in frames: its 3D can still be loading on the first ones
@@ -208,8 +218,10 @@ private:
 		uint32_t triangleCount = 0;
 		uint32_t openSamples = 0;
 		uint32_t samples = 0;
-		float nearSide = 0.0f;             // mean distance to the room on the side that hits something
-		float3 outward = float3(0, 0, 0);  // mean direction of the open side
+		float nearSide = 0.0f;                       // mean distance to the room on the side that hits something
+		float3 outward = float3(0, 0, 0);            // mean direction of the open side
+		RE::NiPointer<RE::NiSourceTexture> diffuse;  // its see-through pixels are the opening
+		float alphaThreshold = 0.5f;
 		bool opening = false;
 	};
 
@@ -231,8 +243,11 @@ private:
 		std::vector<float3> occluders;           // triangle list of everything that blocks light
 		std::vector<uint32_t> occluderShapes;    // first triangle of each occluder shape, plus the end
 		std::vector<float3> candidateTriangles;  // triangle list of the candidates
+		std::vector<float2> candidateUVs;
 		std::vector<OpeningCandidate> candidates;
 		std::vector<float3> openings;  // result: triangle list of the shapes found to be openings
+		std::vector<float2> openingUVs;
+		std::vector<HoleDraw> openingRuns;  // per opening shape, in openings
 		float milliseconds = 0.0f;
 		std::atomic<bool> done = false;
 	};
@@ -263,6 +278,8 @@ private:
 	std::shared_ptr<OpeningScan> lastOpeningScan;  // the finished scan of this cell, for the debug views
 	bool glassEmissivesLit = false;
 	std::vector<float3> windowOpeningVertices;
+	std::vector<float2> windowOpeningUVs;
+	std::vector<HoleDraw> windowOpeningRuns;
 	uint32_t openingCandidates = 0;
 	uint32_t openingShapes = 0;
 	float openingScanMilliseconds = 0.0f;
