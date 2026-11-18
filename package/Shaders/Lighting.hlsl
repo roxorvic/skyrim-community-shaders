@@ -2557,6 +2557,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float3 lodLandDiffuseColor = 0;
 
+#	if !defined(MODELSPACENORMALS)
+	// Interior sun: a face turned away from the sun gets none of it, whatever its normal map tilts. Single-sided interior
+	// walls shadow themselves at the same depth, so at grazing angles the shadow test alone lets slivers through.
+	if (SharedData::InInterior && SharedData::HasDirectionalShadows) {
+		const float faceTowardSun = smoothstep(0.0, 0.05, dot(vertexNormal.xyz, DirLightDirection.xyz));
+		dirDetailedShadow *= faceTowardSun;
+		dirSoftShadow *= faceTowardSun;
+	}
+#	endif
+
 	// Directiontal Lighting
 	DirectContext dirLightContext;
 	DirectLightingOutput dirLightOutput;
