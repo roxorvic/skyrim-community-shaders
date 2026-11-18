@@ -2583,7 +2583,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			const float3 positionWS = input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
 			const float2 windowUV = mul(windowShadowData.ShadowProj[windowCascade], float4(positionWS, 1)).xy;
 			if (all(windowUV > 0.0) && all(windowUV < 1.0)) {
-				const float4 windowPlane = InteriorSunWindowPlanes.Load(int4(windowUV * float2(planesWidth, planesHeight), windowCascade, 0));
+				// The plane texture is coarser than the shadow map: at a window's rim, take a neighbour's plane
+				const int2 windowTexel = int2(windowUV * float2(planesWidth, planesHeight));
+				float4 windowPlane = InteriorSunWindowPlanes.Load(int4(windowTexel, windowCascade, 0));
+				static const int2 windowNeighbours[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+				[unroll] for (uint n = 0; n < 4; ++n)
+				{
+					if (dot(windowPlane.xyz, windowPlane.xyz) < 0.5)
+						windowPlane = InteriorSunWindowPlanes.Load(int4(clamp(windowTexel + windowNeighbours[n], 0, int2(planesWidth, planesHeight) - 1), windowCascade, 0));
+				}
 				// A few units of margin keep the window's own frame and sill lit
 				if (dot(windowPlane.xyz, windowPlane.xyz) > 0.5 && dot(windowPlane.xyz, positionWS) - windowPlane.w > 8.0) {
 					dirDetailedShadow = 0.0;

@@ -1342,15 +1342,15 @@ void InteriorSun::DrawWindowPlanes(uint32_t cascade, WindowHolesCB data, const D
 	context->PSSetSamplers(0, 1, &sampler);
 	context->RSSetState(windowHolesRasterState.get());
 	context->RSSetViewports(1, &viewport);
+	// Planes cover each window's whole outline, bars and frame included: the shadow map already darkens those, and
+	// a lattice pattern at this coarser resolution would leave gaps where the fine hole is open but no plane is
+	data.Mode = kWhole;
+	windowHolesCB->Update(data);
+	ID3D11ShaderResourceView* noTexture = nullptr;
+	context->PSSetShaderResources(0, 1, &noTexture);
 	for (const auto& draw : windowHoleDraws) {
-		const bool textured = draw.mode != kWhole && draw.texture;
-		if (draw.mode == kSeeThrough && !textured)
+		if (draw.mode == kSeeThrough && !draw.texture)
 			continue;
-		data.Mode = textured ? draw.mode : kWhole;
-		data.AlphaThreshold = draw.alphaThreshold;
-		windowHolesCB->Update(data);
-		ID3D11ShaderResourceView* texture = textured ? draw.texture->rendererTexture->resourceView : nullptr;
-		context->PSSetShaderResources(0, 1, &texture);
 		context->Draw(draw.count, draw.first);
 	}
 
