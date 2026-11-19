@@ -10,6 +10,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
+#include "Utils/DebugSection.h"
 #include "Utils/UI.h"
 
 #define I18N_KEY_PREFIX "feature.true_pbr."
@@ -67,10 +68,37 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 namespace PNState
 {
+	/** @brief Feeds every .json in rootPath, sorted by name, to recordReader keyed by its file stem (the editor ID). */
 	void ReadPBRRecordConfigs(const std::string& rootPath, std::function<bool(const std::string&, const json&)> recordReader, bool enableVerboseJsonLogging)
 	{
-		if (std::filesystem::exists(rootPath)) {
-			auto configs = clib_util::distribution::get_configs(rootPath, "", ".json");
+		std::error_code ec;
+		const bool rootExists = std::filesystem::exists(rootPath, ec);
+		if (ec) {
+			logger::error("[TruePBR] could not access {}: {}", rootPath, ec.message());
+			return;
+		}
+		if (rootExists) {
+			// clib_util's get_configs narrows every name with path::string(), which throws on a name outside the
+			// system code page and loses the whole folder. Skip only that file: its stem can't match an editor ID.
+			std::vector<std::string> configs;
+			for (std::filesystem::directory_iterator it(rootPath, ec), end; !ec && it != end; it.increment(ec)) {
+				const auto& path = it->path();
+				if (path.extension() != ".json")
+					continue;
+				try {
+					configs.push_back(path.string());
+				} catch (const std::exception&) {
+					// u8string() also throws, on a name that isn't valid UTF-16.
+					try {
+						logger::warn("[TruePBR] skipping {}: its name is outside the system code page", Util::PathHelpers::ToUtf8(path));
+					} catch (const std::exception&) {
+						logger::warn("[TruePBR] skipping a config whose name can't be converted to text");
+					}
+				}
+			}
+			if (ec)
+				logger::error("[TruePBR] could not list {}: {}", rootPath, ec.message());
+			std::ranges::sort(configs);
 
 			if (configs.empty()) {
 				logger::warn("[TruePBR] no .json files were found within the {} folder, aborting...", rootPath);
@@ -225,11 +253,13 @@ void TruePBR::DrawSettings()
 				ImGui::TreePop();
 			}
 			if (wasEdited) {
+				std::lock_guard lock(BSLightingShaderMaterialPBR::AllMutex);
 				for (auto& [material, extensions] : BSLightingShaderMaterialPBR::All) {
 					if (extensions.textureSetData == selectedPbrTextureSet) {
 						material->ApplyTextureSetData(*extensions.textureSetData);
 					}
 				}
+				std::lock_guard landscapeLock(BSLightingShaderMaterialPBRLandscape::AllMutex);
 				for (auto& [material, textureSets] : BSLightingShaderMaterialPBRLandscape::All) {
 					for (uint32_t textureSetIndex = 0; textureSetIndex < BSLightingShaderMaterialPBRLandscape::NumTiles; ++textureSetIndex) {
 						if (textureSets[textureSetIndex] == selectedPbrTextureSet) {
@@ -339,6 +369,7 @@ void TruePBR::DrawSettings()
 				ImGui::TreePop();
 			}
 			if (wasEdited) {
+				std::lock_guard lock(BSLightingShaderMaterialPBR::AllMutex);
 				for (auto& [material, extensions] : BSLightingShaderMaterialPBR::All) {
 					if (extensions.materialObjectData == selectedPbrMaterialObject) {
 						material->ApplyMaterialObjectData(*extensions.materialObjectData);
@@ -353,11 +384,15 @@ void TruePBR::DrawSettings()
 		}
 		ImGui::TreePop();
 	}
+}
 
-	if (Util::ShowDebugSections() && ImGui::TreeNodeEx(T(TKEY("debug"), "Debug"))) {
-		ImGui::Checkbox(T(TKEY("enable_verbose_json_logging"), "Enable verbose json logging"), &enableVerboseJsonLogging);
-		ImGui::TreePop();
-	}
+void TruePBR::DrawDebugSection()
+{
+	Util::DebugSection section;
+	if (!section)
+		return;
+
+	ImGui::Checkbox(T(TKEY("enable_verbose_json_logging"), "Enable verbose json logging"), &enableVerboseJsonLogging);
 }
 
 void TruePBR::SaveSettings(json& o_json)
@@ -510,11 +545,13 @@ void TruePBR::ReloadTextureSetData()
 			return false;
 		} }, enableVerboseJsonLogging);
 
+	std::lock_guard lock(BSLightingShaderMaterialPBR::AllMutex);
 	for (const auto& [material, extensions] : BSLightingShaderMaterialPBR::All) {
 		if (extensions.textureSetData != nullptr) {
 			material->ApplyTextureSetData(*extensions.textureSetData);
 		}
 	}
+	std::lock_guard landscapeLock(BSLightingShaderMaterialPBRLandscape::AllMutex);
 	for (const auto& [material, textureSets] : BSLightingShaderMaterialPBRLandscape::All) {
 		for (uint32_t textureSetIndex = 0; textureSetIndex < BSLightingShaderMaterialPBRLandscape::NumTiles; ++textureSetIndex) {
 			if (textureSets[textureSetIndex] != nullptr) {
@@ -851,7 +888,7 @@ struct BSLightingShaderProperty_PostLinkObject
 		// Per-NIF values must not modify a material shared by another shader property.
 		BSLightingShaderMaterialPBR source;
 		source.CopyMembers(material);
-		if (const auto* textureSetData = BSLightingShaderMaterialPBR::All[&source].textureSetData) {
+		if (const auto* textureSetData = BSLightingShaderMaterialPBR::GetExtensions(&source).textureSetData) {
 			source.ApplyTextureSetData(*textureSetData);
 		}
 
@@ -953,6 +990,12 @@ struct BSLightingShaderProperty_GetRenderPasses_LocalMap
 	}
 	static inline REL::Relocation<decltype(thunk)> func;
 };
+
+static bool HasDisplacementTexture(const BSLightingShaderMaterialPBR* material)
+{
+	return material->displacementTexture != nullptr &&
+	       material->displacementTexture != globals::game::graphicsState->GetRuntimeData().defaultTextureBlack;
+}
 
 /** @brief True when slot 4 green is explicitly enabled and its texture is available. */
 static bool HasFuzzRoughnessTexture(const BSLightingShaderMaterialPBR* material)
@@ -1188,8 +1231,7 @@ bool TruePBR::BSLightingShader_SetupMaterial(RE::BSLightingShader* shader, RE::B
 				shaderFlags.set(PBRShaderFlags::HasEmissive);
 			}
 
-			const bool hasDisplacement = pbrMaterial->displacementTexture != nullptr && pbrMaterial->displacementTexture != graphicsState->GetRuntimeData().defaultTextureBlack;
-			if (hasDisplacement) {
+			if (HasDisplacementTexture(pbrMaterial)) {
 				shadowState->SetPSTexture(4, pbrMaterial->displacementTexture->rendererTexture);
 				shadowState->SetPSTextureAddressMode(4, static_cast<RE::BSGraphics::TextureAddressMode>(pbrMaterial->textureClampMode));
 				shadowState->SetPSTextureFilterMode(4, RE::BSGraphics::TextureFilterMode::kAnisotropic);
@@ -1411,7 +1453,7 @@ bool TruePBR::TESObjectLAND_SetupMaterial(RE::TESObjectLAND* land)
 				material->landscapeRMAOSTextures[textureIndex] = stateData.defaultTextureWhite;
 			}
 
-			auto& textureSets = BSLightingShaderMaterialPBRLandscape::All[material];
+			auto& textureSets = BSLightingShaderMaterialPBRLandscape::GetTextureSets(material);
 
 			if (auto defTexture = land->loadedData->defQuadTextures[quadIndex]) {
 				SetupLandscapeTexture(*material, *defTexture, 0, textureSets);
@@ -1539,6 +1581,9 @@ void TruePBR::SetGrassPBRTextures(const BSLightingShaderMaterialPBR* material)
 		shadowState->SetPSTextureAddressMode(6, clampMode);
 		shadowState->SetPSTextureFilterMode(6, RE::BSGraphics::TextureFilterMode::kAnisotropic);
 	}
+	if (HasDisplacementTexture(material)) {
+		shadowState->SetPSTexture(7, material->displacementTexture->rendererTexture);
+	}
 }
 
 TruePBR::GrassPBRConstants TruePBR::GetGrassPBRConstants(const BSLightingShaderMaterialPBR* material)
@@ -1565,6 +1610,9 @@ TruePBR::GrassPBRConstants TruePBR::GetGrassPBRConstants(const BSLightingShaderM
 	if (HasGrassEmissive(material)) {
 		shaderFlags.set(PBRShaderFlags::HasEmissive);
 	}
+	if (HasDisplacementTexture(material)) {
+		shaderFlags.set(PBRShaderFlags::HasDisplacement);
+	}
 
 	const auto& subsurfaceColor = material->GetSubsurfaceColor();
 	const auto& fuzzColor = material->GetFuzzColor();
@@ -1578,7 +1626,7 @@ TruePBR::GrassPBRConstants TruePBR::GetGrassPBRConstants(const BSLightingShaderM
 		{ hasFuzz ? fuzzColor.red : 0.0f, hasFuzz ? fuzzColor.green : 0.0f,
 			hasFuzz ? fuzzColor.blue : 0.0f, hasFuzz ? material->GetFuzzWeight() : 0.0f },
 		{ material->GetSubsurfaceBalance(), thinSurfaceParams[0], thinSurfaceParams[1], thinSurfaceParams[2] },
-		{ material->GetFuzzRoughness(), 0.f, 0.f, 0.f }
+		{ material->GetFuzzRoughness(), material->GetDisplacementScale(), 0.f, 0.f }
 	};
 }
 
@@ -1809,7 +1857,7 @@ struct TESBoundObject_Clone3D
 						if (shaderProperty->GetMaterialType() == RE::BSShaderMaterial::Type::kLighting &&
 							shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kVertexLighting)) {
 							if (auto* material = static_cast<BSLightingShaderMaterialPBR*>(shaderProperty->material)) {
-								auto& ext = BSLightingShaderMaterialPBR::All[material];
+								auto& ext = BSLightingShaderMaterialPBR::GetExtensions(material);
 								const auto prevOwnerRefID = ext.lastOwnerRefFormID;
 
 								// Fork-before-write: if this material instance is already owned
@@ -1841,7 +1889,8 @@ struct TESBoundObject_Clone3D
 								}
 
 								targetMat->ApplyMaterialObjectData(*pbrData);
-								auto& targetExt = BSLightingShaderMaterialPBR::All[targetMat];
+								std::lock_guard extLock(BSLightingShaderMaterialPBR::AllMutex);
+								auto& targetExt = BSLightingShaderMaterialPBR::GetExtensions(targetMat);
 								targetExt.materialObjectData = pbrData;
 								targetExt.lastOwnerRefFormID = ref->GetFormID();
 							}
