@@ -25,7 +25,7 @@
 #include <vector>
 
 #if !defined(FLUIDFIELD_SHADER_DIR) || !defined(FLUIDFIELD_COMMON_SHADER_DIR)
-#	error "FLUIDFIELD_SHADER_DIR and FLUIDFIELD_COMMON_SHADER_DIR must point at the Ground Fog and Shallow Water shaders"
+#	error "FLUIDFIELD_SHADER_DIR and FLUIDFIELD_COMMON_SHADER_DIR must point at the Ground Fog and the common shaders"
 #endif
 
 namespace

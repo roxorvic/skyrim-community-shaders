@@ -12,8 +12,6 @@
 #include "Features/ExtendedMaterials.h"
 #include "Features/ExtendedTranslucency.h"
 #include "Features/FluidFieldGroundFog.h"
-#include "Features/FluidFieldShallowWater.h"
-#include "Features/FluidFieldWaterfalls.h"
 #include "Features/GrassCollision.h"
 #include "Features/GrassLighting.h"
 #include "Features/GrassOptimizations.h"
@@ -291,8 +289,6 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::physicalSky,
 		&globals::features::skin,
 		&globals::features::postProcessing,
-		&globals::features::fluidFieldWaterfalls,
-		&globals::features::fluidFieldShallowWater,
 		&globals::features::fluidFieldGroundFog,
 		&globals::features::proceduralAurora
 	};

@@ -25,7 +25,7 @@ target_compile_definitions(
     FluidFieldSolverTest
     PRIVATE
         FLUIDFIELD_SHADER_DIR="${REPO_ROOT}/features/Ground Fog/Shaders"
-        FLUIDFIELD_COMMON_SHADER_DIR="${REPO_ROOT}/features/Shallow Water/Shaders"
+        FLUIDFIELD_COMMON_SHADER_DIR="${REPO_ROOT}/package/Shaders"
         NOMINMAX
         WIN32_LEAN_AND_MEAN
 )

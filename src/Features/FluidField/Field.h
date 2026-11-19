@@ -9,7 +9,7 @@ struct Feature;
 namespace FluidFieldSim
 {
 	/**
-	 * @brief What the Waterfalls, Shallow Water and Ground Fog features share: the landscape and water surface caches, GPU
+	 * @brief What the Fluid Field features (here Ground Fog) share: the landscape and water surface caches, GPU
 	 * timings, the main camera's snapshot, the loading-screen resets and the player's position this frame.
 	 *
 	 * Not a feature: each one's Prepass opens a PrepassScope while it is enabled, which updates the field at most once a

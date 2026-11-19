@@ -19,7 +19,6 @@
 #include "Features/CloudShadows.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
-#include "Features/FluidFieldWaterfalls.h"
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
 #include "Features/LinearLighting.h"
@@ -136,7 +135,6 @@ void State::Draw()
 	auto& cloudShadows = globals::features::cloudShadows;
 	auto& skin = globals::features::skin;
 	auto& truePBR = globals::features::truePBR;
-	auto& fluidFieldWaterfalls = globals::features::fluidFieldWaterfalls;
 	auto context = globals::d3d::context;
 	auto& volumetricShadows = globals::features::volumetricShadows;
 	auto& skylighting = globals::features::skylighting;
@@ -181,10 +179,6 @@ void State::Draw()
 			permutationCB->Update(permutationData);
 			permutationDataPrevious = permutationData;
 		}
-
-		// Waterfalls captures the river's bound draw state here, for its see-through falls
-		if (currentShader && fluidFieldWaterfalls.loaded)
-			fluidFieldWaterfalls.CaptureRiverDraw(currentShader, modifiedVertexDescriptor, modifiedPixelDescriptor);
 
 		if (currentShader && updateShader) {
 			if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {

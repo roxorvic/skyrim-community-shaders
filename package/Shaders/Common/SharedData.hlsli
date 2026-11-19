@@ -620,24 +620,6 @@ namespace SharedData
 		float2 pad0;
 	};
 
-	struct FluidFieldSettings
-	{
-		int2 GridMin;  // World cell of the water grid's south-west corner
-		uint GridRes;  // Cells per side, a power of two
-		float CellSize;
-		float NormalStrength;
-		uint Enabled;      // Water outputs are valid this frame
-		float FlowDetail;  // Strength of the surface detail carried by the simulated flow
-		float WaterTint;   // How much the water's colour tints what is seen through it; all water, simulated or not
-		int2 FarGridMin;   // The far water level's placement (coarser, wider)
-		uint FarGridRes;
-		float FarCellSize;
-		uint FarEnabled;  // The far level has valid outputs this frame
-		float Fade;       // 0 to 1 over the first moments after a (re)start, so the water eases in
-		uint DebugView;   // Showcase view on the water: 0 off, 1 flow, 2 foam, 3 surface height
-		float farPad;
-	};
-
 	struct ProceduralAuroraSettings
 	{
 		float4 FringeColor;  // xyz: lower edge color, w: lower edge amount
@@ -684,7 +666,6 @@ namespace SharedData
 		ViewAtmosphereSettings viewAtmosphereSettings;
 		ProceduralSunSettings proceduralSunSettings;
 		ProceduralAuroraSettings proceduralAuroraSettings;
-		FluidFieldSettings fluidFieldSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

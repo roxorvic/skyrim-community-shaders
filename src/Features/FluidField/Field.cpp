@@ -1,8 +1,6 @@
 #include "Field.h"
 
 #include "Features/FluidFieldGroundFog.h"
-#include "Features/FluidFieldShallowWater.h"
-#include "Features/FluidFieldWaterfalls.h"
 #include "Profiler.h"
 #include "State.h"
 #include "Utils/D3D.h"
@@ -17,8 +15,7 @@ namespace FluidFieldSim
 
 	bool Field::AnyActive()
 	{
-		return globals::features::fluidFieldWaterfalls.IsActive() || globals::features::fluidFieldShallowWater.IsActive() ||
-		       globals::features::fluidFieldGroundFog.IsActive();
+		return globals::features::fluidFieldGroundFog.IsActive();
 	}
 
 	void Field::RegisterListeners()
@@ -60,15 +57,8 @@ namespace FluidFieldSim
 
 	Field::PrepassScope::~PrepassScope()
 	{
-		// The simulation span covers every enabled feature's Prepass; they run in this order
-		const Feature* last = nullptr;
-		if (globals::features::fluidFieldGroundFog.IsActive())
-			last = &globals::features::fluidFieldGroundFog;
-		else if (globals::features::fluidFieldShallowWater.IsActive())
-			last = &globals::features::fluidFieldShallowWater;
-		else if (globals::features::fluidFieldWaterfalls.IsActive())
-			last = &globals::features::fluidFieldWaterfalls;
-		if (last == &feature)
+		// The simulation span covers the fog's Prepass
+		if (&feature == &globals::features::fluidFieldGroundFog)
 			Field::Get().gpuSpans.End(globals::d3d::context, GpuSpans::Simulation);
 	}
 
@@ -158,13 +148,10 @@ namespace FluidFieldSim
 
 	void Field::DrawBeforeWater()
 	{
-		auto& waterfalls = globals::features::fluidFieldWaterfalls;
-		// The falls and the fog draw after the world, with this frame's main camera
-		if (waterfalls.IsActive() || globals::features::fluidFieldGroundFog.IsActive())
+		// The fog draws after the world, with this frame's main camera
+		if (globals::features::fluidFieldGroundFog.IsActive())
 			SnapshotCamera();
-		if (waterfalls.IsActive())
-			waterfalls.DrawBeforeWater();
-		// D192: time the engine's water (and its Water.hlsl falls) until DrawAfterWorld
+		// D192: time the engine's water until DrawAfterWorld
 		gpuSpans.Begin(globals::d3d::context, GpuSpans::EngineWater);
 	}
 
@@ -175,9 +162,6 @@ namespace FluidFieldSim
 		gpuSpans.End(globals::d3d::context, GpuSpans::EngineWater);
 		if (!globals::game::renderer)
 			return;
-		// The see-through falls first, then the ground fog over them
-		if (auto& waterfalls = globals::features::fluidFieldWaterfalls; waterfalls.IsActive())
-			waterfalls.DrawAfterWorld();
 		if (auto& groundFog = globals::features::fluidFieldGroundFog; groundFog.IsActive())
 			groundFog.DrawAfterWorld();
 	}
