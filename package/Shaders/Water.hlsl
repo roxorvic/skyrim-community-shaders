@@ -1788,7 +1788,7 @@ PS_OUTPUT main(PS_INPUT input)
 #				if defined(FLUID_FIELD)
 	// Fluid Field's foam colour: the water's own lit colour (dirColor + ambientColor) lifted toward the
 	// scene light, so foam takes the water's hue without blowing out the exposure
-	float3 fluidAmbientLight = ShadowSampling::GetAmbientLighting();
+	float3 fluidAmbientLight = ShadowSampling::GetAmbientLighting(input.WPosition.xyz);
 #					if defined(SKYLIGHTING)
 	fluidAmbientLight = ColorManagement::SceneColor::ScaleByLinear(fluidAmbientLight, skylightingDiffuse);
 #					endif
