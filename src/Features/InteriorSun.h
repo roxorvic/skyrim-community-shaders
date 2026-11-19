@@ -447,7 +447,7 @@ private:
 	bool lastHideFakeGlows = true;
 	bool lastSunFacing = true;
 	bool lastInteriorWithSun = false;
-	RE::NiColor engineSunColor{}, writtenSunColor{};  // the cell's own sun colour, and what we last wrote over it
+	RE::NiColor engineSunColor{}, writtenSunColor{}, skySunColor{};  // the cell's own sun colour, and what we last wrote over it
 	bool sunColorWritten = false;
 	bool forceHolesUpload = false;
 	bool heliosLoaded = false;  // Helios drives window glow itself, so Sky-Lit Glass stands down

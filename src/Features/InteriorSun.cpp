@@ -2,6 +2,7 @@
 #include "I18n/I18n.h"
 #include "Profiler.h"
 #include "State.h"
+#include "Utils/Climate.h"
 #include "Utils/DebugSection.h"
 #include "Utils/VersionedRelocation.h"
 
@@ -242,6 +243,7 @@ void InteriorSun::DrawDebugSection()
 		const auto& light = shadowSceneNode->GetRuntimeData().sunLight->light->GetLightRuntimeData();
 		ImGui::Text(T(TKEY("debug_sun_color"), "Sun colour now: %.2f %.2f %.2f, fade %.2f (cell's own: %.2f %.2f %.2f)"), light.diffuse.red, light.diffuse.green, light.diffuse.blue, light.fade,
 			engineSunColor.red, engineSunColor.green, engineSunColor.blue);
+		ImGui::Text(T(TKEY("debug_sky_sun_color"), "Sky's sunlight colour: %.2f %.2f %.2f"), skySunColor.red, skySunColor.green, skySunColor.blue);
 	}
 	ImGui::Text(T(TKEY("debug_shadow_gaps"), "Sun cascades with gaps closed last frame: %u"), shadowGapsClosedLastFrame);
 	ImGui::Text(T(TKEY("debug_holes_open"), "Open now (facing the sun): glass %u of %u, openings %u of %u"), holesOpenGlass, static_cast<uint32_t>(windowGlassRuns.size()), holesOpenOpenings, static_cast<uint32_t>(windowOpeningRuns.size()));
@@ -1036,7 +1038,33 @@ void InteriorSun::UpdateSunColor()
 		sunColorWritten = false;
 		return;
 	}
-	diffuse = sky->skyColor[static_cast<uint32_t>(RE::TESWeather::ColorTypes::kSunlight)];
+	// Indoors the sky's own sunlight colour is filled from the cell's lighting too, so read the weathers themselves
+	using ColorTime = RE::TESWeather::ColorTime;
+	Util::Climate::ColorTimeWeights weights{};
+	if (sky->currentClimate)
+		weights = Util::Climate::GetColorTimeWeights(*sky->currentClimate, sky->currentGameHour);
+	else
+		weights[ColorTime::kDay] = 1.0f;
+	const auto sunlight = [&](const RE::TESWeather* weather) {
+		RE::NiColor color{};
+		for (uint32_t time = 0; time < ColorTime::kTotal; ++time) {
+			const auto& stored = weather->colorData[RE::TESWeather::ColorTypes::kSunlight][time];
+			color.red += weights[time] * stored.red / 255.0f;
+			color.green += weights[time] * stored.green / 255.0f;
+			color.blue += weights[time] * stored.blue / 255.0f;
+		}
+		return color;
+	};
+	skySunColor = sky->skyColor[static_cast<uint32_t>(RE::TESWeather::ColorTypes::kSunlight)];
+	if (!sky->currentWeather)
+		return;
+	RE::NiColor color = sunlight(sky->currentWeather);
+	if (sky->lastWeather && sky->currentWeatherPct < 1.0f) {
+		const auto previous = sunlight(sky->lastWeather);
+		const float t = std::clamp(sky->currentWeatherPct, 0.0f, 1.0f);
+		color = { previous.red + (color.red - previous.red) * t, previous.green + (color.green - previous.green) * t, previous.blue + (color.blue - previous.blue) * t };
+	}
+	diffuse = color;
 	writtenSunColor = diffuse;
 	sunColorWritten = true;
 }

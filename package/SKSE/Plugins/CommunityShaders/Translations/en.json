@@ -1568,6 +1568,7 @@
     "feature.interior_sun.debug_shell": "Room shell: %u solid shapes (%u without the cast-shadows flag, %u with the glass flag)",
     "feature.interior_sun.debug_show_hole_beams": "Show Hole Beams (sun through every hole, ignoring what blocks it)",
     "feature.interior_sun.debug_show_holes": "Show Holes On Screen (green glass, yellow openings, red rejected)",
+    "feature.interior_sun.debug_sky_sun_color": "Sky's sunlight colour: %.2f %.2f %.2f",
     "feature.interior_sun.debug_sun": "Sun: azimuth %.0f deg (0 = cell +Y, clockwise), elevation %.0f deg",
     "feature.interior_sun.debug_sun_caster_passes": "Sun caster draws last frame: %u (kept one-sided: %u with the glass flag, %u skinned)",
     "feature.interior_sun.debug_sun_cell": "Given the sun from here: cell %08X",
