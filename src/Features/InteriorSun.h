@@ -239,7 +239,6 @@ private:
 		uint32_t triangleCount = 0;
 		uint32_t openSamples = 0;
 		uint32_t samples = 0;
-		float nearSide = 0.0f;                       // mean distance to the room on the side that hits something
 		float3 outward = float3(0, 0, 0);            // mean direction of the open side
 		RE::NiPointer<RE::NiSourceTexture> diffuse;  // its see-through pixels are the opening
 		float alphaThreshold = 0.5f;
@@ -272,7 +271,6 @@ private:
 		std::vector<float3> openings;  // result: triangle list of the shapes found to be openings
 		std::vector<float2> openingUVs;
 		std::vector<HoleDraw> openingRuns;  // per opening shape, in openings
-		float milliseconds = 0.0f;
 		std::atomic<bool> done = false;
 	};
 
@@ -287,10 +285,7 @@ private:
 	RE::TESObjectCELL* windowGlassCell = nullptr;
 	uint32_t windowGlassCellFrames = 0;
 	uint32_t windowGlassVertexCount = 0;
-	uint32_t windowGlassShapes = 0;
-	uint32_t windowGlassShapesSkipped = 0;
 	uint32_t windowHolesDrawn = 0;
-	float windowGlassScanMilliseconds = 0.0f;
 
 	std::shared_ptr<OpeningScan> openingScan;  // in flight or finished; dropped on leaving the cell
 	std::shared_ptr<std::vector<float3>> lastCandidateTriangles;
@@ -299,9 +294,6 @@ private:
 	std::vector<float3> windowOpeningVertices;
 	std::vector<float2> windowOpeningUVs;
 	std::vector<HoleDraw> windowOpeningRuns;
-	uint32_t openingCandidates = 0;
-	uint32_t openingShapes = 0;
-	float openingScanMilliseconds = 0.0f;
 
 	std::vector<RE::NiPointer<RE::NiAVObject>> hiddenFakeGlows;
 	std::vector<GlassEmissive> glassEmissives;
@@ -348,7 +340,6 @@ private:
 	/** @brief Which holes are open now, glass then openings, to rebuild the holes when it changes. */
 	std::vector<uint8_t> ComputeOpenMask(const float3& toSun) const;
 	std::vector<HoleDraw> windowHoleDraws;  // what the hole pass draws, grouped by glow map
-	uint32_t windowGlassShapesWithGlow = 0;
 	winrt::com_ptr<ID3D11PixelShader> windowHolesPS;
 	winrt::com_ptr<ID3D11SamplerState> windowHolesSampler;
 	std::unique_ptr<Buffer> windowGlass;

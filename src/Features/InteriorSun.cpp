@@ -1,6 +1,5 @@
 ﻿#include "InteriorSun.h"
 #include "I18n/I18n.h"
-#include "Profiler.h"
 #include "State.h"
 #include "Utils/Climate.h"
 #include "Utils/DebugSection.h"
@@ -427,16 +426,11 @@ void InteriorSun::UpdateWindowGlass(RE::TESObjectCELL* cell)
 
 void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 {
-	globals::profiler->BeginPass("InteriorSun::WindowScan");
-	const auto start = std::chrono::steady_clock::now();
-
 	std::vector<float3> vertices;
 	std::vector<float2> uvs;
 	std::vector<HoleDraw> runs;
 	std::vector<GlassShape> glassInfo;
-	windowGlassShapes = 0;
-	windowGlassShapesWithGlow = 0;
-	windowGlassShapesSkipped = 0;
+	uint32_t windowGlassShapes = 0, windowGlassShapesWithGlow = 0, windowGlassShapesSkipped = 0;
 	auto scan = settings.DetectOpenings ? std::make_shared<OpeningScan>() : nullptr;
 	const bool hideGlows = settings.HideFakeWindowGlows && isInteriorWithSun;
 
@@ -536,9 +530,6 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 	if (runShellTest)
 		CollectOccluders(cell, *scan);
 
-	windowGlassScanMilliseconds = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
-	globals::profiler->EndPass();
-
 	if (runShellTest) {
 		scan->cell = cell;
 		lastCandidateTriangles = std::make_shared<std::vector<float3>>(std::move(scanKey));
@@ -554,7 +545,7 @@ void InteriorSun::CollectWindowGlass(RE::TESObjectCELL* cell)
 		windowGlassUVs = std::move(uvs);
 		windowGlassRuns = std::move(runs);
 		windowGlassShapeInfo = std::move(glassInfo);
-		logger::info("[Interior Sun] Window glass in cell {:08X}: {} shapes ({} with glow maps), {} triangles, {} unreadable shapes, {:.2f} ms", cell->GetFormID(), windowGlassShapes, windowGlassShapesWithGlow, windowGlassVertices.size() / 3, windowGlassShapesSkipped, windowGlassScanMilliseconds);
+		logger::info("[Interior Sun] Window glass in cell {:08X}: {} shapes ({} with glow maps), {} triangles, {} unreadable shapes", cell->GetFormID(), windowGlassShapes, windowGlassShapesWithGlow, windowGlassVertices.size() / 3, windowGlassShapesSkipped);
 		UploadWindowHoles(cell);
 	}
 	UpdateAutoSunlit(cell);
@@ -701,15 +692,8 @@ void InteriorSun::TakeOpeningScan()
 	windowOpeningRuns = std::move(scan->openingRuns);
 	if (scan->glassOutward.size() == windowGlassRuns.size())
 		windowGlassOutward = scan->glassOutward;
-	openingCandidates = static_cast<uint32_t>(scan->candidates.size());
-	openingShapes = static_cast<uint32_t>(std::ranges::count_if(scan->candidates, [](const auto& candidate) { return candidate.opening; }));
-	openingScanMilliseconds = scan->milliseconds;
-
-	logger::info("[Interior Sun] Openings in cell {:08X}: {} of {} candidate shapes, {} triangles, {:.1f} ms", scan->cell->GetFormID(), openingShapes, openingCandidates, windowOpeningVertices.size() / 3, openingScanMilliseconds);
-	for (const auto& candidate : scan->candidates) {
-		logger::debug("[Interior Sun]   {} | ref {:08X} | {} | {} | {}/{} samples open | room side {:.0f}", candidate.opening ? "OPENING" : "no     ", candidate.ref, candidate.model, candidate.shape,
-			candidate.openSamples, candidate.samples, candidate.nearSide);
-	}
+	logger::info("[Interior Sun] Openings in cell {:08X}: {} of {} candidate shapes, {} triangles", scan->cell->GetFormID(),
+		std::ranges::count_if(scan->candidates, [](const auto& candidate) { return candidate.opening; }), scan->candidates.size(), windowOpeningVertices.size() / 3);
 
 	UploadWindowHoles(scan->cell);
 	UpdateAutoSunlit(scan->cell);
@@ -717,7 +701,6 @@ void InteriorSun::TakeOpeningScan()
 
 void InteriorSun::RunOpeningScan(OpeningScan& scan)
 {
-	const auto start = std::chrono::steady_clock::now();
 	// Far enough to cross the largest halls; beyond it, a ray has left the cell
 	constexpr float Reach = 4096.0f;
 	constexpr uint32_t SamplesPerShape = 4;
@@ -751,7 +734,6 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 	struct Measure
 	{
 		uint32_t openSamples = 0, samples = 0;
-		float nearSum = 0.0f;
 		float3 outward = float3(0, 0, 0);
 	};
 	const auto measure = [&](const std::vector<float3>& tri, uint32_t first, uint32_t count) {
@@ -775,7 +757,6 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 			++m.samples;
 			if ((front == FLT_MAX) != (back == FLT_MAX)) {
 				++m.openSamples;
-				m.nearSum += std::min(front, back);
 				m.outward += front == FLT_MAX ? normal : -normal;
 			}
 		}
@@ -834,7 +815,6 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 		const auto m = measure(scan.candidateTriangles, candidate.firstTriangle, candidate.triangleCount);
 		candidate.samples = m.samples;
 		candidate.openSamples = m.openSamples;
-		candidate.nearSide = m.openSamples ? m.nearSum / m.openSamples : 0.0f;
 		candidate.outward = m.outward;
 		// Sun never comes up through a floor: rugs and floor pieces have only the void below them
 		candidate.opening = candidate.samples && candidate.openSamples * 2 > candidate.samples && candidate.outward.z > -0.7f;
@@ -850,7 +830,6 @@ void InteriorSun::RunOpeningScan(OpeningScan& scan)
 	// The room's geometry can run to tens of MB, and the result no longer needs it
 	scan.occluders = {};
 	scan.occluderShapes = {};
-	scan.milliseconds = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 void InteriorSun::UpdateAutoSunlit(RE::TESObjectCELL* cell)
@@ -974,19 +953,14 @@ void InteriorSun::ReleaseWindowGlass()
 	windowOpeningVertices.clear();
 	windowOpeningUVs.clear();
 	windowOpeningRuns.clear();
-	openingCandidates = 0;
-	openingShapes = 0;
 	windowGlass.reset();
 	windowGlassVertices.clear();
 	windowGlassUVs.clear();
 	windowGlassRuns.clear();
 	windowHoleDraws.clear();
-	windowGlassShapesWithGlow = 0;
 	windowGlassCell = nullptr;
 	windowGlassCellFrames = 0;
 	windowGlassVertexCount = 0;
-	windowGlassShapes = 0;
-	windowGlassShapesSkipped = 0;
 }
 
 void InteriorSun::CloseShadowGaps()
@@ -1007,8 +981,6 @@ void InteriorSun::CloseShadowGaps()
 		shadowGapsPS.attach(static_cast<ID3D11PixelShader*>(Util::CompileShader(L"Data\\Shaders\\InteriorSun\\ShadowGapsMaxPS.hlsl", {}, "ps_5_0")));
 	if (!shadowGapsVS || !shadowGapsPS)
 		return;
-
-	globals::profiler->BeginPass("InteriorSun::ShadowGaps");
 
 	// Everything changed here is put back: the engine caches its D3D state
 	winrt::com_ptr<ID3D11ComputeShader> oldCS;
@@ -1143,8 +1115,6 @@ void InteriorSun::CloseShadowGaps()
 	context->OMSetDepthStencilState(oldDepthState.get(), oldStencilRef);
 	auto restoreRTV = oldRTV.get();
 	context->OMSetRenderTargets(1, &restoreRTV, oldDSV.get());
-
-	globals::profiler->EndPass();
 }
 
 void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
@@ -1192,19 +1162,14 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 	viewport.Height = (eye.viewPort[2] - eye.viewPort[3]) * textureDesc.Height;
 	viewport.MaxDepth = 1.0f;
 
-	globals::profiler->BeginPass("InteriorSun::WindowHoles");
 	// Everything is shadowed from the sun except through the panes; the casters drawn next still shadow that light
 	context->ClearDepthStencilView(dsv.get(), D3D11_CLEAR_DEPTH, 0.0f, 0);
 	DrawHolesInto(data, viewport);
-	globals::profiler->EndPass();
 
 	// The same cascade can be drawn twice a frame (volumetric lighting's maps share its camera): planes once
 	const auto cascade = static_cast<uint32_t>(descriptor - descriptors.begin());
-	if (settings.LightOnlyPastWindow && cascade < 2 && !(windowPlanesWritten & (1u << cascade))) {
-		globals::profiler->BeginPass("InteriorSun::WindowPlanes");
+	if (settings.LightOnlyPastWindow && cascade < 2 && !(windowPlanesWritten & (1u << cascade)))
 		DrawWindowPlanes(cascade, data, viewport, textureDesc.Width, textureDesc.Height);
-		globals::profiler->EndPass();
-	}
 
 	++windowHolesDrawn;
 }
