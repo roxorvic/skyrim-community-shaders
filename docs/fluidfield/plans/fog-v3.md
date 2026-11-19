@@ -287,6 +287,9 @@ on 2026-11-12. Nothing here is built.
 **Plan record:** add this as a section of `docs/fluidfield/plans/fog-v3.md` ("Action plan 2026-11-12"), in its own docs
 commit.
 
+**Order change (Victor, 2026-11-19):** after item 9, items 18, 18b and 20 (as rewritten on 2026-11-19, below) come
+next, ahead of items 10–17.
+
 **Order:** Victor's (revised 2026-11-12): correctness first, then the optimisations (draw, sim, CPU), then the missing
 features. The draw items (3–4) should bring the fog back under its 1 ms budget before the features add cost. Report the
 measured cost after every item.
@@ -785,31 +788,56 @@ wakes. Putting only the distant layer in is a possible later experiment, not par
 **Every item works with EHF off:** our fog behaves exactly as now. Test each item with EHF off, with EHF on, and with EHF's
 volumetric fog on.
 
-### 18. Respect EHF's fog in front of ours
+### 18. Our fog under the haze (rewritten 2026-11-19)
 
-**Problem:** EHF's fog is already baked into each surface when our composite runs, so ours is treated as nearer than all
-of EHF's fog. Distant ground fog pops out crisp and bright against hazy mountains instead of sitting inside the haze.
+**Problem:** the haze is applied to the scene before our composite runs, so ours is laid over it as if nothing stood in
+front: distant ground fog pops out crisp and bright against hazy hills. Since upstream's Physical Sky (#3157, merged
+2026-11-19) the haze has two homes:
+
+- **Physical Sky on, "Use Shared Atmosphere and Fog Volume" on:** Atmosphere and Fog's shared froxel volume
+  (`ViewAtmosphere`) holds the air and EHF's fog, integrated front to back (`Luminance`, `Transmittance`; bound at
+  t125–t127), and applies it in its own composite after water (`ViewMedium::CompositeViewMedium`).
+- **Otherwise:** EHF's own analytic layers and its volumetric froxels, baked into each surface as it draws.
 
 **Do:**
 
-- `GroundFogCS.hlsl` includes `ExponentialHeightFog/ExponentialHeightFog.hlsli`.
-- **Once per ray,** at the fog's representative distance `d`, evaluate EHF there: its analytic fog plus its volumetric
-  sample (`GetExponentialHeightFog` / `SampleVolumetricFog`, or their internals), giving its transmittance `T_ehf(d)` and
-  the light it scatters in front of `d`, `L_ehf(0..d)`. The representative distance is the scatter-weighted point
-  already computed for local lights.
-- **Compose physically**, so EHF's haze in front isn't dimmed by our fog and ours is dimmed by it:
-  `result = scene · T_ours + T_ehf(d) · L_ours + L_ehf(0..d) · (1 − T_ours)`.
-- Same for the distant layer (`DistantFog`), at its surface distance.
-- Bind EHF's integrated scattering textures (t19 and t22 in materials) to our draw at free slots, or reach the volume
-  through EHF's feature, without changing EHF.
+- At each pixel, read the haze's integrated light and transmittance at the distance where our fog's light comes from
+  (`d`, the scatter-weighted distance already used for local lights): from the shared volume when it's on, from EHF
+  (`GetExponentialHeightFog` / `SampleVolumetricFog` or their internals) otherwise.
+- **Compose so the haze in front of our fog stays in front:**
+  `result = L_haze(0..d) + T_haze(0..d) · (L_ours + T_ours · behind)`, where `behind` is the scene beyond our fog with
+  the haze from `d` on (item 18b says how it's recovered).
+- Same for the distant layer, at its surface distance.
+- No change to Atmosphere and Fog's, Physical Sky's or EHF's code: we only read their bound results.
 
 **Accept:**
 
-- With EHF on, distant ground fog reads as inside the haze: dimmer and softer with distance, no bright band against hazy
-  hills.
-- Near fog is unchanged.
-- EHF off: identical to before.
-- Cost measured, about 0.02 ms expected.
+- With the haze on, distant ground fog sits inside it: dimmer and softer with distance, no bright band against hazy hills.
+- Near fog unchanged; haze off: identical to before.
+- Tested three ways: Physical Sky with the shared volume, EHF without Physical Sky, both off. Cost measured.
+
+### 18b. Our fog cuts through the haze (added 2026-11-19)
+
+**Goal (Victor, 2026-11-19):** our fog and the haze never fill the same space. Where a ray passes through our fog, our
+fog replaces the haze there.
+
+**Do (in our composite, with item 18):**
+
+- For each pixel, the ray's stretch inside our fog runs from `a` (enters) to `b` (leaves); the march already knows both.
+- The scene as it reaches us is `scene = L(0..b) + T(0..b) · X`, where `X` is everything past `b` (the haze from `b` to
+  the surface, and the surface), as seen from `b`. With the haze's integrated light `L` and transmittance `T` read at `b`:
+  `X = (scene − L(0..b)) / T(0..b)`.
+- Drop the haze between `a` and `b` and put our fog there: `result = L(0..a) + T(0..a) · (L_ours + T_ours · X)`.
+  (Item 18 alone is the same with `a = b = d`.)
+- **Guards:** divide only where `T(0..b)` is above a floor (thick haze can be only partly removed); clamp the result to
+  the uncut value's range.
+- **Not reachable:** transparent surfaces (particles, the water surface) bake the haze in their own shaders; they keep it.
+
+**Accept:**
+
+- In fog at dawn with the haze on: the haze doesn't double up inside our layer (no extra brightening or greying where both
+  were), and our fog's top meets the haze without a seam.
+- No artefacts at fog edges or where the haze is thick. Cost measured.
 
 ### 19. Shared light with EHF
 
@@ -831,25 +859,30 @@ brightness:
 - No colour or brightness step where our fog meets EHF, at noon, at dusk and at night.
 - Victor's judgement on the near look, which should still read as our fog's lighting.
 
-### 20. Hand the distant layer over by EHF's opacity
+### 20. The shared volume takes over the distant layer (rewritten 2026-11-19)
 
-**Problem:** our distant layer fades out at a fixed reach (Distant Fog Reach, 90%), whatever EHF does at that distance.
+**Goal (Victor, 2026-11-19):** past the near ray march, our "LOD" fog is drawn by the shared atmosphere volume, lit and
+applied with the haze. Replaces "hand the distant layer over by EHF's opacity" and reverses the 2026-11-12 "ruled out for
+now" for the distant layer only.
 
 **Do:**
 
-- With EHF on, the distant layer fades out as EHF's opacity at that distance rises (from item 18's evaluation). It vanishes
-  exactly where the haze hides it.
-- **Remove the Distant Fog Reach slider** (Victor, 2026-11-12): its setting, its UI and i18n strings, and its constant.
-  The reach is no longer a user choice:
-    - **EHF on:** the fade follows EHF's opacity alone. The only hard limit is the landscape actually drawn
-      (`LandscapeDepth::GetReach()`).
-    - **EHF off:** a fixed fade over the last part of the landscape's drawn reach (today's 90% default, built in).
+- **With Physical Sky and the shared volume on:**
+    - Our settled distant thickness (`FarDepth × forming × Banks`, today's `DistantFog` input) as a small world-space
+      map round the player, which Atmosphere and Fog's light pass (`LightScattering.cs.hlsl`) adds as a medium per froxel
+      past a hand-over distance (about the near grid's end, 60–114 m), with our fog's extinction and albedo.
+    - Our march stops at the hand-over distance with a short cross-fade, so the two never overlap.
+    - **This changes upstream code** (one input and its binding in `ViewAtmosphere`). Keep it as small and isolated as
+      possible, and offer it upstream as an "extra medium" hook so merges stop conflicting.
+- **Without the shared volume:** our distant layer as today, fading out as EHF's opacity rises (the old item 20). The
+  Distant Fog Reach slider goes as decided on 2026-11-12.
 
 **Accept:**
 
-- In a wide valley view (the battle save across the lake) with EHF on, there's no visible end to the ground fog.
-- With EHF off, the fade looks as it does today at 90%.
-- The slider is gone from the menu, and old saved settings load without errors.
+- Wide valley view (the battle save across the lake), shared volume on: no visible seam at the hand-over and no visible
+  end to the ground fog; far fog lit like the haze.
+- Draw time lower than today's distant layer, measured.
+- Shared volume off: looks as today (or per old item 20 with EHF on).
 
 ### 21. Composite before effects
 
