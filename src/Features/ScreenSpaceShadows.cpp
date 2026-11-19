@@ -1,6 +1,5 @@
 #include "ScreenSpaceShadows.h"
 
-#include "Features/InteriorSun.h"
 #include "Features/TerrainBlending.h"
 #include "I18n/I18n.h"
 #include "State.h"
@@ -106,11 +105,7 @@ void ScreenSpaceShadows::DrawShadows()
 	auto context = globals::d3d::context;
 
 	auto accumulator = *globals::game::currentAccumulator.get();
-	const auto shadowSceneNode = accumulator ? accumulator->GetRuntimeData().activeShadowSceneNode : nullptr;
-	const auto sunLight = shadowSceneNode ? shadowSceneNode->GetRuntimeData().sunLight : nullptr;
-	auto dirLight = sunLight ? skyrim_cast<RE::NiDirectionalLight*>(sunLight->light.get()) : nullptr;
-	if (!dirLight)
-		return;
+	auto dirLight = skyrim_cast<RE::NiDirectionalLight*>(accumulator->GetRuntimeData().activeShadowSceneNode->GetRuntimeData().sunLight->light.get());
 
 	auto& directionNi = dirLight->GetWorldDirection();
 	float3 light = { directionNi.x, directionNi.y, directionNi.z };
@@ -237,8 +232,7 @@ void ScreenSpaceShadows::PostPrepass()
 	globals::profiler->EndPass();
 
 	if (auto sky = globals::game::sky)
-		// Interiors too while the interior sun lights them: its shadow maps miss blockers this close
-		if (bendSettings.Enable && (sky->mode.get() == RE::Sky::Mode::kFull || globals::features::interiorSun.IsActiveInteriorSun())) {
+		if (bendSettings.Enable && sky->mode.get() == RE::Sky::Mode::kFull) {
 			DrawShadows();
 		}
 

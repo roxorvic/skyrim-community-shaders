@@ -1200,8 +1200,11 @@ void InteriorSun::DrawWindowHoles(const RE::NiCamera* camera)
 
 	// The same cascade can be drawn twice a frame (volumetric lighting's maps share its camera): planes once
 	const auto cascade = static_cast<uint32_t>(descriptor - descriptors.begin());
-	if (settings.LightOnlyPastWindow && cascade < 2 && !(windowPlanesWritten & (1u << cascade)))
+	if (settings.LightOnlyPastWindow && cascade < 2 && !(windowPlanesWritten & (1u << cascade))) {
+		globals::profiler->BeginPass("InteriorSun::WindowPlanes");
 		DrawWindowPlanes(cascade, data, viewport, textureDesc.Width, textureDesc.Height);
+		globals::profiler->EndPass();
+	}
 
 	++windowHolesDrawn;
 }

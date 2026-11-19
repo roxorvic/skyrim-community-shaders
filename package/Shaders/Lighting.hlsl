@@ -2484,8 +2484,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 
 #	if defined(SCREEN_SPACE_SHADOWS) && defined(DEFERRED)
-	// Indoors only with the interior sun: contact shadows catch small ledges its shadow maps are too coarse for
-	if (!SharedData::InInterior || SharedData::HasDirectionalShadows) {
+	if (!SharedData::InInterior) {
 #		if defined(TRUE_PBR)
 		if (thinSurfaceNormals) {
 			float faceLightAngle = dot(thinSurfaceFaceNormal, DirLightDirection);
