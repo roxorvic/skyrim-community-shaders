@@ -180,11 +180,13 @@ namespace FluidFieldSim
 		struct Job
 		{
 			int32_t x, y;
-			bool loadOnly;  ///< Read it from the disk cache; reply with a miss if it is not there
-			bool settled;   ///< Its area is settled: cache what is built
+			bool loadOnly;          ///< Read it from the disk cache; reply with a miss if it is not there
+			bool settled;           ///< Its area is settled: cache what is built
+			bool interior = false;  ///< Indoors: no landscape under the ground
 			LandscapeCache landscape;
 			std::vector<WaterSurfaces::Plane> water;
 			std::vector<GroundMeshes::Triangle> triangles;
+			std::vector<GroundMeshes::Triangle> navmesh;  ///< Indoors, the cell's navmesh over the tile: the floor fog may form on
 		};
 		struct Result
 		{
@@ -240,7 +242,9 @@ namespace FluidFieldSim
 		uint64_t waterSignature = 0;
 
 		std::string worldspace;
-		double clock = 0.0;                               ///< Seconds of updates
+		double clock = 0.0;                           ///< Seconds of updates
+		std::vector<GroundMeshes::Triangle> navmesh;  ///< Indoors, the cell's navmesh (world space), read once it is attached
+		bool navmeshRead = false;
 		std::chrono::steady_clock::time_point enteredAt;  ///< Last Clear: reads run on a bigger budget just after
 
 		// Shared with the worker

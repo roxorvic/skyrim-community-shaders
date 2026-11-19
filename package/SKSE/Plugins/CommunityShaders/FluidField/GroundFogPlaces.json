@@ -1,0 +1,56 @@
+{
+    "_about": "Ground Fog indoors (fog-v3 item 9): the dungeon kinds fog forms in, by the location's keywords (the location and its parents), first match wins. amount scales Ground Thickness (how much fog forms), density scales Density, tint multiplies the fog's colour. Interiors matching none (houses, shops, inns) get no fog.",
+    "dungeons": [
+        {
+            "name": "Nordic barrow",
+            "keywords": ["LocTypeDraugrCrypt", "LocTypeDragonPriestLair"],
+            "amount": 1.4,
+            "density": 1.2,
+            "tint": [0.85, 0.9, 1.0]
+        },
+        {
+            "name": "Falmer hive",
+            "keywords": ["LocTypeFalmerHive"],
+            "amount": 1.3,
+            "density": 1.1,
+            "tint": [0.8, 0.9, 1.0]
+        },
+        {
+            "name": "Mine",
+            "keywords": ["LocTypeMine"],
+            "amount": 1.0,
+            "density": 0.9,
+            "tint": [1.0, 0.95, 0.88]
+        },
+        {
+            "name": "Dwemer ruin",
+            "keywords": ["LocTypeDwarvenAutomatons"],
+            "amount": 0.5,
+            "density": 0.6,
+            "tint": [1.0, 0.93, 0.85]
+        },
+        {
+            "name": "Cave",
+            "keywords": [
+                "LocTypeAnimalDen",
+                "LocTypeBanditCamp",
+                "LocTypeHagravenNest",
+                "LocTypeVampireLair",
+                "LocTypeWarlockLair",
+                "LocTypeWerewolfLair",
+                "LocTypeSprigganGrove",
+                "LocTypeForswornCamp"
+            ],
+            "amount": 1.2,
+            "density": 1.0,
+            "tint": [0.9, 0.95, 1.0]
+        },
+        {
+            "name": "Other dungeon",
+            "keywords": ["LocTypeDungeon"],
+            "amount": 1.0,
+            "density": 1.0,
+            "tint": [0.92, 0.95, 1.0]
+        }
+    ]
+}

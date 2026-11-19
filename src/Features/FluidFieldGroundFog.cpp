@@ -2,7 +2,7 @@
 
 #include "../I18n/I18n.h"
 #include "Deferred.h"
-#include "Features/LightLimitFix.h"
+#include "Features/LinearLighting.h"
 #include "Features/Skylighting.h"
 #include "Features/VolumetricLighting.h"
 #include "Features/VolumetricShadows.h"
@@ -32,7 +32,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	DistantReach,
 	LocalLights,
 	Samples,
-	DebugView)
+	DebugView,
+	InteriorFogDensity,
+	InteriorFogBrightness,
+	InteriorGroundThickness,
+	InteriorPoolDepth,
+	InteriorEaseIn)
 
 void FluidFieldGroundFog::DrawSettings()
 {
@@ -59,6 +64,17 @@ void FluidFieldGroundFog::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("fog_stir"), "Stirring"), &settings.Stir, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	tooltip(T(TKEY("fog_stir_tooltip"), "How hard moving actors push the fog aside, piling it in front and leaving a wake."));
 
+	if (ImGui::CollapsingHeader(T(TKEY("interiors"), "Interiors"))) {
+		ImGui::PushID("InteriorsSection");
+		ImGui::TextWrapped("%s", T(TKEY("interiors_hint"), "Dungeons, caves, mines and ruins use these instead of the values above. Each kind's own strength in GroundFogPlaces.json applies on top."));
+		ImGui::SliderFloat(T(TKEY("interior_fog_density"), "Density"), &settings.InteriorFogDensity, 0.0f, 0.2f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("interior_fog_brightness"), "Brightness"), &settings.InteriorFogBrightness, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("interior_ground_thickness"), "Ground Thickness"), &settings.InteriorGroundThickness, 5.0f, 60.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("interior_pool_depth"), "Pool Depth"), &settings.InteriorPoolDepth, 10.0f, 120.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("interior_ease_in"), "Ease In"), &settings.InteriorEaseIn, 2.0f, 120.0f, "%.0f s", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::PopID();
+	}
+
 	if (ImGui::CollapsingHeader(T(TKEY("quality"), "Quality"))) {
 		ImGui::PushID("QualitySection");
 		static constexpr uint MIN_DETAIL = 0, MAX_DETAIL = 2;
@@ -74,7 +90,7 @@ void FluidFieldGroundFog::DrawSettings()
 		int lights = static_cast<int>(settings.LocalLights);
 		if (ImGui::Combo(T(TKEY("local_lights"), "Local Lights"), &lights, LIGHT_TIERS, IM_ARRAYSIZE(LIGHT_TIERS)))
 			settings.LocalLights = static_cast<uint>(lights);
-		tooltip(T(TKEY("local_lights_tooltip"), "Torches, fires and other lights glowing in the fog. Nearest: the few closest lights. All: every light in reach, costing more."));
+		tooltip(T(TKEY("local_lights_tooltip"), "Torches, fires and other lights glowing in the fog. Nearest: the 4 lights closest to you. All: the 8 closest."));
 		static constexpr uint MIN_SAMPLES = 12, MAX_SAMPLES = 64;
 		ImGui::SliderScalar(T(TKEY("samples"), "Samples"), ImGuiDataType_U32, &settings.Samples, &MIN_SAMPLES, &MAX_SAMPLES, "%u", ImGuiSliderFlags_AlwaysClamp);
 		tooltip(T(TKEY("samples_tooltip"), "Samples along each view ray through the fog. More: finer shadow edges and wakes, but the fog costs more, roughly in proportion."));
@@ -109,6 +125,11 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 	settings.GroundThickness = clamp(settings.GroundThickness, 5.0f, 60.0f, defaults.GroundThickness);
 	settings.PoolDepth = clamp(settings.PoolDepth, 10.0f, 120.0f, defaults.PoolDepth);
 	settings.EaseIn = clamp(settings.EaseIn, 2.0f, 120.0f, defaults.EaseIn);
+	settings.InteriorFogDensity = clamp(settings.InteriorFogDensity, 0.0f, 0.2f, defaults.InteriorFogDensity);
+	settings.InteriorFogBrightness = clamp(settings.InteriorFogBrightness, 0.0f, 2.0f, defaults.InteriorFogBrightness);
+	settings.InteriorGroundThickness = clamp(settings.InteriorGroundThickness, 5.0f, 60.0f, defaults.InteriorGroundThickness);
+	settings.InteriorPoolDepth = clamp(settings.InteriorPoolDepth, 10.0f, 120.0f, defaults.InteriorPoolDepth);
+	settings.InteriorEaseIn = clamp(settings.InteriorEaseIn, 2.0f, 120.0f, defaults.InteriorEaseIn);
 	settings.FogDetail = std::min(settings.FogDetail, 2u);
 	settings.ContactRadius = clamp(settings.ContactRadius, 15.0f, 20.0f, defaults.ContactRadius);
 	settings.Stir = clamp(settings.Stir, 0.0f, 3.0f, defaults.Stir);
@@ -116,6 +137,19 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 	settings.LocalLights = std::min(settings.LocalLights, 2u);
 	settings.Samples = std::clamp(settings.Samples, 12u, 64u);
 	settings.DebugView = std::min(settings.DebugView, 1u);
+}
+
+FluidFieldGroundFog::Settings FluidFieldGroundFog::ActiveSettings() const
+{
+	Settings active = settings;
+	if (currentPlace) {
+		active.FogDensity = settings.InteriorFogDensity;
+		active.FogBrightness = settings.InteriorFogBrightness;
+		active.GroundThickness = settings.InteriorGroundThickness;
+		active.PoolDepth = settings.InteriorPoolDepth;
+		active.EaseIn = settings.InteriorEaseIn;
+	}
+	return active;
 }
 
 void FluidFieldGroundFog::SaveSettings(json& o_json)
@@ -137,6 +171,50 @@ void FluidFieldGroundFog::DataLoaded()
 {
 	FluidFieldSim::AirSources::Install();
 	FluidFieldSim::LandscapeDepth::Install();
+	LoadPlaces();
+}
+
+void FluidFieldGroundFog::LoadPlaces()
+{
+	places.clear();
+	const auto path = Util::PathHelpers::GetCommunityShaderPath() / "FluidField" / "GroundFogPlaces.json";
+	std::ifstream file(path);
+	if (!file) {
+		logger::warn("[Fluid Field] Ground fog: no {} (no fog indoors)", path.string());
+		return;
+	}
+	try {
+		const json data = json::parse(file);
+		for (const auto& entry : data.at("dungeons")) {
+			Place place;
+			place.name = entry.value("name", std::string{});
+			place.keywords = entry.at("keywords").get<std::vector<std::string>>();
+			place.amount = std::clamp(entry.value("amount", 1.0f), 0.0f, 4.0f);
+			place.density = std::clamp(entry.value("density", 1.0f), 0.0f, 4.0f);
+			if (entry.contains("tint"))
+				for (std::size_t i = 0; i < 3; i++)
+					place.tint[i] = std::clamp(entry.at("tint").at(i).get<float>(), 0.0f, 2.0f);
+			places.push_back(std::move(place));
+		}
+		logger::info("[Fluid Field] Ground fog: {} dungeon kinds", places.size());
+	} catch (const std::exception& e) {
+		places.clear();
+		logger::warn("[Fluid Field] Ground fog: {} unreadable ({}): no fog indoors", path.string(), e.what());
+	}
+}
+
+const FluidFieldGroundFog::Place* FluidFieldGroundFog::FindPlace() const
+{
+	auto* player = RE::PlayerCharacter::GetSingleton();
+	const auto* location = player ? player->GetCurrentLocation() : nullptr;
+	if (!location)
+		return nullptr;
+	for (const auto& place : places)
+		for (const auto* at = location; at; at = at->parentLoc)
+			for (const auto& keyword : place.keywords)
+				if (at->HasKeywordString(keyword))
+					return &place;
+	return nullptr;
 }
 
 void FluidFieldGroundFog::ClearShaderCache()
@@ -294,11 +372,13 @@ FluidFieldSim::FogGround FluidFieldGroundFog::MakeGround() const
 FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 {
 	FluidFieldSim::FogLayerParams layer;
-	layer.groundThickness = settings.GroundThickness;
-	layer.poolDepth = std::max(settings.PoolDepth, settings.GroundThickness);
-	layer.sourceRate = 1.0f / settings.EaseIn;
+	const auto active = ActiveSettings();
+	const float amount = currentPlace ? currentPlace->amount : 1.0f;
+	layer.groundThickness = active.GroundThickness * amount;
+	layer.poolDepth = std::max(active.PoolDepth, layer.groundThickness);
+	layer.sourceRate = 1.0f / active.EaseIn;
 	// The weather's wind: speed and direction stored as 0-255; direction 0 blows from the north
-	if (const auto* sky = RE::Sky::GetSingleton(); sky && sky->currentWeather) {
+	if (const auto* sky = RE::Sky::GetSingleton(); sky && sky->currentWeather && !currentPlace) {
 		// Any real wind carries it visibly (square root, from a floor); only a near calm leaves it still
 		const float wind = static_cast<float>(sky->currentWeather->data.windSpeed) / 255.0f;
 		const float speed = wind < CALM_WIND ? 0.0f : std::lerp(MIN_WIND_DRIFT, MAX_WIND_DRIFT, std::sqrt(wind));
@@ -308,7 +388,7 @@ FluidFieldSim::FogLayerParams FluidFieldGroundFog::MakeLayer() const
 	}
 	layer.time = fogTime;
 	// How hard it rains, from Wetness Effects (its puddle ripples read the same)
-	if (globals::features::wetnessEffects.loaded) {
+	if (globals::features::wetnessEffects.loaded && !currentPlace) {
 		const auto wetness = globals::features::wetnessEffects.GetCommonBufferData();
 		layer.rain = std::clamp(wetness.Raining, 0.0f, 1.0f);
 		// Rain only where the sky is open: the precipitation occlusion map, as Wetness Effects and Skylighting read it
@@ -341,11 +421,13 @@ void FluidFieldGroundFog::Prepass()
 	fogReady = false;
 
 	const FluidFieldSim::Field::PrepassScope scope(*this);
-	if (!scope.IsReady() || Util::IsInterior()) {
-		// No distant fog indoors: the extra landscape draws stop (item 8)
+	// Item 9: indoors only in dungeons (GroundFogPlaces.json); no distant fog indoors (the extra landscape draws stop)
+	const bool interior = Util::IsInterior();
+	currentPlace = interior ? FindPlace() : nullptr;
+	if (interior)
 		FluidFieldSim::LandscapeDepth::SetEnabled(false);
+	if (!scope.IsReady() || (interior && !currentPlace))
 		return;
-	}
 
 	// Every load leaves the player somewhere new
 	if (field.ConsumeLoad(seenLoads)) {
@@ -358,7 +440,7 @@ void FluidFieldGroundFog::Prepass()
 	const auto start = std::chrono::steady_clock::now();
 	globals::profiler->BeginPass("FluidField::Fog Ground");
 	ground.Update(globals::d3d::device, context, field.GetLandscape(), field.GetWater(), playerPos.x, playerPos.y, field.GetDeltaTime());
-	FluidFieldSim::LandscapeDepth::SetEnabled(true);
+	FluidFieldSim::LandscapeDepth::SetEnabled(!interior);
 	// The distant fog fades in from 80% of the near fog's reach (GroundFogCS DISTANCE_FADE): landscape wholly inside that,
 	// less a margin, is never read (item 8)
 	FluidFieldSim::LandscapeDepth::SetNearSkip(0.8f * (FluidFieldSim::GroundTiles::LAND_REACH + 0.5f) * FluidFieldSim::LandscapeCache::CELL_UNITS - 512.0f);
@@ -402,7 +484,7 @@ void FluidFieldGroundFog::Prepass()
 
 void FluidFieldGroundFog::DrawAfterWorld()
 {
-	if (!IsActive() || !fogReady || Util::IsInterior())
+	if (!IsActive() || !fogReady || (Util::IsInterior() && !InDungeon()))
 		return;
 	auto* renderer = globals::game::renderer;
 	// The targets the world was just rendered into; not always kMAIN, so the fog follows whatever is bound
@@ -545,7 +627,8 @@ bool FluidFieldGroundFog::EnsureNoise()
 
 void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
 {
-	if (drawFailed || settings.FogDensity <= 0.0f || !EnsureNoise())
+	const auto active = ActiveSettings();
+	if (drawFailed || active.FogDensity <= 0.0f || !EnsureNoise())
 		return;
 	auto* context = globals::d3d::context;
 	if (!groundFogCS) {
@@ -567,18 +650,13 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	// The lighting CS already has, where those features are in (Volumetric Shadows, Skylighting, Light Limit Fix)
 	auto& volumetricShadows = globals::features::volumetricShadows;
 	auto& skylighting = globals::features::skylighting;
-	auto& lightLimitFix = globals::features::lightLimitFix;
 	ID3D11ShaderResourceView* sunShadowSRV = volumetricShadows.loaded ? volumetricShadows.shadowCopySRV : nullptr;
 	ID3D11ShaderResourceView* directionalShadowSRV = globals::deferred && globals::deferred->directionalShadowLights ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
 	// 4d: the game's sun shadow cascades (actors in them), as Skylighting captures them for its probes
 	ID3D11ShaderResourceView* sceneShadowSRV = skylighting.loaded ? skylighting.shadowCascadeSRV : nullptr;
 	ID3D11ShaderResourceView* skySRV = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
-	ID3D11ShaderResourceView* lightSRVs[3] = {};
-	if (lightLimitFix.loaded && lightLimitFix.lights && lightLimitFix.lightIndexList && lightLimitFix.lightGrid) {
-		lightSRVs[0] = lightLimitFix.lights->srv.get();
-		lightSRVs[1] = lightLimitFix.lightIndexList->srv.get();
-		lightSRVs[2] = lightLimitFix.lightGrid->srv.get();
-	}
+	const uint32_t lightCount = settings.LocalLights != 0 ? PickFogLights() : 0u;
+	ID3D11ShaderResourceView* lightSRV = lightCount > 0 ? fogLights->SRV() : nullptr;
 
 	// 4e: with Volumetric Lighting on, the fog's sun takes its colour, phase and strength (the weather's, as SkySync reads them)
 	static const auto* volumetricLighting = reinterpret_cast<const RE::BSVolumetricLightingRenderData*>(REL::RelocationID(527719, 414629).address() - offsetof(RE::BSVolumetricLightingRenderData, color));
@@ -595,23 +673,24 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		lastEye[2] = eye.z;
 	}
 
+	const std::array<float, 3> tint = currentPlace ? currentPlace->tint : std::array<float, 3>{ 1.0f, 1.0f, 1.0f };
 	GroundFogConstants constants{
 		.gridMin = { gridMin[0], gridMin[1] },
 		.resolution = GRID_RESOLUTION,
 		.cellSize = cellSize,
-		.density = settings.FogDensity,
+		.density = active.FogDensity * (currentPlace ? currentPlace->density : 1.0f),
 		.stepCount = settings.Samples,
 		// To the loaded landscape's edge: settled fog past the simulated grid, fading out where Exponential Height Fog takes over
 		.maxDistance = (FluidFieldSim::GroundTiles::LAND_REACH + 0.5f) * FluidFieldSim::LandscapeCache::CELL_UNITS,
-		.maxDepth = std::max(settings.PoolDepth, settings.GroundThickness),
-		.albedo = { 0.9f * settings.FogBrightness, 0.92f * settings.FogBrightness, 0.95f * settings.FogBrightness },
-		.farDepth = settings.GroundThickness,
+		.maxDepth = std::max(active.PoolDepth, active.GroundThickness),
+		.albedo = { 0.9f * active.FogBrightness * tint[0], 0.92f * active.FogBrightness * tint[1], 0.95f * active.FogBrightness * tint[2] },
+		.farDepth = active.GroundThickness * (currentPlace ? currentPlace->amount : 1.0f),
 		.slotTiles = {},
 		.tileMin = { ground.GetTileMin()[0], ground.GetTileMin()[1] },
 		.landCell = { ground.GetLandCell()[0], ground.GetLandCell()[1] },
 		.vlMix = vlOn ? volumetricLighting->customColor.contribution : 0.0f,
 		.hollowGain = MakeLayer().hollowGain,
-		.farPoolDepth = std::max(settings.PoolDepth, settings.GroundThickness),
+		.farPoolDepth = std::max(active.PoolDepth, active.GroundThickness),
 		.contactCell = FluidFieldSim::FogSolver::CONTACT_CELL,
 		.contactMin = { contactMin[0], contactMin[1] },
 		.contactResolution = FluidFieldSim::FogSolver::CONTACT_RESOLUTION,
@@ -619,13 +698,14 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 		.vlPhase = { vlOn ? volumetricLighting->phaseFunction.scattering : 0.0f, vlOn ? volumetricLighting->phaseFunction.contribution : 0.0f },
 		.hasLod = FluidFieldSim::LandscapeDepth::GetSRV() ? 1u : 0u,
 		.vlIntensity = vlOn ? volumetricLighting->intensity : 0.0f,
-		.hasSunShadow = sunShadowSRV && directionalShadowSRV ? 1u : 0u,
-		.hasSky = skySRV ? 1u : 0u,
-		.localLights = lightSRVs[0] && lightSRVs[1] && lightSRVs[2] ? settings.LocalLights : 0u,
-		.hasSceneShadow = sceneShadowSRV && directionalShadowSRV ? 1u : 0u,
+		.hasSunShadow = sunShadowSRV && directionalShadowSRV && !currentPlace ? 1u : 0u,
+		.hasSky = skySRV && !currentPlace ? 1u : 0u,
+		.localLights = lightCount > 0 ? settings.LocalLights : 0u,
+		.hasSceneShadow = sceneShadowSRV && directionalShadowSRV && !currentPlace ? 1u : 0u,
 		.vlColour = { volumetricLighting->color.red, volumetricLighting->color.green, volumetricLighting->color.blue },
-		.hasVL = vlOn ? 1u : 0u,
+		.hasVL = vlOn && !currentPlace ? 1u : 0u,
 		.hasHistory = historyValid ? 1u : 0u,
+		.lightCount = lightCount,
 		.historyPad = {}
 	};
 	std::memcpy(constants.slotTiles, ground.GetSlots().data(), sizeof(constants.slotTiles));
@@ -666,7 +746,7 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	context->CSSetShaderResources(23, 1, &sceneShadowSRV);
 	context->CSSetShaderResources(14, 1, &skySRV);
 	context->CSSetShaderResources(18, 1, &sunShadowSRV);
-	context->CSSetShaderResources(35, 3, lightSRVs);
+	context->CSSetShaderResources(35, 1, &lightSRV);
 	context->CSSetShaderResources(98, 1, &directionalShadowSRV);
 	globals::profiler->BeginPass("FluidField::Fog Top");
 	BuildFogTop(context);
@@ -718,6 +798,67 @@ void FluidFieldGroundFog::DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11Unordere
 	globals::profiler->EndPass();
 }
 
+uint32_t FluidFieldGroundFog::PickFogLights()
+{
+	// The scene's active lights, shadow lights too (the fog takes no shadows, so none is dropped for lacking one), the
+	// closest to the camera by the nearest point of their reach; the last few fade as the next one catches up, so none pops
+	constexpr float HANDOVER = 256.0f;
+	// Once a frame, from the main camera: the fog is also drawn for another view each frame, whose camera's pick flipped
+	// the lights every other call
+	if (lightPickFrame == globals::state->frameCount)
+		return lightPickCount;
+	lightPickFrame = globals::state->frameCount;
+	lightPickCount = 0;
+	auto* scene = globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
+	if (!scene)
+		return 0;
+	if (!fogLights) {
+		fogLights = std::make_unique<StructuredBuffer>(StructuredBufferDesc<FogLight>(NEAR_LIGHTS), NEAR_LIGHTS, "FluidField::FogLights");
+		fogLights->CreateSRV();
+	}
+	struct Candidate
+	{
+		float reach;
+		FogLight light;
+	};
+	static std::vector<Candidate> candidates;
+	candidates.clear();
+	const auto eye = FluidFieldSim::Field::Get().GetSnapshotEye();
+	const auto add = [&](const RE::NiPointer<RE::BSLight>& a_light, bool a_shadow) {
+		auto* bsLight = a_light.get();
+		auto* niLight = bsLight ? bsLight->light.get() : nullptr;
+		if (!niLight || niLight->GetFlags().any(RE::NiAVObject::Flag::kHidden))
+			return;
+		const auto& runtime = niLight->GetLightRuntimeData();
+		// A shadow light's dimmer is zeroed past the shadow distance: its own fade only
+		const float fade = runtime.fade * (a_shadow ? 1.0f : bsLight->lodDimmer);
+		const float radius = runtime.radius.x;
+		const auto colour = globals::features::linearLighting.LightColorToWorking(niLight);
+		if (radius <= 1e-4f || fade * (colour.red + colour.green + colour.blue) <= 1e-4f)
+			return;
+		const auto position = niLight->world.translate - eye;
+		candidates.push_back({ position.Length() - radius, { { position.x, position.y, position.z }, radius, { colour.red * fade, colour.green * fade, colour.blue * fade }, 0.0f } });
+	};
+	for (const auto& light : scene->GetRuntimeData().activeLights)
+		add(light, false);
+	for (const auto& light : scene->GetRuntimeData().activeShadowLights)
+		add(light, true);
+	const std::size_t wanted = settings.LocalLights == 1 ? FEW_LIGHTS : NEAR_LIGHTS;
+	const std::size_t kept = std::min(wanted, candidates.size());
+	std::ranges::partial_sort(candidates, candidates.begin() + std::min(kept + 1, candidates.size()), {}, &Candidate::reach);
+	const float next = candidates.size() > kept ? candidates[kept].reach : std::numeric_limits<float>::max();
+	std::array<FogLight, NEAR_LIGHTS> picked{};
+	for (std::size_t i = 0; i < kept; i++) {
+		picked[i] = candidates[i].light;
+		const float share = std::clamp((next - candidates[i].reach) / HANDOVER, 0.0f, 1.0f);
+		for (float& channel : picked[i].colour)
+			channel *= share;
+	}
+	fogLights->Update(picked.data(), sizeof(picked));
+	lightPickCount = static_cast<uint32_t>(kept);
+	return lightPickCount;
+}
+
 void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth)
 {
 	if (drawFailed)
@@ -740,7 +881,7 @@ void FluidFieldGroundFog::DrawDebug(ID3D11UnorderedAccessView* a_main, ID3D11Sha
 	constants.landCell[1] = ground.GetLandCell()[1];
 	constants.resolution = GRID_RESOLUTION;
 	constants.cellSize = cellSize;
-	constants.poolDepth = std::max(settings.PoolDepth, settings.GroundThickness);
+	constants.poolDepth = std::max(ActiveSettings().PoolDepth, ActiveSettings().GroundThickness);
 	constants.gridMin[0] = gridMin[0];
 	constants.gridMin[1] = gridMin[1];
 	if (!Upload(context, groundDebugCB, constants))

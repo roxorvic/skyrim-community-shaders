@@ -4,6 +4,7 @@
 #include "Profiler.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/Game.h"
 
 namespace FluidFieldSim
 {
@@ -144,6 +145,7 @@ namespace FluidFieldSim
 		}
 		if (cameraSnapshot)
 			globals::d3d::context->CopyResource(cameraSnapshot.get(), perFrame);
+		snapshotEye = Util::GetEyePosition();
 	}
 
 	void Field::DrawBeforeWater()

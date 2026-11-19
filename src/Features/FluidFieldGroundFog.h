@@ -48,12 +48,21 @@ struct FluidFieldGroundFog : Feature
 		float ContactRadius = 18.0f;    ///< Metres round the player within which legs cut the fog exactly
 		float Stir = 1.0f;              ///< How hard moving actors push the fog
 		float DistantReach = 0.9f;      ///< How far the distant fog reaches, as a share of the LOD terrain's reach
-		uint LocalLights = 1;           ///< Torches and fires glowing in the fog: 0 off, 1 the nearest few, 2 all
+		uint LocalLights = 1;           ///< Torches and fires glowing in the fog: 0 off, 1 the 4 closest to the camera, 2 the 8 closest
 		uint Samples = 24;              ///< Samples along each view ray (more: finer shadow edges, more cost)
 		uint DebugView = 0;             ///< 1 colours every surface by what the fog's ground takes it for, brighter where fog lies
+		// Indoors (dungeons), their own tuning; GroundFogPlaces.json's per-kind multipliers apply on top
+		float InteriorFogDensity = 0.04f;
+		float InteriorFogBrightness = 0.15f;
+		float InteriorGroundThickness = 20.0f;
+		float InteriorPoolDepth = 40.0f;
+		float InteriorEaseIn = 20.0f;
 	};
 
 	Settings settings;
+
+	/** @brief The settings in force: indoors (in a dungeon), the interior tuning in place of the outdoor one. */
+	Settings ActiveSettings() const;
 
 	/** @brief Draws the ImGui settings UI. */
 	virtual void DrawSettings() override;
@@ -90,6 +99,23 @@ private:
 	/** @brief Creates the solver's resources and shaders; false if it cannot run. */
 	bool EnsureSolver();
 	FluidFieldSim::FogGround MakeGround() const;
+
+	/** @brief Item 9: a dungeon kind fog forms in indoors (GroundFogPlaces.json), by its location's keywords. */
+	struct Place
+	{
+		std::string name;
+		std::vector<std::string> keywords;
+		float amount = 1.0f;   ///< Times Ground Thickness
+		float density = 1.0f;  ///< Times Density
+		std::array<float, 3> tint{ 1.0f, 1.0f, 1.0f };
+	};
+	std::vector<Place> places;
+	/** @brief The player's dungeon kind this frame indoors; null outdoors, or indoors where fog doesn't form. */
+	const Place* currentPlace = nullptr;
+	void LoadPlaces();
+	const Place* FindPlace() const;
+	/** @brief Indoors in a dungeon fog forms in. */
+	bool InDungeon() const { return currentPlace != nullptr; }
 	FluidFieldSim::FogLayerParams MakeLayer() const;
 
 	void DrawFog(ID3D11Texture2D* a_mainTexture, ID3D11UnorderedAccessView* a_main, ID3D11ShaderResourceView* a_depth);
@@ -127,7 +153,8 @@ private:
 		float vlColour[3];        ///< Volumetric Lighting's own colour (4e)
 		uint32_t hasVL;           ///< Volumetric Lighting is on: the fog's sun takes its colour, phase and strength
 		uint32_t hasHistory;      ///< Last frame's fog is valid to blend with (the TEMPORAL pass)
-		float historyPad[3];
+		uint32_t lightCount;      ///< FogLights this frame
+		float historyPad[2];
 	};
 	static_assert(sizeof(GroundFogConstants) == 48 + 256 * 16 + 112);
 
@@ -186,6 +213,22 @@ private:
 	/** @brief 4a/4b: the half-resolution fog blended over frames (GroundFogCS TEMPORAL), ping-ponged, so the march's
 	 * jitter averages out while the camera moves too (the game's TAA cannot resolve it then: stripes). */
 	std::array<std::unique_ptr<Texture2D>, 2> fogHistory, fogHistoryDistance;
+
+	/** @brief A light glowing in the fog (GroundFogCS FogLight). */
+	struct FogLight
+	{
+		float position[3];  ///< Camera-relative
+		float radius;
+		float colour[3];  ///< Working space, times its fade and its share at the pick's cut
+		float pad;
+	};
+	static constexpr uint32_t FEW_LIGHTS = 4;
+	static constexpr uint32_t NEAR_LIGHTS = 8;
+	std::unique_ptr<StructuredBuffer> fogLights;  ///< The lights closest to the camera, NEAR_LIGHTS at most
+	uint32_t lightPickFrame = UINT32_MAX;         ///< The frame fogLights was picked for: once a frame, for the main camera
+	uint32_t lightPickCount = 0;
+	/** @brief Picks the scene's lights closest to the camera into fogLights; returns how many. */
+	uint32_t PickFogLights();
 	uint32_t historyIndex = 0;
 	bool historyValid = false;
 	float lastEye[3]{};

@@ -57,6 +57,8 @@ namespace FluidFieldSim
 		GpuSpans& GetGpuSpans() { return gpuSpans; }
 		/** @brief The main camera's per-frame constants as copied before the water, or null. */
 		ID3D11Buffer* GetCameraSnapshot() const { return cameraSnapshot.get(); }
+		/** @brief The main camera's eye when it was snapshotted: the fog's camera-relative positions are relative to it. */
+		const RE::NiPoint3& GetSnapshotEye() const { return snapshotEye; }
 		const RE::NiPoint3& GetPlayerPosition() const { return playerPosition; }
 		/** @brief This frame's step in seconds, clamped; 0 while paused. */
 		float GetDeltaTime() const { return deltaTime; }
@@ -85,6 +87,7 @@ namespace FluidFieldSim
 		WaterSurfaces water;
 		GpuSpans gpuSpans;
 		winrt::com_ptr<ID3D11Buffer> cameraSnapshot;
+		RE::NiPoint3 snapshotEye;
 		RE::NiPoint3 playerPosition;
 		float deltaTime = 0.0f;
 		uint32_t updatedFrame = UINT32_MAX;

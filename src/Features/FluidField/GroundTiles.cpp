@@ -58,7 +58,19 @@ namespace FluidFieldSim
 		constexpr float STEEP_RISE = 1.2f * GroundTiles::TEXEL;
 
 		/** @brief Bump when the build changes: older cached tiles are ignored. */
-		constexpr uint32_t CACHE_VERSION = 11;
+		constexpr uint32_t CACHE_VERSION = 15;
+		/** @brief Indoors, a mesh floor within this height of the navmesh's is taken for its exact height (navmeshes float a little
+		 * over the floor). */
+		constexpr float NAVMESH_REACH = 48.0f;
+		/** @brief Indoors, the navmesh's floor is widened this many texels into the gaps it leaves at walls and props (48 units),
+		 * so fog reaches the walls. */
+		constexpr int32_t NAVMESH_WIDEN = 6;
+		/** @brief Indoors, a rock top this close to a neighbouring ground top is a step's or ledge's edge (its riser's faces), not a
+		 * rock: ground (item 9; as rock the draw skipped it and took the floor below, and fog hung over the riser). */
+		constexpr float STEP_EDGE = 8.0f;
+		/** @brief Indoors, seconds after entering before a tile may settle (outdoors the landscape's loading gives the
+		 * statics' 3D that time: indoors, tiles settled empty before the room had loaded, and were cached so). */
+		constexpr double INTERIOR_SETTLE_SECONDS = 5.0;
 		constexpr uint32_t CACHE_MAGIC = 0x31544746;  // "FGT1"
 
 		/** @brief Read budgets on the main thread, ms: in play, and just after a load (the screen is still fading in). */
@@ -206,7 +218,7 @@ namespace FluidFieldSim
 	{
 		auto* tes = RE::TES::GetSingleton();
 		auto* player = RE::PlayerCharacter::GetSingleton();
-		if (!tes || !player || tes->interiorCell)
+		if (!tes || !player)
 			return;
 		// Look for new references every so often (and at once after a Clear)
 		if (framesToScan == 0 || framesToScan-- == 0) {
@@ -296,7 +308,9 @@ namespace FluidFieldSim
 			if (const auto* alpha = (modelClass == ModelClass::Walls || modelClass == ModelClass::Tree) ? static_cast<const RE::NiAlphaProperty*>(a_geometry->GetGeometryRuntimeData().alphaProperty.get()) : nullptr;
 				alpha && (alpha->GetAlphaTesting() || alpha->GetAlphaBlending()))
 				return RE::BSVisit::BSVisitControl::kContinue;
-			for (const RE::NiAVObject* node = a_geometry; node; node = node->parent)
+			// Hidden within its own model only: above it, indoors, the game hides whole rooms out of view (portals), which
+			// skipped every room the player wasn't looking into
+			for (const RE::NiAVObject* node = a_geometry; node; node = node == root ? nullptr : node->parent)
 				if (node->GetAppCulled())
 					return RE::BSVisit::BSVisitControl::kContinue;
 			const auto& counts = triShape->GetTrishapeRuntimeData();
@@ -384,6 +398,8 @@ namespace FluidFieldSim
 		uploads.clear();
 		landCells = 0;
 		landFilled.clear();
+		navmesh.clear();
+		navmeshRead = false;
 		enteredAt = std::chrono::steady_clock::now();
 		std::scoped_lock lock(mutex);
 		jobs.clear();
@@ -488,8 +504,12 @@ namespace FluidFieldSim
 	void GroundTiles::Update(ID3D11Device* a_device, ID3D11DeviceContext* a_context, const LandscapeCache& a_landscape, const WaterSurfaces& a_water, float a_playerX, float a_playerY, float a_deltaTime)
 	{
 		clock += a_deltaTime;
-		const auto* land = GetLandWorldspace();
-		const std::string name = land && land->GetFormEditorID() ? land->GetFormEditorID() : "";
+		// Item 9: indoors, the cell itself (its form ID): its tiles cached per cell, no landscape
+		auto* tes = RE::TES::GetSingleton();
+		const auto* interior = tes ? tes->interiorCell : nullptr;
+		const auto* land = interior ? nullptr : GetLandWorldspace();
+		const std::string name = interior ? std::format("Interior{:08X}", interior->GetFormID()) : land && land->GetFormEditorID() ? land->GetFormEditorID() :
+		                                                                                                                             "";
 		if (name.empty())
 			return;
 		if (name != worldspace) {
@@ -514,7 +534,34 @@ namespace FluidFieldSim
 			Util::SetResourceName(srv.get(), "FluidField::GroundTiles SRV");
 		}
 
-		UpdateLand(a_device, a_context, a_landscape, a_water, a_playerX, a_playerY);
+		if (interior) {
+			// Out of every reader's reach: no land map indoors
+			landCell[0] = landCell[1] = 1 << 20;
+			if (!navmeshRead && interior->IsAttached()) {
+				navmeshRead = true;
+				if (const auto* cellNavmeshes = interior->GetRuntimeData().navMeshes)
+					for (const auto& mesh : cellNavmeshes->navMeshes) {
+						if (!mesh)
+							continue;
+						const auto& vertices = mesh->vertices;
+						for (const auto& source : mesh->triangles) {
+							if (source.vertices[0] >= vertices.size() || source.vertices[1] >= vertices.size() || source.vertices[2] >= vertices.size())
+								continue;
+							GroundMeshes::Triangle triangle{};
+							float* out[3] = { triangle.a, triangle.b, triangle.c };
+							for (int k = 0; k < 3; k++) {
+								const auto& location = vertices[source.vertices[k]].location;
+								out[k][0] = location.x;
+								out[k][1] = location.y;
+								out[k][2] = location.z;
+							}
+							navmesh.push_back(triangle);
+						}
+					}
+				logger::info("[Fluid Field] Ground fog indoors: {} navmesh triangles (fog forms only on the floor they cover)", navmesh.size());
+			}
+		} else
+			UpdateLand(a_device, a_context, a_landscape, a_water, a_playerX, a_playerY);
 
 		// The window: SLOTS tiles a side, the player in its middle two
 		tileMin[0] = static_cast<int32_t>(std::floor(a_playerX / TILE_UNITS + 0.5f)) - SLOTS / 2;
@@ -632,10 +679,12 @@ namespace FluidFieldSim
 			slot.nextCheck = clock + CHECK_SECONDS;
 			// Settled: its landscape all there (and round it, for the statics reaching in), then a scan since and nothing left to read
 			const GroundMeshes::Rect rect{ { slot.x * TILE_UNITS, slot.y * TILE_UNITS }, { (slot.x + 1) * TILE_UNITS, (slot.y + 1) * TILE_UNITS } };
-			bool landThere = true;
-			for (auto cy = static_cast<int32_t>(std::floor((rect.min[1] - 512.0f) / LandscapeCache::CELL_UNITS)); cy <= static_cast<int32_t>(std::floor((rect.max[1] + 512.0f) / LandscapeCache::CELL_UNITS)); cy++)
-				for (auto cx = static_cast<int32_t>(std::floor((rect.min[0] - 512.0f) / LandscapeCache::CELL_UNITS)); cx <= static_cast<int32_t>(std::floor((rect.max[0] + 512.0f) / LandscapeCache::CELL_UNITS)); cx++)
-					landThere = landThere && a_landscape.Find(cx, cy);
+			// Indoors no landscape: wait for the cell to load and its statics' 3D to stream in instead
+			bool landThere = !interior || (interior->IsAttached() && std::chrono::steady_clock::now() - enteredAt > std::chrono::duration<double>(INTERIOR_SETTLE_SECONDS));
+			if (!interior)
+				for (auto cy = static_cast<int32_t>(std::floor((rect.min[1] - 512.0f) / LandscapeCache::CELL_UNITS)); cy <= static_cast<int32_t>(std::floor((rect.max[1] + 512.0f) / LandscapeCache::CELL_UNITS)); cy++)
+					for (auto cx = static_cast<int32_t>(std::floor((rect.min[0] - 512.0f) / LandscapeCache::CELL_UNITS)); cx <= static_cast<int32_t>(std::floor((rect.max[0] + 512.0f) / LandscapeCache::CELL_UNITS)); cx++)
+						landThere = landThere && a_landscape.Find(cx, cy);
 			if (!landThere)
 				slot.landScan = UINT32_MAX;
 			else if (slot.landScan == UINT32_MAX)
@@ -649,11 +698,15 @@ namespace FluidFieldSim
 		std::ranges::sort(builds, {}, &std::pair<float, Slot*>::first);
 		for (std::size_t i = 0; i < builds.size() && i < BUILDS_PER_FRAME; i++) {
 			Slot& slot = *builds[i].second;
-			auto job = std::make_unique<Job>(Job{ .x = slot.x, .y = slot.y, .loadOnly = false, .settled = slot.settled });
+			auto job = std::make_unique<Job>(Job{ .x = slot.x, .y = slot.y, .loadOnly = false, .settled = slot.settled, .interior = interior != nullptr });
 			const float min[2] = { slot.x * TILE_UNITS - TEXEL, slot.y * TILE_UNITS - TEXEL }, max[2] = { (slot.x + 1) * TILE_UNITS + TEXEL, (slot.y + 1) * TILE_UNITS + TEXEL };
 			job->landscape = a_landscape.Subset(min[0], min[1], max[0], max[1]);
 			a_water.CollectPlanes(min[0], min[1], max[0], max[1], job->water);
 			meshes.Copy(min, max, job->triangles);
+			for (const auto& triangle : navmesh)
+				if (std::max({ triangle.a[0], triangle.b[0], triangle.c[0] }) >= min[0] && std::min({ triangle.a[0], triangle.b[0], triangle.c[0] }) <= max[0] &&
+					std::max({ triangle.a[1], triangle.b[1], triangle.c[1] }) >= min[1] && std::min({ triangle.a[1], triangle.b[1], triangle.c[1] }) <= max[1])
+					job->navmesh.push_back(triangle);
 			fresh.push_back(std::move(job));
 			slot.inFlight = true;
 			slot.dirty = false;
@@ -700,7 +753,9 @@ namespace FluidFieldSim
 				              !file.read(reinterpret_cast<char*>(result.texels.data()), static_cast<std::streamsize>(result.texels.size() * sizeof(float)));
 			} else {
 				Build(*job, result.texels);
-				if (job->settled) {
+				// A tile with no ground at all is never cached (an interior read before its room loaded)
+				const bool anyGround = std::ranges::any_of(std::views::iota(std::size_t{ 0 }, result.texels.size() / 4), [&](std::size_t i) { return result.texels[i * 4] > NO_GROUND; });
+				if (job->settled && anyGround) {
 					std::error_code error;
 					std::filesystem::create_directories(path.parent_path(), error);
 					const auto temporary = std::filesystem::path(path).concat(".tmp");
@@ -762,7 +817,8 @@ namespace FluidFieldSim
 					const float wb = Area2(a_triangle.c, a_triangle.a, p) / area;
 					const float wc = 1.0f - wa - wb;
 					const std::size_t i = static_cast<std::size_t>(y) * N + x;
-					if (wa >= 0.0f && wb >= 0.0f && wc >= 0.0f && land[i] > NO_GROUND)
+					// Outdoors only over the landscape (what hangs past it is not ground); indoors there is none (item 9)
+					if (wa >= 0.0f && wb >= 0.0f && wc >= 0.0f && (land[i] > NO_GROUND || a_job.interior))
 						a_texel(i, wa * a_triangle.a[2] + wb * a_triangle.b[2] + wc * a_triangle.c[2]);
 				}
 			}
@@ -837,6 +893,75 @@ namespace FluidFieldSim
 				lowerFlags[i] = ROCK;
 			}
 		}
+		// Indoors with a navmesh (item 9, Victor's single plane): each column's lowest navmesh floor, widened into the gaps the
+		// navmesh leaves at walls and props (on a grid NAVMESH_WIDEN texels larger each side, so tiles agree at their seams)
+		const bool navmeshed = a_job.interior && !a_job.navmesh.empty();
+		std::vector<float> navFloor;
+		if (navmeshed) {
+			constexpr int32_t W = NAVMESH_WIDEN;
+			const int32_t M = N + 2 * W;
+			const float gridX = originX - W * TEXEL, gridY = originY - W * TEXEL;
+			constexpr float NONE = std::numeric_limits<float>::max();
+			std::vector<float> grid(static_cast<std::size_t>(M) * M, NONE);
+			for (const auto& triangle : a_job.navmesh) {
+				const float area = Area2(triangle.a, triangle.b, triangle.c);
+				if (std::abs(area) < 1e-4f)
+					continue;
+				const int32_t x0 = std::max(0, static_cast<int32_t>(std::ceil((std::min({ triangle.a[0], triangle.b[0], triangle.c[0] }) - gridX) / TEXEL - 0.5f)));
+				const int32_t x1 = std::min(M - 1, static_cast<int32_t>(std::floor((std::max({ triangle.a[0], triangle.b[0], triangle.c[0] }) - gridX) / TEXEL - 0.5f)));
+				const int32_t y0 = std::max(0, static_cast<int32_t>(std::ceil((std::min({ triangle.a[1], triangle.b[1], triangle.c[1] }) - gridY) / TEXEL - 0.5f)));
+				const int32_t y1 = std::min(M - 1, static_cast<int32_t>(std::floor((std::max({ triangle.a[1], triangle.b[1], triangle.c[1] }) - gridY) / TEXEL - 0.5f)));
+				for (int32_t y = y0; y <= y1; y++)
+					for (int32_t x = x0; x <= x1; x++) {
+						const float p[2] = { gridX + (x + 0.5f) * TEXEL, gridY + (y + 0.5f) * TEXEL };
+						const float wa = Area2(triangle.b, triangle.c, p) / area, wb = Area2(triangle.c, triangle.a, p) / area, wc = 1.0f - wa - wb;
+						if (wa < 0.0f || wb < 0.0f || wc < 0.0f)
+							continue;
+						float& cell = grid[static_cast<std::size_t>(y) * M + x];
+						cell = std::min(cell, wa * triangle.a[2] + wb * triangle.b[2] + wc * triangle.c[2]);
+					}
+			}
+			for (int pass = 0; pass < W; pass++) {
+				std::vector<float> widened(grid);
+				for (int32_t y = 1; y < M - 1; y++)
+					for (int32_t x = 1; x < M - 1; x++) {
+						float& cell = widened[static_cast<std::size_t>(y) * M + x];
+						if (cell != NONE)
+							continue;
+						for (int32_t dy = -1; dy <= 1; dy++)
+							for (int32_t dx = -1; dx <= 1; dx++)
+								cell = std::min(cell, grid[static_cast<std::size_t>(y + dy) * M + (x + dx)]);
+					}
+				grid.swap(widened);
+			}
+			navFloor.assign(heights.size(), NO_GROUND);
+			for (int32_t y = 0; y < N; y++)
+				for (int32_t x = 0; x < N; x++) {
+					const float z = grid[static_cast<std::size_t>(y + W) * M + (x + W)];
+					navFloor[static_cast<std::size_t>(y) * N + x] = z == NONE ? NO_GROUND : z;
+				}
+		}
+		// Indoors, a rock top level with ground beside it is a step's edge: ground. Outdoors left as tuned
+		// shortcut: indoors only; outdoor ledges may want it too, test them before widening it
+		if (a_job.interior) {
+			const std::vector<uint8_t> rockFlags(flags);
+			for (int32_t y = 1; y < N - 1; y++)
+				for (int32_t x = 1; x < N - 1; x++) {
+					const std::size_t i = static_cast<std::size_t>(y) * N + x;
+					if (!(rockFlags[i] & ROCK))
+						continue;
+					bool edge = false;
+					for (int32_t dy = -1; dy <= 1 && !edge; dy++)
+						for (int32_t dx = -1; dx <= 1 && !edge; dx++) {
+							const std::size_t j = static_cast<std::size_t>(y + dy) * N + (x + dx);
+							edge = !(rockFlags[j] & ROCK) && heights[j] > NO_GROUND && std::abs(heights[j] - heights[i]) <= STEP_EDGE;
+						}
+					if (edge) {
+						flags[i] = 0;
+						steepTop[i] = 0;
+					}
+				}
+		}
 		// Steep: rising on both sides along an axis (a slope, not a ledge's single step), or a steep landscape mesh face
 		const auto finish = [&](const std::vector<float>& a_heights, std::size_t i, uint32_t a_flag, bool a_steepFace) {
 			for (const std::size_t step : { std::size_t{ 1 }, static_cast<std::size_t>(N) }) {
@@ -852,6 +977,30 @@ namespace FluidFieldSim
 				a_flag |= PROVISIONAL;
 			return static_cast<float>(a_flag);
 		};
+		if (navmeshed) {
+			// One level: the navmesh's floor, at a mesh floor's exact height where one lies near it
+			std::vector<float> plane(navFloor);
+			for (std::size_t i = 0; i < plane.size(); i++) {
+				if (plane[i] <= NO_GROUND)
+					continue;
+				float nearest = NAVMESH_REACH;
+				for (const auto& [height, flag] : { std::pair{ heights[i], flags[i] }, std::pair{ lower[i], lowerFlags[i] } })
+					if (height > NO_GROUND && !(flag & ROCK) && std::abs(height - navFloor[i]) < nearest) {
+						nearest = std::abs(height - navFloor[i]);
+						plane[i] = height;
+					}
+			}
+			for (int32_t y = 0; y < static_cast<int32_t>(TILE_TEXELS); y++)
+				for (int32_t x = 0; x < static_cast<int32_t>(TILE_TEXELS); x++) {
+					const std::size_t i = static_cast<std::size_t>(y + 1) * N + (x + 1);
+					float* out = &o_texels[(static_cast<std::size_t>(y) * TILE_TEXELS + x) * 4];
+					out[0] = plane[i];
+					out[1] = plane[i] > NO_GROUND ? finish(plane, i, 0, false) : 0.0f;
+					out[2] = NO_GROUND;
+					out[3] = 0.0f;
+				}
+			return;
+		}
 		// The floors' slopes against their neighbours' floors, or their tops where those have none
 		std::vector<float> floors(lower);
 		for (std::size_t i = 0; i < floors.size(); i++)

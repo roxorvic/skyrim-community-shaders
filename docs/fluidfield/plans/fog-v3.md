@@ -581,6 +581,11 @@ and mines.
     - per-kind amounts (thicker in barrows and caves, thin in Dwemer ruins) as data, not code.
 - **Lighting:** no sun or sky in interiors. Local lights carry it (torches, braziers), plus the cell's ambient light.
 - **Look:** a per-kind tint and density, with the dungeon list in JSON next to the weather rules from item 11.
+- **Deviation (Victor, 2026-11-19): indoors, one plane of fog on the navmesh.** Mesh-only ground took boulder, pillar and
+  altar tops for floor, missed floors under balconies (no underside found) and turned step edges into rock. Where the cell
+  has a navmesh, each column's ground is its **lowest** navmesh floor (widened up to 48 units into the gaps the navmesh
+  leaves at walls and props, snapped to a mesh floor within reach); one level, no lower level indoors. Upper galleries and
+  walkways get no fog; stairs can't take it from floors. Cells without a navmesh keep the mesh tiles.
 
 **Accept:**
 
@@ -858,6 +863,11 @@ brightness:
 
 - No colour or brightness step where our fog meets EHF, at noon, at dusk and at night.
 - Victor's judgement on the near look, which should still read as our fog's lighting.
+
+**Note (Victor's question, 2026-11-19):** with Physical Sky's shared volume on, our fog could take its light from the
+volume's light pass (sun, moons, sky and, with EHF's volumetric fog, local lights with their shadows) instead of our own
+pick; the grid is too coarse to place the fog but fine for light, which varies smoothly. Our own lighting stays as the
+fallback. Explore after 18/18b/20.
 
 ### 20. The shared volume takes over the distant layer (rewritten 2026-11-19)
 

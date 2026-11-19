@@ -40,12 +40,13 @@ cbuffer GroundFogCB : register(b0)
 	float VLIntensity;
 	uint HasSunShadow;    // Volumetric Shadows' shared shadow map is in: sun shadows in the fog
 	uint HasSky;          // Skylighting's probes are in: sky light in the fog
-	uint LocalLights;     // Light Limit Fix's lights glowing in the fog: 0 off, 1 the nearest few, 2 all in the cluster
+	uint LocalLights;     // Lights glowing in the fog (FogLights): 0 off, 1 the closest 4, 2 the closest 8
 	uint HasSceneShadow;  // The game's sun shadow cascades are in (t23): actors' shadows near the camera (4d)
 	float3 VLColour;      // Volumetric Lighting's own colour
 	uint HasVL;           // Volumetric Lighting is on: the fog's sun takes its colour, phase and strength
 	uint HasHistory;      // Last frame's fog is valid to blend with (TEMPORAL)
-	float3 HistoryPad;
+	uint LightCount;      // FogLights this frame
+	float2 HistoryPad;
 };
 
 Texture2D<float> DepthTexture : register(t0);
@@ -70,14 +71,13 @@ SamplerState LinearSampler : register(s0);
 SamplerState WrapSampler : register(s1);
 SamplerComparisonState ShadowSampler : register(s2);
 
-// The lighting CS already has: the sun's shadow (Volumetric Shadows, t18 and t98), the sky's visibility (Skylighting, t14),
-// local lights (Light Limit Fix, t35 to t37); and its colour helpers, which match Linear Lighting
+// The lighting CS already has: the sun's shadow (Volumetric Shadows, t18 and t98), the sky's visibility (Skylighting, t14);
+// and its colour helpers, which match Linear Lighting
 #include "Common/ColorManagement.hlsli"
 #define SKYLIGHTING_PROBE_REGISTER t14
 #include "Skylighting/Skylighting.hlsli"
 #define VOLUMETRIC_SHADOWS
 #include "Common/ShadowSampling.hlsli"
-#include "LightLimitFix/LightLimitFix.hlsli"
 #if !defined(COMPOSITE) && !defined(TOP) && !defined(TEMPORAL)
 RWTexture2D<float4> FogHalf : register(u0);
 RWTexture2D<float> FogHalfDistance : register(u1);
@@ -102,12 +102,11 @@ static const float SUN_MULTIPLE = 0.06;
 /** Local lights in the fog: their strength; how far their glow reaches past their radius and its blend with their own
  * falloff (a softer, wider glow); the most one light gives (as a share of its colour). */
 static const float LOCAL_STRENGTH = 0.5;
-static const float GLOW_REACH = 1.5;
-static const float GLOW_SHARE = 0.6;
+static const float GLOW_REACH = 1.0;  // Light Limit Fix lists a light only within its radius: a glow past it cut off square at cluster edges
+static const float GLOW_SHARE = 0.7;
 static const float GLOW_CAP = 0.6;
 /** Local lights: the nearest few at the low setting, at most this many at the high one. */
 static const uint FEW_LIGHTS = 4;
-static const uint MANY_LIGHTS = 32;
 /** Sun's share of the fog's light: low ground fog is mostly sky-lit; more with Volumetric Lighting on, per its intensity (4e). */
 static const float SUN_SHARE = 0.17;
 static const float VL_SUN_SHARE = 0.2;
@@ -283,7 +282,9 @@ static const uint TOP_PROBES = 8;
 int2 TopMin()
 {
 	const int perCell = int(LAND_CELL / TOP_TEXEL);
-	return LandCell * perCell + perCell / 2 - TOP_TEXELS / 2;
+	// Indoors there is no landscape cell (item 9: LandCell is a far-off sentinel): round the camera's
+	const int2 centre = SharedData::InInterior ? int2(floor(FrameBuffer::CameraPosAdjust.xy / LAND_CELL)) : LandCell;
+	return centre * perCell + perCell / 2 - TOP_TEXELS / 2;
 }
 
 /** The fog's highest top over the mip texel holding xy. */
@@ -464,13 +465,24 @@ float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float
 	[unroll] for (uint k = 0; k < 4; k++)
 	{
 		const int2 offset = int2(k & 1, k >> 1);
-		const uint3 texel = uint3(uint2(base + offset) & mask, level);
-		const float4 a = DrawA[texel];
+		// Of each cell's levels, the one whose floor is this floor: a neighbour can hold it as its other level (under a structure
+		// over it, item 9), as the sim's flow matches them (Target). Cells under rocks and logs come filled from their ground
+		// neighbours (the cell pass); one with no floor near this one holds no fog here (ledges stay sharp)
 		const float bilinear = (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y);
-		// Cells under rocks and logs come filled from their ground neighbours (the cell pass); one with no floor at all on
-		// this level holds no fog. One a level away is dropped (ledges stay sharp)
-		const float w = bilinear * (a.x > NO_FLOOR && abs(a.x - g.x) < LEVEL_STEP ? 1.0 : 0.0);
-		const float4 b = DrawB[texel];
+		float4 a = float4(NO_FLOOR, 0.0, 0.0, 0.0), b = 0.0;
+		float nearestGap = LEVEL_STEP;
+		[unroll] for (uint m = 0; m < 2; m++)
+		{
+			const uint3 texel = uint3(uint2(base + offset) & mask, m);
+			const float4 candidate = DrawA[texel];
+			const float gap = abs(candidate.x - g.x);
+			if (candidate.x > NO_FLOOR && gap < nearestGap) {
+				nearestGap = gap;
+				a = candidate;
+				b = DrawB[texel];
+			}
+		}
+		const float w = bilinear * (a.x > NO_FLOOR ? 1.0 : 0.0);
 		floorSum += a.x * w;
 		column += float4(a.y, a.zw, b.x) * w;
 		extra += float4(b.y, b.z, UnpackLight(b.w)) * w;
@@ -639,23 +651,29 @@ float SkyVisibility(float3 positionCR)
 	return Skylighting::MixDiffuse(Skylighting::EvaluateVisibility(Skylighting::SampleNoBias(positionCR), Skylighting::GetFadeOutFactor(positionCR)));
 }
 
-/** Local lights (Light Limit Fix's clusters) at a camera-relative point seen at uv: the nearest few or all in its cluster. */
-float3 LocalLight(float3 positionCR, float2 uv)
+/** A light glowing in the fog (FluidFieldGroundFog::FogLight): the scene's closest to the camera, picked on the CPU. */
+struct FogLight
 {
-	uint clusterIndex = 0;
-	if (LocalLights == 0 || !LightLimitFix::GetClusterIndex(uv, length(positionCR), clusterIndex))
-		return 0.0;
-	const LightLimitFix::LightGrid grid = LightLimitFix::lightGrid[clusterIndex];
-	const uint count = min(grid.lightCount, LocalLights == 1 ? FEW_LIGHTS : MANY_LIGHTS);
+	float3 Position;  // Camera-relative
+	float Radius;
+	float3 Colour;  // Working space, times its fade and its share at the pick's cut
+	float Pad;
+};
+StructuredBuffer<FogLight> FogLights : register(t35);
+
+/** The local lights at a camera-relative point. */
+float3 LocalLight(float3 positionCR)
+{
 	float3 sum = 0.0;
-	[loop] for (uint i = 0; i < count; i++)
+	[loop] for (uint i = 0; i < LightCount; i++)
 	{
-		const LightLimitFix::Light light = LightLimitFix::lights[LightLimitFix::lightList[grid.offset + i]];
-		const float distance = length(light.positionWS.xyz - positionCR);
-		const float edge = saturate(1.0 - distance / (light.radius * GLOW_REACH));
+		const FogLight light = FogLights[i];
+		const float distance = length(light.Position - positionCR);
+		const float reach = saturate(distance / max(light.Radius, 1e-3));
+		const float edge = saturate(1.0 - distance / (light.Radius * GLOW_REACH));
 		const float glow = edge * edge;
-		const float falloff = min(lerp(LightLimitFix::GetAttenuation(distance, light), glow, GLOW_SHARE), GLOW_CAP);
-		sum += Color::PointLight(light.color) * falloff * LOCAL_STRENGTH;
+		const float falloff = min(lerp(1.0 - reach * reach, glow, GLOW_SHARE), GLOW_CAP);
+		sum += Color::PointLight(light.Colour) * falloff * LOCAL_STRENGTH;
 	}
 	return sum;
 }
@@ -807,7 +825,7 @@ float4 FogOverRay(float depth, float2 uv, float2 pixel)
 	float4 near = float4(nearHalf.rgb + nearHalf.a * farHalf.rgb, nearHalf.a * farHalf.a);
 	// Local lights: once a ray, where the fog along it scatters most
 	if (LocalLights != 0 && where.w > 1e-4)
-		near.rgb += Albedo * LocalLight(where.xyz / where.w, uv) * (1.0 - near.a);
+		near.rgb += Albedo * LocalLight(where.xyz / where.w) * (1.0 - near.a);
 	return float4(near.rgb + near.a * none.rgb, near.a * none.a);
 }
 
