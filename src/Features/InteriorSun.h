@@ -92,6 +92,7 @@ public:
 		int ShadowGapTexels = 2;
 		bool FrameShadowsFromGlowMaps = true;
 		float GlowMapThreshold = 0.5f;
+		bool SunColorFromWeather = true;
 	};
 
 	Settings settings;
@@ -416,6 +417,7 @@ private:
 
 	/** @brief Lights the glass from the sky's colour while the cell has the sun. */
 	void UpdateSkyLitGlass();
+	void UpdateSunColor();
 
 	void ReleaseWindowGlass();
 
@@ -444,6 +446,9 @@ private:
 	bool lastFrameShadows = true;
 	bool lastHideFakeGlows = true;
 	bool lastSunFacing = true;
+	bool lastInteriorWithSun = false;
+	RE::NiColor engineSunColor{}, writtenSunColor{};  // the cell's own sun colour, and what we last wrote over it
+	bool sunColorWritten = false;
 	bool forceHolesUpload = false;
 	bool heliosLoaded = false;  // Helios drives window glow itself, so Sky-Lit Glass stands down
 };

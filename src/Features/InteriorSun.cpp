@@ -24,7 +24,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	CloseShadowGaps,
 	ShadowGapTexels,
 	FrameShadowsFromGlowMaps,
-	GlowMapThreshold)
+	GlowMapThreshold,
+	SunColorFromWeather)
 
 namespace
 {
@@ -204,6 +205,12 @@ void InteriorSun::DrawSettings()
 							  "Each moment, lets the sun in only through windows and openings that face it. "
 							  "Sun could never enter through a window it is behind, and opening one lets thin slivers of light onto the beams and walls along its line."));
 	}
+	ImGui::Checkbox(T(TKEY("sun_color_from_weather"), "Sun Colour From Weather"), &settings.SunColorFromWeather);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("sun_color_from_weather_tooltip"),
+							  "Sunlit interiors take the sun's colour and brightness from the weather, as outside, "
+							  "instead of from the cell's own lighting, which is often dim or grey in dungeons."));
+	}
 	ImGui::Checkbox(T(TKEY("close_shadow_gaps"), "Close Shadow Gaps"), &settings.CloseShadowGaps);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("close_shadow_gaps_tooltip"),
@@ -231,6 +238,11 @@ void InteriorSun::DrawDebugSection()
 	ImGui::Text(T(TKEY("debug_fake_glows"), "Fake window glows hidden: %u"), static_cast<uint32_t>(hiddenFakeGlows.size()));
 	ImGui::Text(T(TKEY("debug_glass_emissives"), "Glowing glass shapes: %u"), static_cast<uint32_t>(glassEmissives.size()));
 	ImGui::Text(T(TKEY("debug_auto_sunlit"), "Interiors given the sun automatically: %u"), static_cast<uint32_t>(autoSunlitCells.size()));
+	if (const auto shadowSceneNode = globals::game::smState->shadowSceneNode[0]; shadowSceneNode && shadowSceneNode->GetRuntimeData().sunLight) {
+		const auto& light = shadowSceneNode->GetRuntimeData().sunLight->light->GetLightRuntimeData();
+		ImGui::Text(T(TKEY("debug_sun_color"), "Sun colour now: %.2f %.2f %.2f, fade %.2f (cell's own: %.2f %.2f %.2f)"), light.diffuse.red, light.diffuse.green, light.diffuse.blue, light.fade,
+			engineSunColor.red, engineSunColor.green, engineSunColor.blue);
+	}
 	ImGui::Text(T(TKEY("debug_shadow_gaps"), "Sun cascades with gaps closed last frame: %u"), shadowGapsClosedLastFrame);
 	ImGui::Text(T(TKEY("debug_holes_open"), "Open now (facing the sun): glass %u of %u, openings %u of %u"), holesOpenGlass, static_cast<uint32_t>(windowGlassRuns.size()), holesOpenOpenings, static_cast<uint32_t>(windowOpeningRuns.size()));
 	ImGui::Text(T(TKEY("debug_panes_placed"), "Panes placed: %u by the open side, %u by the nearer side, %u away from the room's centre"), panesPlacedBy[0], panesPlacedBy[1], panesPlacedBy[2]);
@@ -405,6 +417,7 @@ void InteriorSun::EarlyPrepass()
 	if (!settings.HideFakeWindowGlows || !isInteriorWithSun)
 		RestoreFakeGlows();
 	UpdateSkyLitGlass();
+	UpdateSunColor();
 
 	// The shadow maps were drawn just before this callback, casters included
 	if (debugShowHoleBeams && !holeTargetsThisFrame.empty())
@@ -417,7 +430,7 @@ void InteriorSun::EarlyPrepass()
 		forceHolesUpload = true;
 		lastOpenMask.clear();
 	}
-	if (settings.DetectOpenings != lastDetectOpenings || settings.FrameShadowsFromGlowMaps != lastFrameShadows || settings.HideFakeWindowGlows != lastHideFakeGlows) {
+	if (settings.DetectOpenings != lastDetectOpenings || settings.FrameShadowsFromGlowMaps != lastFrameShadows || settings.HideFakeWindowGlows != lastHideFakeGlows || (isInteriorWithSun && !lastInteriorWithSun)) {
 		lastDetectOpenings = settings.DetectOpenings;
 		lastFrameShadows = settings.FrameShadowsFromGlowMaps;
 		lastHideFakeGlows = settings.HideFakeWindowGlows;
@@ -428,6 +441,8 @@ void InteriorSun::EarlyPrepass()
 		windowGlassCellFrames = 0;
 		forceHolesUpload = true;
 	}
+
+	lastInteriorWithSun = isInteriorWithSun;
 
 	// Holes drawn into the maps make gap closing needless
 	shadowGapsClosedLastFrame = 0;
@@ -1001,6 +1016,29 @@ void InteriorSun::UpdateSkyLitGlass()
 		entry.property->emissiveMult = settings.SkyLitGlassStrength;
 	}
 	glassEmissivesLit = true;
+}
+
+void InteriorSun::UpdateSunColor()
+{
+	const auto shadowSceneNode = globals::game::smState->shadowSceneNode[0];
+	const auto sunLight = shadowSceneNode ? shadowSceneNode->GetRuntimeData().sunLight : nullptr;
+	if (!sunLight || !sunLight->light)
+		return;
+	auto& diffuse = sunLight->light->GetLightRuntimeData().diffuse;
+	// Anything other than our last write is the engine's own colour (it sets it from the cell's lighting)
+	if (!sunColorWritten || diffuse != writtenSunColor)
+		engineSunColor = diffuse;
+
+	const auto sky = RE::Sky::GetSingleton();
+	if (!settings.SunColorFromWeather || !isInteriorWithSun || !sky) {
+		if (sunColorWritten && diffuse == writtenSunColor)
+			diffuse = engineSunColor;
+		sunColorWritten = false;
+		return;
+	}
+	diffuse = sky->skyColor[static_cast<uint32_t>(RE::TESWeather::ColorTypes::kSunlight)];
+	writtenSunColor = diffuse;
+	sunColorWritten = true;
 }
 
 void InteriorSun::ReleaseWindowGlass()
