@@ -417,6 +417,12 @@ private:
 
 	/** @brief Lights the glass from the sky's colour while the cell has the sun. */
 	void UpdateSkyLitGlass();
+	/**
+	 * @brief In sunlit interiors, overwrites the sun light's diffuse every frame with the weather's sunlight colour.
+	 * Indoors the engine sets the sun (and the sky's sunlight colour) from the cell's lighting record, a faint fill
+	 * light that left dungeons with a dim grey sun. Anything else writing the sun colour indoors is overwritten here;
+	 * Sun Colour From Weather off restores the engine's.
+	 */
 	void UpdateSunColor();
 
 	void ReleaseWindowGlass();
