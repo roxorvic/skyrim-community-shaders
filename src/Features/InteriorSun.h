@@ -13,7 +13,7 @@ public:
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
 		return { T("feature.interior_sun.description", "Allows for the sun and moon to cast light and shadows into interior spaces."),
-			{ T("feature.interior_sun.key_feature_1", "Functions only for explicitly enabled interiors"),
+			{ T("feature.interior_sun.key_feature_1", "Lets the sun in only through windows and openings, so it does not leak through walls"),
 				T("feature.interior_sun.key_feature_2", "Utilizes existing sun, moon, and weather systems"),
 				T("feature.interior_sun.key_feature_3", "Includes an option to force double-sided rendering for unprepared interiors"),
 				T("feature.interior_sun.key_feature_4", "Fixes geometry culling issues that cause light leakage") } };
@@ -35,20 +35,9 @@ public:
 	virtual void ClearShaderCache() override;
 	virtual bool HasDebugSection() const override { return true; }
 	virtual void DrawDebugSection() override;
-	/** @brief Debug view: every hole and rejected candidate tinted on screen. */
+	/** @brief Debug view: the traced sun ray and the shapes it crosses. */
 	virtual void DrawOverlay() override;
-	virtual bool IsOverlayVisible() const override { return debugShowHoles || traceValid; }
-	bool debugShowHoles = false;
-	bool debugAllRoomsCast = false;
-	bool debugAllCastersTwoSided = false;  // test: every sun caster double-sided, whatever its flags
-	// Sun shadow-map draws seen by the double-sided switch this frame, and those it kept one-sided (per reason)
-	mutable std::atomic<uint32_t> sunCasterPasses = 0;
-	mutable std::atomic<uint32_t> sunCasterPassesGlassFlag = 0;
-	mutable std::atomic<uint32_t> sunCasterPassesSkinned = 0;
-	uint32_t sunCasterPassesLast[3] = {};
-	uint32_t shellShapesNoCastFlag = 0;
-	uint32_t shellShapesGlassFlag = 0;
-	uint32_t shellShapes = 0;
+	virtual bool IsOverlayVisible() const override { return traceValid; }
 
 	/** @brief One shape the traced sun ray crosses. Kind: 0 glass, 1 opening, 2 rejected see-through shape, 3 solid. */
 	struct TraceHit
@@ -63,10 +52,8 @@ public:
 	std::string traceStartWhat;
 	std::vector<TraceHit> traceHits;
 
-	/** @brief Debug: from the point under the crosshair, follows the sun's ray outward and records every shape it crosses. */
-	void TraceSunFromCrosshair();  // every room of the cell into the sun's shadow maps, not only those toward the sun
-	uint32_t roomsAddedLastFrame = 0;
-	uint32_t roomsInCell = 0;
+	/** @brief Debug: from the point under the crosshair, lists every shape along the sun's ray, both ways (what lets a leak through). */
+	void TraceSunFromCrosshair();
 
 	/** @brief Registers the menu open/close event handler for tracking main menu state. */
 	virtual void DataLoaded() override
@@ -136,11 +123,7 @@ public:
 	{
 		if (isInteriorWithSun && settings.ForceDoubleSidedRendering && technique & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmap)) {
 			const auto flags = pass->shaderProperty->flags;
-			auto renderTwoSided = flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) || flags.none(RE::BSShaderProperty::EShaderPropertyFlag::kAssumeShadowmask, RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
-			++sunCasterPasses;
-			if (!renderTwoSided)
-				++(flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kSkinned) ? sunCasterPassesSkinned : sunCasterPassesGlassFlag);
-			renderTwoSided = renderTwoSided || debugAllCastersTwoSided;
+			const auto renderTwoSided = flags.all(RE::BSShaderProperty::EShaderPropertyFlag::kTwoSided) || flags.none(RE::BSShaderProperty::EShaderPropertyFlag::kAssumeShadowmask, RE::BSShaderProperty::EShaderPropertyFlag::kSkinned);
 			if (renderTwoSided && *rasterStateCullMode != 0) {
 				*rasterStateCullMode = 0;
 				globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_RASTER_CULL_MODE);
@@ -263,7 +246,7 @@ private:
 		bool opening = false;
 	};
 
-	/** @brief One glass shape, for the debug views. */
+	/** @brief One glass shape, for the sun trace. */
 	struct GlassShape
 	{
 		RE::FormID ref;
@@ -278,17 +261,13 @@ private:
 	struct OpeningScan
 	{
 		RE::TESObjectCELL* cell = nullptr;
-		std::vector<float3> occluders;           // triangle list of everything that blocks light
+		std::vector<float3> occluders;           // triangle list of everything that blocks light; freed once tested
 		std::vector<uint32_t> occluderShapes;    // first triangle of each occluder shape, plus the end
-		std::vector<std::string> occluderNames;  // per occluder shape: ref, mesh and shape, for the sun trace
-		uint32_t occludersNoCastFlag = 0;
-		uint32_t occludersGlassFlag = 0;
 		std::vector<float3> candidateTriangles;  // triangle list of the candidates
 		std::vector<float2> candidateUVs;
 		std::vector<float3> glassTriangles;                      // the glass, to find which way each pane faces outward
 		std::vector<std::pair<uint32_t, uint32_t>> glassShapes;  // first and count per pane
 		std::vector<float3> glassOutward;                        // result per pane; zero when the test can't tell
-		std::vector<uint8_t> glassMethod;                        // how each pane was placed: 0 open side, 1 nearer side, 2 away from the room's centre
 		std::vector<OpeningCandidate> candidates;
 		std::vector<float3> openings;  // result: triangle list of the shapes found to be openings
 		std::vector<float2> openingUVs;
@@ -311,11 +290,6 @@ private:
 	uint32_t windowGlassShapes = 0;
 	uint32_t windowGlassShapesSkipped = 0;
 	uint32_t windowHolesDrawn = 0;
-	uint32_t windowHolesDrawnLastFrame = 0;
-	uint32_t windowHolesTargetMismatches = 0;
-	// Holes drawn per depth target, this frame and the last: the sun cascades and volumetric lighting's maps apart
-	std::array<uint32_t, RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL> windowHolesByTarget{};
-	std::array<uint32_t, RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL> windowHolesByTargetLastFrame{};
 	float windowGlassScanMilliseconds = 0.0f;
 
 	std::shared_ptr<OpeningScan> openingScan;  // in flight or finished; dropped on leaving the cell
@@ -332,8 +306,6 @@ private:
 	std::vector<RE::NiPointer<RE::NiAVObject>> hiddenFakeGlows;
 	std::vector<GlassEmissive> glassEmissives;
 	std::unordered_map<RE::TESObjectCELL*, uint16_t> autoSunlitCells;  // cells given the sun, with their own flags to restore
-	RE::TESObjectCELL* debugSunCell = nullptr;                         // given the sun from the debug section until left; its own flags below
-	uint16_t debugSunCellFlags = 0;
 
 	struct alignas(16) ShadowGapsCB
 	{
@@ -347,7 +319,6 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> shadowGapsMinCS[2];  // plain and array shadow textures
 	winrt::com_ptr<ID3D11VertexShader> shadowGapsVS;
 	winrt::com_ptr<ID3D11PixelShader> shadowGapsPS;
-	uint32_t shadowGapsClosedLastFrame = 0;
 
 	/** @brief Closes slivers of light in the sun cascades of a sunlit interior that has no window holes. */
 	void CloseShadowGaps();
@@ -357,8 +328,6 @@ private:
 	std::vector<HoleDraw> windowGlassRuns;   // per glass shape, in windowGlassVertices
 	std::vector<float3> windowGlassOutward;  // per glass shape, from the shell test
 	std::vector<uint8_t> lastOpenMask;       // which holes were open at the last upload, glass then openings
-	uint32_t holesOpenGlass = 0, holesOpenOpenings = 0;
-	uint32_t panesPlacedBy[3] = {};  // open side, nearer side, room centre
 
 	// Per sun cascade, the plane of the window each shadow-map texel's light came through (outward xyz, offset w)
 	static constexpr uint32_t WindowPlaneSize = 1024;
@@ -395,6 +364,9 @@ private:
 	void UpdateWindowGlass(RE::TESObjectCELL* cell);
 
 	void CollectWindowGlass(RE::TESObjectCELL* cell);
+
+	/** @brief Copies the cell's solid static geometry into the scan, for the shell test's rays; names each shape when asked (sun trace). */
+	static void CollectOccluders(RE::TESObjectCELL* cell, OpeningScan& scan, std::vector<std::string>* names = nullptr);
 
 	/** @brief Rebuilds the GPU triangle list from the glass and the openings found so far. */
 	void UploadWindowHoles(const RE::TESObjectCELL* cell);
@@ -433,27 +405,13 @@ private:
 	/** @brief Draws the holes into the bound depth target with the given camera data; puts back every state it changes. */
 	void DrawHolesInto(WindowHolesCB data, const D3D11_VIEWPORT& viewport);
 
-	/** @brief One sun shadow map given holes this frame, kept so the debug view can draw them again after the casters. */
-	struct HoleTarget
-	{
-		ID3D11DepthStencilView* dsv;  // the engine's view, alive for the session
-		float4x4 viewProj;
-		float3 posAdjust;
-		D3D11_VIEWPORT viewport;
-	};
-	std::vector<HoleTarget> holeTargetsThisFrame;
-	bool debugShowHoleBeams = false;
-
-	/** @brief Debug view: the holes drawn again over the casters, so every hole lets the sun straight through. */
-	void DrawHoleBeams();
-
 	// Settings whose change needs the cell scanned or the holes rebuilt again
 	bool lastDetectOpenings = true;
 	bool lastFrameShadows = true;
 	bool lastHideFakeGlows = true;
 	bool lastSunFacing = true;
 	bool lastInteriorWithSun = false;
-	RE::NiColor engineSunColor{}, writtenSunColor{}, skySunColor{};  // the cell's own sun colour, and what we last wrote over it
+	RE::NiColor engineSunColor{}, writtenSunColor{};  // the cell's own sun colour, and what we last wrote over it
 	bool sunColorWritten = false;
 	bool forceHolesUpload = false;
 	bool heliosLoaded = false;  // Helios drives window glow itself, so Sky-Lit Glass stands down
