@@ -9,6 +9,7 @@
 
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/PreExposure.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "FluidField/LandMap.hlsli"
@@ -1119,6 +1120,7 @@ static const float BLUR_SPREAD = 1.2;
 	if (fog.a >= 0.999)
 		return;
 	const float4 scene = MainRW[dispatchID.xy];
-	MainRW[dispatchID.xy] = float4(scene.rgb * fog.a + fog.rgb, scene.a);
+	// The scene is stored pre-exposed (Linear Lighting); the fog is lit in plain radiance
+	MainRW[dispatchID.xy] = float4(scene.rgb * fog.a + PreExposure::Encode(fog.rgb), scene.a);
 }
 #endif
