@@ -144,7 +144,7 @@ static const float RISE = 12.0;
 /** How much the top rises and falls with the noise in fog Pool Depth deep (puff by depth). */
 static const float BILLOW = 0.45;
 /** How much the top rises at full churn (LIFT_SPEED). */
-static const float LIFT = 0.8;
+static const float LIFT = 0.35;  // A little: stirred fog rises to about waist height next to the mover, not over it
 static const float LIFT_SPEED = 60.0;
 /** Share of the fog's height over which it breaks into clumps, and how deep the clumps' gaps go. */
 static const float CLUMPING = 0.7;
@@ -392,6 +392,9 @@ static float groundError = 0.0;
 
 /** Indoors, a cell this far under the highest round it is another pool (a drop), not blended into this one's top. */
 static const float INDOOR_DROP = 64.0;
+/** Indoors the fog reaches down to the geometry, but at most this far under its layer's bottom, fading out: treads under the
+ * stairs' ramp keep it, a drop's face does not get a curtain of it. */
+static const float INDOOR_BELOW = 24.0;
 
 /** A mean floor this low: the level has none there. */
 static const float NO_FLOOR = -1.0e6;
@@ -632,6 +635,9 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 	const float height = indoors ? max(position.z - ground, 0.0) : position.z - ground;
 	if (height < 0.0 || height > MaxDepth * FLUFF_REACH)
 		return 0.0;
+	const float below = indoors ? saturate(1.0 - (ground - position.z) / INDOOR_BELOW) : 1.0;
+	if (below <= 0.0)
+		return 0.0;
 	const float depth = column.x;
 	if (depth <= 0.5 || height > depth * FLUFF_REACH)
 		return 0.0;
@@ -651,7 +657,7 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 	// The fog's own depth over it, not the lifted top (lifted wisps and clumps are thin: counted whole, wakes went dark);
 	// 4c: at least the undisturbed fog's (the settled depth), so a wake or stir is shaded as the fog round it, not lit up
 	shading = max(max(min(depth, top), settled) - height, 0.0);
-	return Density * carries * max(body, wisps) * Uncut(position) * Banks(position.xy) * RainHoles(position, ground);
+	return Density * carries * max(body, wisps) * below * Uncut(position) * Banks(position.xy) * RainHoles(position, ground);
 }
 
 /**

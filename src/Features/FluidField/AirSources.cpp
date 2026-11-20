@@ -15,7 +15,7 @@ namespace FluidFieldSim
 		/** @brief Faster than this between two steps is a teleport, not movement. */
 		constexpr float MAX_SPEED = 1500.0f;
 		/** @brief Share of a body part's own velocity it gives the fog round it, at strength 1. */
-		constexpr float PUSH_SHARE = 0.35f;
+		constexpr float PUSH_SHARE = 0.08f;  // Little along the motion: actors part the fog to the sides rather than ploughing it
 		/** @brief Speed at which an actor's shove on the fog is whole (a run). */
 		constexpr float FULL_SHOVE_SPEED = 350.0f;
 		/** @brief Parts higher than this above the feet are above the ground fog. */

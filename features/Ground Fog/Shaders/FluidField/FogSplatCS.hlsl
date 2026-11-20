@@ -1,6 +1,6 @@
 // Ground fog v3 (D194): draws this step's movers into the force texture, one group per mover over its own footprint, so
-// the cost follows the area moved through rather than the grid. Each mover pushes the fog along its motion and shoves it
-// out from its line (mostly ahead and sideways), and may cut it. D195: into the level it stands in, the one whose floor
+// the cost follows the area moved through rather than the grid. Each mover pushes the fog a little along its motion and
+// shoves it out to its sides (a parting trail), and may cut it. D195: into the level it stands in, the one whose floor
 // is nearest under its feet; a mover above a level's fog leaves it alone.
 
 #define FOG_BEDS t1
@@ -54,11 +54,12 @@ static const float ABOVE_FOG = 80.0;
 			if (m.Bottom > floorHeight + ABOVE_FOG || m.Top < floorHeight)
 				continue;
 
-			// d/r * exp(-(d/r)^2) peaks at 1/sqrt(2) of the radius; scaled so the peak is the shove. Little behind the mover
+			// d/r * exp(-(d/r)^2) peaks at 1/sqrt(2) of the radius; scaled so the peak is the shove. A moving mover parts the fog to
+			// its sides (Victor: a parting trail; shoved ahead it piled and lifted in front); a still one (a blast) shoves round
 			const float distance = sqrt(distance2);
 			const float2 outward = d / max(distance, 1e-3);
-			const float bow = 0.25 + 0.75 * saturate(dot(outward, heading) * 0.5 + 0.6);
-			const float2 push = (m.Velocity * g + outward * m.Shove * bow * 2.33 * (distance / r) * g) * spread;
+			const float2 side = speed > 0.0 ? outward - heading * dot(outward, heading) : outward;
+			const float2 push = (m.Velocity * g + side * m.Shove * 2.33 * (distance / r) * g) * spread;
 			InterlockedAdd(Force[uint3(s, level * 3 + 0)], int(round(push.x * FORCE_SCALE)));
 			InterlockedAdd(Force[uint3(s, level * 3 + 1)], int(round(push.y * FORCE_SCALE)));
 			if (m.Cut > 0.0)
