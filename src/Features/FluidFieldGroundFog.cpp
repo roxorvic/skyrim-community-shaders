@@ -96,6 +96,8 @@ void FluidFieldGroundFog::DrawSettings()
 		tooltip(T(TKEY("samples_tooltip"), "Samples along each view ray through the fog. More: finer shadow edges and wakes, but the fog costs more, roughly in proportion."));
 		if (FluidFieldSim::LandscapeDepth::GetReach() > 0.0f)
 			ImGui::Text(T(TKEY("distant_reach_now"), "Distant fog reaches %.0f m"), DistantDistance() / 70.0f);
+		ImGui::Checkbox(T(TKEY("debug_navmesh"), "Show Navmesh"), &showNavmesh);
+		tooltip(T(TKEY("debug_navmesh_tooltip"), "Indoors, draws the cell's navmesh round you as lines (seen through walls): green level with your feet, blue below, yellow above. Fog lies on it."));
 		bool debugView = settings.DebugView == 1;
 		if (ImGui::Checkbox(T(TKEY("debug_ground"), "Show Ground Map"), &debugView))
 			settings.DebugView = debugView ? 1 : 0;
@@ -137,6 +139,53 @@ void FluidFieldGroundFog::LoadSettings(json& o_json)
 	settings.LocalLights = std::min(settings.LocalLights, 2u);
 	settings.Samples = std::clamp(settings.Samples, 12u, 64u);
 	settings.DebugView = std::min(settings.DebugView, 1u);
+}
+
+void FluidFieldGroundFog::DrawNavmeshOverlay()
+{
+	auto* tes = RE::TES::GetSingleton();
+	auto* cell = tes ? tes->interiorCell : nullptr;
+	auto* player = RE::PlayerCharacter::GetSingleton();
+	auto* playerCamera = RE::PlayerCamera::GetSingleton();
+	if (!showNavmesh || !cell || !player || !playerCamera || !playerCamera->cameraRoot)
+		return;
+	RE::NiCamera* camera = nullptr;
+	for (auto& child : playerCamera->cameraRoot->GetChildren())
+		if ((camera = netimmerse_cast<RE::NiCamera*>(child.get())))
+			break;
+	const auto* navmeshes = cell->GetRuntimeData().navMeshes;
+	if (!camera || !navmeshes)
+		return;
+	constexpr float REACH = 2000.0f;
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	const auto feet = player->GetPosition();
+	auto* drawList = ImGui::GetBackgroundDrawList();
+	for (const auto& mesh : navmeshes->navMeshes) {
+		if (!mesh)
+			continue;
+		const auto& vertices = mesh->vertices;
+		for (const auto& triangle : mesh->triangles) {
+			if (triangle.vertices[0] >= vertices.size() || triangle.vertices[1] >= vertices.size() || triangle.vertices[2] >= vertices.size())
+				continue;
+			const RE::NiPoint3 corners[3] = { vertices[triangle.vertices[0]].location, vertices[triangle.vertices[1]].location, vertices[triangle.vertices[2]].location };
+			const RE::NiPoint3 centre = (corners[0] + corners[1] + corners[2]) / 3.0f;
+			if (centre.GetDistance(feet) > REACH)
+				continue;
+			ImVec2 points[3];
+			bool visible = true;
+			for (int k = 0; k < 3 && visible; k++) {
+				float x = 0.0f, y = 0.0f, z = 0.0f;
+				visible = camera->WorldPtToScreenPt3(corners[k], x, y, z, 1e-5f) && z > 0.0f;
+				points[k] = ImVec2(x * display.x, (1.0f - y) * display.y);
+			}
+			if (!visible)
+				continue;
+			const float rise = centre.z - feet.z;
+			const ImU32 colour = std::abs(rise) < 64.0f ? IM_COL32(40, 230, 60, 200) : rise < 0.0f ? IM_COL32(60, 120, 255, 200) :
+			                                                                                         IM_COL32(255, 210, 40, 200);
+			drawList->AddTriangle(points[0], points[1], points[2], colour, 1.0f);
+		}
+	}
 }
 
 FluidFieldGroundFog::Settings FluidFieldGroundFog::ActiveSettings() const

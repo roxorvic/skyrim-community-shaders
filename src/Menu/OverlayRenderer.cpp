@@ -16,6 +16,7 @@
 #include "FeatureIssues.h"
 #include "Features/Effects11/Editor/Effects11Editor.h"
 #include "Features/Effects11/EffectManager.h"
+#include "Features/FluidFieldGroundFog.h"
 #include "Features/RenderDoc.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
@@ -325,6 +326,7 @@ void OverlayRenderer::RenderOverlay(
 		Util::Notifications::Draw();
 
 	RenderFeatureOverlays();
+	globals::features::fluidFieldGroundFog.DrawNavmeshOverlay();
 	RenderFirstTimeSetupOverlay();
 	HandleABTesting();
 	PatchOverlappingWindowBackgrounds();
@@ -353,7 +355,8 @@ bool OverlayRenderer::ShouldSkipRendering()
 			 effectFailed ||
 			 globals::features::performanceOverlay.settings.ShowInOverlay ||
 			 globals::features::performanceOverlay.settings.ShowWeatherPicker ||
-			 renderDoc->ShouldShowOverlay());
+			 renderDoc->ShouldShowOverlay() ||
+			 globals::features::fluidFieldGroundFog.showNavmesh);
 }
 
 void OverlayRenderer::HandleFontReload(Menu& menu, float& cachedFontSize, float currentFontSize)

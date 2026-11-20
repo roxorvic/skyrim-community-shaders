@@ -390,6 +390,9 @@ float Uncut(float3 position)
 static float3 rayEnd = 0.0;
 static float groundError = 0.0;
 
+/** Indoors, a cell this far under the highest round it is another pool (a drop), not blended into this one's top. */
+static const float INDOOR_DROP = 64.0;
+
 /** A mean floor this low: the level has none there. */
 static const float NO_FLOOR = -1.0e6;
 
@@ -411,6 +414,54 @@ float4 CellFog(float3 position, out bool o_inside, out float o_ground, out float
 	o_inside = fromEdge >= EDGE_BAND;
 	if (!o_inside)
 		return 0.0;
+	// Indoors (one level) only the fog's top bounds it: its cells' mean floor plus depth, blended (over stairs the mean floors
+	// ramp, so the layer climbs them; the bed, a cell's highest floor, made a flat pool the steps poked through); the rays stop at the
+	// geometry, so no floor bounds it from below (the 8-unit floor map held step edges as staircases of texels and cut the fog
+	// in notches along them, item 9). A cell more than INDOOR_DROP under the highest round it is another pool (a drop)
+	if (SharedData::InInterior) {
+		const int2 base = int2(floor(c));
+		const float2 f = c - float2(base);
+		const uint mask = Resolution - 1;
+		float surfaces[4], shares[4];
+		float4 columns[4], extras[4];
+		float highest = -1e30;
+		[unroll] for (uint k = 0; k < 4; k++)
+		{
+			const int2 offset = int2(k & 1, k >> 1);
+			const uint3 texel = uint3(uint2(base + offset) & mask, 0);
+			const float4 bed = Bed[texel];
+			const float4 a = DrawA[texel];
+			const float4 b = DrawB[texel];
+			const bool open = bed.z != 2.0 && a.x > NO_FLOOR;
+			surfaces[k] = open ? a.x + a.y : -1e30;
+			shares[k] = open ? (offset.x ? f.x : 1.0 - f.x) * (offset.y ? f.y : 1.0 - f.y) : 0.0;
+			columns[k] = float4(a.y, a.zw, b.x);
+			extras[k] = float4(b.y, b.z, UnpackLight(b.w));
+			highest = open ? max(highest, surfaces[k]) : highest;
+		}
+		float total = 0.0, surface = 0.0;
+		float4 column = 0.0, extra = 0.0;
+		[unroll] for (uint k2 = 0; k2 < 4; k2++)
+		{
+			const float w = surfaces[k2] >= highest - INDOOR_DROP ? shares[k2] : 0.0;
+			surface += surfaces[k2] * w;
+			column += columns[k2] * w;
+			extra += extras[k2] * w;
+			total += w;
+		}
+		if (total <= 1e-4)
+			return 0.0;
+		column /= total;
+		o_ground = surface / total - column.x;  // the layer's bottom, for its look: the fog is drawn down to the geometry
+		// Over a drop (the floor far under the layer's bottom), no fog hangs off the ledge
+		const float floorUnder = Texel(int2(floor(position.xy / TILE_TEXEL))).x;
+		if (floorUnder > NO_GROUND && floorUnder < o_ground - INDOOR_DROP)
+			return 0.0;
+		o_carries = extra.x / total;
+		o_settled = extra.y / total;
+		o_light = extra.zw / total;
+		return column;
+	}
 	// The floor under it: of the four nearest texels' levels, the highest at or under it (a single nearest texel flipped
 	// texel by texel under a log's or rock's curved side: combs). Rock and log tops are left out (the 8-unit map caught
 	// logs in stripes): under one with no floor under it, the bare landscape. Fog lies round and under them as the sim
@@ -574,8 +625,11 @@ float FogAt(float3 position, out float shading, out float upInLayer, out float2 
 	}
 	if (ground <= NO_GROUND)
 		return 0.0;
-	ground += groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
-	const float height = position.z - ground;
+	// Indoors the fog reaches down to the geometry (the rays stop there): under its layer's bottom counts as its bottom
+	const bool indoors = SharedData::InInterior && inside;
+	if (!indoors)
+		ground += groundError * exp(-distance(position.xy, rayEnd.xy) / GROUND_FIX_REACH);
+	const float height = indoors ? max(position.z - ground, 0.0) : position.z - ground;
 	if (height < 0.0 || height > MaxDepth * FLUFF_REACH)
 		return 0.0;
 	const float depth = column.x;

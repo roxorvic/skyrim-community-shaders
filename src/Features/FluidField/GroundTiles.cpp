@@ -58,9 +58,9 @@ namespace FluidFieldSim
 		constexpr float STEEP_RISE = 1.2f * GroundTiles::TEXEL;
 
 		/** @brief Bump when the build changes: older cached tiles are ignored. */
-		constexpr uint32_t CACHE_VERSION = 15;
-		/** @brief Indoors, a mesh floor within this height of the navmesh's is taken for its exact height (navmeshes float a little
-		 * over the floor). */
+		constexpr uint32_t CACHE_VERSION = 16;
+		/** @brief Indoors, a mesh floor within this height of the navmesh's is ground (navmeshes float a little over the floor and
+		 * ramp over steps). */
 		constexpr float NAVMESH_REACH = 48.0f;
 		/** @brief Indoors, the navmesh's floor is widened this many texels into the gaps it leaves at walls and props (48 units),
 		 * so fog reaches the walls. */
@@ -978,10 +978,11 @@ namespace FluidFieldSim
 			return static_cast<float>(a_flag);
 		};
 		if (navmeshed) {
-			// One level: the navmesh's floor, at a mesh floor's exact height where one lies near it
-			std::vector<float> plane(navFloor);
+			// One level: the mesh floor nearest the navmesh's floor. The navmesh only says where (it is a plane over steps, the
+			// fog drawn on it floated over the treads); no mesh floor near it, no ground
+			std::vector<float> plane(navFloor.size(), NO_GROUND);
 			for (std::size_t i = 0; i < plane.size(); i++) {
-				if (plane[i] <= NO_GROUND)
+				if (navFloor[i] <= NO_GROUND)
 					continue;
 				float nearest = NAVMESH_REACH;
 				for (const auto& [height, flag] : { std::pair{ heights[i], flags[i] }, std::pair{ lower[i], lowerFlags[i] } })

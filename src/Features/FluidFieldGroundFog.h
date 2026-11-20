@@ -61,6 +61,10 @@ struct FluidFieldGroundFog : Feature
 
 	Settings settings;
 
+	/** @brief Debug: draws the interior's navmesh round the player as a wireframe (no depth test). Not saved. */
+	void DrawNavmeshOverlay();
+	bool showNavmesh = false;
+
 	/** @brief The settings in force: indoors (in a dungeon), the interior tuning in place of the outdoor one. */
 	Settings ActiveSettings() const;
 
